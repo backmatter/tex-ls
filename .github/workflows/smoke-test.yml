@@ -1,0 +1,785 @@
+name: Smoke Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug-format-repo-scan:
+    name: Scan Repositories
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    outputs:
+      failure_count: ${{ steps.summarize.outputs.failure_count }}
+    env:
+      TARGET_REPOS: |
+        dalcde/cam-notes
+        HoTT/book
+        josephwright/beamer
+        josephwright/etoolbox
+        josephwright/ltx-talk
+        josephwright/siunitx
+        latex3/latex2e
+        latex3/latex3
+        latex3/mathtools
+        latex3/xcolor
+        matze/mtheme
+        mml-book/mml-book.github.io
+        plk/biblatex
+        pgf-tikz/pgf
+        posquit0/Awesome-CV
+        stacks/stacks-project
+        vEnhance/napkin
+        OpenLogicProject/OpenLogic
+        OpenIntroStat/openintro-statistics
+        VictorEijkhout/tex-by-topic
+        mit-pdos/xv6-riscv-book
+        UniMath/SymmetryBook
+        AllenDowney/ThinkStats2
+        AllenDowney/ThinkBayes2
+      # Known non-actionable failures to suppress from issue filing. Each entry
+      # is `repo|path|type`; the path is repo-relative (as `git ls-files`
+      # prints it). Only the *named* failure type is suppressed — if the same
+      # file starts failing a different way (losslessness, timeout, a panic),
+      # that failure is still recorded, so the allowlist can never mask a new
+      # regression. Keep this in sync with TODO.md's record-only roadmap items;
+      # drop an entry the moment meaning can handle the file (it then simply
+      # passes and records nothing). See issue #60.
+      #
+      # The bar for an entry is *statically unmodelable*, not merely unfixed: no
+      # parser change could be correct, because reading the file needs a TeX
+      # engine. In practice that means structural catcode rebinding (catcode
+      # 0/1/2/14 or an active space — our CST's structural vocabulary is `{`/`}`,
+      # so a region that reassigns it is out of reach; `\makeatletter` is *not*
+      # this, it only changes letter classification), catcodes set through
+      # expansion (`\catcode`#1\active` in a macro body — the character is a
+      # parameter, so no static reader can resolve it), balance hidden in a
+      # skipped conditional (`\iffalse}\fi`), or a file closed by state that
+      # lives outside it (macro-expanded `\end{document}`, an `\input` fragment
+      # leaning on its parent's preamble). A real modeling gap we simply have
+      # not fixed yet does **not** belong here — allowlisting it buries the
+      # work. Group entries under a comment naming the root cause and issue.
+      ALLOWLIST: |
+        # Catcode-rebinding bootstrap files: general \catcode handling is an
+        # explicit non-goal (AGENTS.md decision #1), so these stay format-error.
+        latex3/latex3|texmf/tex/latex/base/doc.sty|format-error
+        latex3/latex3|texmf/tex/latex/base/doc-2016-02-15.sty|format-error
+        latex3/latex3|texmf/tex/latex/base/doc-2021-06-01.sty|format-error
+        latex3/latex3|texmf/tex/latex/base/source2edoc.cls|format-error
+        latex3/latex3|texmf/tex/latex/base/shortvrb.sty|format-error
+        latex3/latex3|texmf/tex/latex/base/ltxdoc.cls|format-error
+        latex3/latex3|support/docstrip.tex|format-error
+        latex3/latex3|texmf/tex/latex/base/docstrip.tex|format-error
+        # latex2e is the upstream source repo for the same doc/docstrip sources
+        # (doc.sty is generated from doc.dtx). Same non-goal roots: the doc.sty
+        # variants and doc.dtx carry the `\macro@code` catcode-gymnastics region
+        # (`|` made the escape, `!` a comment, `{`/`}` catcode 12); docstrip.dtx,
+        # ltdefns.dtx, and ltcmd.dtx lean on `\iffalse}\fi`/`\iffalse{\fi`
+        # editor-balance tricks in doc-margin prose (a brace hidden in a skipped
+        # conditional branch). Issue #71.
+        latex3/latex2e|base/doc-2016-02-15.sty|format-error
+        latex3/latex2e|base/doc-2021-06-01.sty|format-error
+        latex3/latex2e|base/doc.dtx|format-error
+        latex3/latex2e|base/docstrip.dtx|format-error
+        latex3/latex2e|base/ltdefns.dtx|format-error
+        latex3/latex2e|base/ltcmd.dtx|format-error
+        # source2edoc.cls closes doc.dtx's `oldcomments` from inside its own
+        # catcode-swapped region (`/gdef/oldc< \end{oldcomments}>`: `/` is the
+        # escape, `<`/`>` the group delimiters). preload.dtx's `xii}` closes a
+        # brace opened on a *different* docstrip guard variant, so only running
+        # docstrip's guard selection balances it. Issue #71.
+        latex3/latex2e|base/source2edoc.cls|format-error
+        latex3/latex2e|base/preload.dtx|format-error
+        # expl3-code.tex rebinds the *structural* catcodes through expl3's own
+        # API: `\char_set_catcode_group_begin:N \^^@` / `_group_end:N` make
+        # `^^@` a brace for a region, so the file's real grouping is invisible
+        # to a `{`/`}`-based reader. Same non-goal as the `\catcode` bootstrap
+        # files above (AGENTS.md decision #1). Issue #71.
+        latex3/latex2e|texmf/tex/latex/l3kernel/expl3-code.tex|format-error
+        # Genuinely broken upstream — one typo each, and meaning reads both
+        # exactly as docstrip and doc.sty do. latex-lab-enumitem.dtx opens a
+        # `\changes{` on a `%%` line (the second `%` comments the line out,
+        # stranding the `}` on the next doc line); latex-lab-new-or-2.dtx comments
+        # out an `\end{plugdecl}` as `% %  \end{plugdecl}`. Issue #71.
+        latex3/latex2e|required/latex-lab/latex-lab-enumitem.dtx|format-error
+        latex3/latex2e|required/latex-lab/latex-lab-new-or-2.dtx|format-error
+        latex3/latex3|l3kernel/testfiles-backend/support/driver.tex|format-error
+        latex3/latex3|texmf/tex/latex/base/nfssfont.tex|format-error
+        latex3/latex3|xpackages/xinitials/xinitials-test.tex|format-error
+        latex3/latex3|xpackages/xor/xo-pfloat.tex|format-error
+        latex3/latex3|xpackages/xor/xo-balance.tex|format-error
+        # array.dtx hides an `\end{macrocode}` with no opener inside a doc-margin
+        # `%\iffalse   % this is a METACOMMENT !` block: doc.sty skips the whole
+        # conditional, so the imbalance never executes. Balance hidden in a
+        # skipped conditional, like docstrip.dtx/ltdefns.dtx above. Issue #71.
+        latex3/latex2e|required/tools/array.dtx|format-error
+        # mathcolor.dtx typesets a deliberately *invalid* example in doc prose:
+        # `\[ \left\{ … \mathcolor{red}{\right\}} \]`, whose own surrounding
+        # sentence says the construct "is not achievable at all because \left and
+        # \right form a group". TeX rejects it for exactly the reason meaning
+        # does, so no parser change is correct here. Issue #71.
+        latex3/latex2e|required/graphics/mathcolor.dtx|format-error
+        # lscape.dtx wraps its whole manual in a doc-prose `\begin{landscape}`
+        # whose closer is `\MaybeStop{\end{landscape}}` — doc.sty's finishing-code
+        # macro (the `\StopEventually` successor) runs its argument at TeX time,
+        # so the `\end{landscape}` lives inside a macro-argument brace group. The
+        # brace-group gate rightly reads that `\end` as macro code (like
+        # `\StopEventually{\end{document}}` in the gate itself), which leaves the
+        # top-level `\begin` with no reachable closer. Pairing them needs to know
+        # `\MaybeStop` executes its argument — macro semantics, a TeX engine. The
+        # symmetric begin-side demotion is out of reach structurally: a top-level
+        # forward scan cannot tell a macrocode-chunk brace from a real group (why
+        # `environment_escapes_group` bails at `group_depth == 0`). Issue #71.
+        latex3/latex2e|required/graphics/lscape.dtx|format-error
+        # Genuinely broken upstream (a commented-out balancing \end).
+        latex3/latex3|xpackages/xor/xo-page.dtx|format-error
+        latex3/latex3|xpackages/galley/galley2.dtx|format-error
+        # pgfmanual fragments: these are \input chunks of pgfmanual.tex, not
+        # standalone documents. They lean on the parent preamble
+        # (pgfmanual-en-macros.tex) that makes `|` an active short-verb char
+        # (\gdef|{...\verb|...}) and defines the `codeexample` verbatim
+        # environment. Neither is visible when meaning parses a fragment in
+        # isolation, and resolving external catcode/short-verb state is a
+        # non-goal (AGENTS.md decision #1), so the unbalanced `{`/environments
+        # in verbatim spans stay format-error. See issue #63.
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-base-arrows.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-base-layers.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-dv-axes.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-gd-display-layer.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-library-external.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-library-matrices.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-library-petri.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-library-profiler.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-library-rdf.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-tikz-coordinates.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-tikz-shapes.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-tutorial-map.tex|format-error
+        pgf-tikz/pgf|doc/generic/pgf/pgfmanual-en-tutorial-nodes.tex|format-error
+        # pgf source: catcode-rebinding bootstrap regions (`|`/`/` rebound to
+        # the escape char with `\` made `other`, `[`/`]`/`%`/`"` reassigned)
+        # unbalance normal brace/escape lexing; general \catcode handling is a
+        # non-goal (AGENTS.md decision #1). tikzlibrarygraphs registers active
+        # `\]`/`\)` as literal data (`\tikz@lib@prepare@active{\]}{...}`), which
+        # draws a conservative orphan-closer diagnostic. Issue #63.
+        pgf-tikz/pgf|tex/generic/pgf/basiclayer/pgfcoreshade.code.tex|format-error
+        pgf-tikz/pgf|tex/generic/pgf/frontendlayer/tikz/libraries/graphs/tikzlibrarygraphs.code.tex|format-error
+        pgf-tikz/pgf|tex/generic/pgf/frontendlayer/tikz/libraries/tikzexternalshared.code.tex|format-error
+        pgf-tikz/pgf|tex/generic/pgf/libraries/pgflibraryprofiler.code.tex|format-error
+        pgf-tikz/pgf|tex/generic/pgf/modules/pgfmoduleplot.code.tex|format-error
+        pgf-tikz/pgf|tex/generic/pgf/utilities/pgfutil-common.tex|format-error
+        pgf-tikz/pgf|tex/latex/pgf/doc/pgfmanual-en-macros.tex|format-error
+        pgf-tikz/pgf|tex/latex/pgf/doc/pgfmanual.prettyprinter.code.tex|format-error
+        # beamer user-guide fragments: the `beamerug-*.tex` files are `\include`
+        # chunks of `beameruserguide.tex` (each carries a `% !TeX root =`
+        # header), not standalone documents. The parent (an `ltxdoc`/doc.sty
+        # manual) makes `|` an active short-verb char, so doc prose freely writes
+        # environment tokens verbatim inside it -- `|\begin{slide}|`,
+        # `|\end{frame}|`, `|\begin{document}|`, `|[<|...|>]|`. That short-verb
+        # catcode state lives in the parent preamble and is invisible when
+        # meaning parses a fragment in isolation; guessing `|` is verbatim is an
+        # inherited-catcode assumption we refuse (AGENTS.md decision #1). So the
+        # environment/`\end` tokens in those spans read as real and go
+        # unbalanced -> format-error. Same class as the pgfmanual `\input`
+        # chunks above. Issue #91.
+        josephwright/beamer|doc/beamerug-emulation.tex|format-error
+        josephwright/beamer|doc/beamerug-frames.tex|format-error
+        josephwright/beamer|doc/beamerug-localstructure.tex|format-error
+        josephwright/beamer|doc/beamerug-nonpresentation.tex|format-error
+        josephwright/beamer|doc/beamerug-overlays.tex|format-error
+        josephwright/beamer|doc/beamerug-tricks.tex|format-error
+        # Genuinely broken upstream: siunitx-complex.dtx has two stray `\end{macro}`
+        # in its l3doc doc prose (lines 420, 994 -- three `\end{macro}` closing two
+        # `\begin{macro}`). l3doc's `macro` is an ordinary stack environment, so an
+        # extra `\end{macro}` is a LaTeX error: TeX itself reports `\begin{implementation}
+        # ... ended by \end{macro}`, exactly as meaning does. LaTeX recovers and still
+        # ships a PDF, so the latent error stays in the source; no parser change is
+        # correct here. Issue #93.
+        josephwright/siunitx|siunitx-complex.dtx|format-error
+        # Genuinely broken upstream: biblatex-quickstart.tex has a stray
+        # `\end{ltxexample}` (line 352) with no opener -- a leftover from a 2019
+        # rewrite, still on upstream's dev branch. `ltxexample` is an ordinary
+        # lstlisting-based environment, so LaTeX reports
+        # `\begin{document} ended by \end{ltxexample}` for exactly the reason
+        # meaning does; the other two diagnostics in the file are that error's
+        # cascade. No parser change is correct here. Issue #98.
+        plk/biblatex|doc/latex/biblatex/biblatex-quickstart.tex|format-error
+        # Genuinely broken upstream: both style files have a stray `{` before
+        # `\newcommand{\eocesol}`. The group remains open after the include, and
+        # LaTeX aborts at `\begin{document}` with "Loading a class or package in
+        # a group." No parser change is correct here. Issue #142.
+        OpenIntroStat/openintro-statistics|extraTeX/style/style.tex|format-error
+        OpenIntroStat/openintro-statistics|extraTeX/style/style_simple.tex|format-error
+        # fs.tex is input to xv6-riscv-book's `lineref` preprocessor, not the
+        # LaTeX passed to pdflatex. Its `\linerefs{file:/regex/,/regex/}` DSL
+        # permits raw regex braces and `\)`; the preprocessor replaces each
+        # invocation with ordinary LaTeX before compilation. Issue #146.
+        mit-pdos/xv6-riscv-book|fs.tex|format-error
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
+          prefix-key: "v1-rust"
+
+      - name: Build meaning binary
+        run: cargo build --release
+
+      - name: Scan repositories for debug-format regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEANING_BIN="$GITHUB_WORKSPACE/target/release/meaning"
+          MEANING_SHA="$(git rev-parse HEAD)"
+          MEANING_VERSION="$("$MEANING_BIN" --version | head -n 1 || true)"
+          export MEANING_BIN MEANING_SHA MEANING_VERSION
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan/github"
+          # The artifact carries diagnostics, not full upstream checkouts.
+          REPOS_DIR="$RUNNER_TEMP/meaning-debug-format-repos/github"
+          mkdir -p "$REPOS_DIR"
+
+          while IFS= read -r repo; do
+            if [ -z "$repo" ]; then
+              continue
+            fi
+            repo_dir="$REPOS_DIR/${repo//\//__}"
+            git clone --depth 1 "https://github.com/${repo}.git" "$repo_dir"
+            repo_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+            scripts/smoke_scan_project.sh \
+              "$RESULTS_DIR" github "$repo" "$repo_sha" "$repo_dir" tracked project
+          done <<< "$TARGET_REPOS"
+
+      - name: Summarize scan results
+        id: summarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan/github"
+          FAILURES_TSV="$RESULTS_DIR/failures.tsv"
+          failure_count="$(($(wc -l < "$FAILURES_TSV") - 1))"
+          if [ "$failure_count" -lt 0 ]; then
+            failure_count=0
+          fi
+          suppressed_count=0
+          if [ -f "$RESULTS_DIR/suppressed_count" ]; then
+            suppressed_count="$(cat "$RESULTS_DIR/suppressed_count")"
+          fi
+
+          echo "failure_count=$failure_count" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Meaning debug format repo scan"
+            echo ""
+            echo "- Failure records: $failure_count"
+            echo "- Suppressed (allowlisted, record-only): $suppressed_count"
+            echo "- Files scanned: $(cat "$RESULTS_DIR/scanned_count" 2>/dev/null || echo 0)"
+            echo "- Files skipped: $(cat "$RESULTS_DIR/skipped_count" 2>/dev/null || echo 0)"
+            echo "- Scanned extensions: \`.tex\`, \`.sty\`, \`.cls\`, \`.dtx\`, \`.ins\`, \`.bib\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan results artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-format-repo-scan-results
+          path: ${{ runner.temp }}/meaning-debug-format-scan/github
+          if-no-files-found: error
+
+  debug-format-arxiv-scan:
+    name: Scan arXiv Projects
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      failure_count: ${{ steps.summarize.outputs.failure_count }}
+    env:
+      # This source has an unclosed delimiter upstream. Keeping the raw file
+      # still exercises parser losslessness and exposes every other failure
+      # kind without filing the known format-error each week. See issue #152.
+      ALLOWLIST: |
+        arxiv:2104.11857v1|Main-Kerr-arxiv.tex|format-error
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: "false"
+          prefix-key: "v1-rust"
+
+      - name: Build meaning binary
+        run: cargo build --release
+
+      - name: Fetch pinned arXiv source projects
+        run: |
+          scripts/fetch_arxiv_sources.py \
+            --manifest tests/arxiv_smoke_sources.tsv \
+            --output "$RUNNER_TEMP/meaning-arxiv-sources" \
+            --index "$RUNNER_TEMP/meaning-arxiv-sources.tsv"
+
+      - name: Scan arXiv projects for debug-format regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          MEANING_BIN="$GITHUB_WORKSPACE/target/release/meaning"
+          MEANING_SHA="$(git rev-parse HEAD)"
+          MEANING_VERSION="$("$MEANING_BIN" --version | head -n 1 || true)"
+          export MEANING_BIN MEANING_SHA MEANING_VERSION
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan/arxiv"
+
+          tail -n +2 "$RUNNER_TEMP/meaning-arxiv-sources.tsv" \
+            | while IFS=$'\t' read -r source revision project_dir; do
+                scripts/smoke_scan_project.sh \
+                  "$RESULTS_DIR" arxiv "$source" "$revision" "$project_dir" all none
+              done
+
+      - name: Summarize scan results
+        id: summarize
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan/arxiv"
+          FAILURES_TSV="$RESULTS_DIR/failures.tsv"
+          failure_count="$(($(wc -l < "$FAILURES_TSV") - 1))"
+          if [ "$failure_count" -lt 0 ]; then
+            failure_count=0
+          fi
+          suppressed_count="$(cat "$RESULTS_DIR/suppressed_count" 2>/dev/null || echo 0)"
+
+          echo "failure_count=$failure_count" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Meaning debug format arXiv scan"
+            echo ""
+            echo "- Failure records: $failure_count"
+            echo "- Suppressed (allowlisted, record-only): $suppressed_count"
+            echo "- Files scanned: $(cat "$RESULTS_DIR/scanned_count" 2>/dev/null || echo 0)"
+            echo "- Files skipped: $(cat "$RESULTS_DIR/skipped_count" 2>/dev/null || echo 0)"
+            echo "- Scanned extensions: \`.tex\`, \`.sty\`, \`.cls\`, \`.dtx\`, \`.ins\`, \`.bib\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload scan results artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: debug-format-arxiv-scan-results
+          path: ${{ runner.temp }}/meaning-debug-format-scan/arxiv
+          if-no-files-found: error
+
+  debug-format-repo-scan-issues:
+    name: Create Regression Issues
+    needs:
+      - debug-format-repo-scan
+      - debug-format-arxiv-scan
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - name: Download repository scan results
+        uses: actions/download-artifact@v8
+        with:
+          name: debug-format-repo-scan-results
+          path: ${{ runner.temp }}/meaning-debug-format-scan/github
+
+      - name: Download arXiv scan results
+        uses: actions/download-artifact@v8
+        with:
+          name: debug-format-arxiv-scan-results
+          path: ${{ runner.temp }}/meaning-debug-format-scan/arxiv
+
+      - name: Merge scan results
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan"
+          head -n 1 "$RESULTS_DIR/github/failures.tsv" > "$RESULTS_DIR/failures.tsv"
+          tail -n +2 "$RESULTS_DIR/github/failures.tsv" >> "$RESULTS_DIR/failures.tsv"
+          tail -n +2 "$RESULTS_DIR/arxiv/failures.tsv" >> "$RESULTS_DIR/failures.tsv"
+
+      - name: Create or update regression issues
+        if: needs.debug-format-repo-scan.outputs.failure_count != '0' || needs.debug-format-arxiv-scan.outputs.failure_count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan"
+          FAILURES_TSV="$RESULTS_DIR/failures.tsv"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          existing_labels="$(gh label list --repo "$GITHUB_REPOSITORY" --limit 500 --json name --jq '.[].name')"
+
+          # GitHub rejects issue and comment bodies over 65536 characters. A
+          # report line is a whole formatted LaTeX line, so a 120-line excerpt
+          # can be hundreds of kilobytes; bound it by bytes and width too. Both
+          # awk passes run under LC_ALL=C so `length` counts bytes and a clamp
+          # never lands mid-character.
+          MAX_EXCERPT_BYTES=20000
+          MAX_REPORT_LINES=120
+          MAX_REPORT_LINE_BYTES=1000
+          MAX_BODY_BYTES=60000
+
+          report_excerpt_of() {
+            LC_ALL=C awk \
+              -v max_bytes="$MAX_EXCERPT_BYTES" \
+              -v max_lines="$MAX_REPORT_LINES" \
+              -v max_width="$MAX_REPORT_LINE_BYTES" '
+              NR > max_lines { print "[report truncated: line limit reached]"; exit }
+              {
+                line = $0
+                if (length(line) > max_width) {
+                  line = substr(line, 1, max_width) " [line truncated]"
+                }
+                total += length(line) + 1
+                if (total > max_bytes) {
+                  print "[report truncated: size limit reached]"
+                  exit
+                }
+                print line
+              }
+            ' "$1"
+          }
+
+          clamp_body() {
+            local file="$1"
+            if [ "$(wc -c < "$file")" -le "$MAX_BODY_BYTES" ]; then
+              return 0
+            fi
+            local clamped="$file.clamped"
+            LC_ALL=C awk -v max_bytes="$MAX_BODY_BYTES" '
+              { total += length($0) + 1; if (total > max_bytes) exit; print }
+            ' "$file" > "$clamped"
+            printf '\n[Body truncated. See the debug-format scan artifacts for full logs.]\n' >> "$clamped"
+            mv "$clamped" "$file"
+          }
+
+          has_label() {
+            local target="$1"
+            grep -Fxq "$target" <<< "$existing_labels"
+          }
+
+          ensure_label() {
+            local name="$1"
+            local color="$2"
+            local description="$3"
+            if has_label "$name"; then
+              return 0
+            fi
+            if gh label create "$name" --repo "$GITHUB_REPOSITORY" --color "$color" --description "$description" >/dev/null 2>&1; then
+              existing_labels+=$'\n'"$name"
+            else
+              echo "warning: could not create label '$name'; issues will be created without that label"
+            fi
+          }
+
+          tail -n +2 "$FAILURES_TSV" | awk -F '\t' '{print $1 "\t" $2}' | sort -u | while IFS=$'\t' read -r source failure_type; do
+            if [ -z "$source" ] || [ -z "$failure_type" ]; then
+              continue
+            fi
+
+            case "$source" in
+              arxiv:*) marker="meaning-debug-format-key:source=${source};type=${failure_type}" ;;
+              *) marker="meaning-debug-format-key:repo=${source};type=${failure_type}" ;;
+            esac
+            title="CI: debug-format regression in ${source} (${failure_type})"
+            count="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {c++} END {print c+0}' "$FAILURES_TSV")"
+            samples="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {printf "- `%s`\n", $3; c++; if (c == 10) exit}' "$FAILURES_TSV")"
+            sample_file="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $3; exit}' "$FAILURES_TSV")"
+            sample_log_rel="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $4; exit}' "$FAILURES_TSV")"
+            sample_report_rel="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $5; exit}' "$FAILURES_TSV")"
+            sample_source_revision="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $6; exit}' "$FAILURES_TSV")"
+            sample_meaning_sha="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $7; exit}' "$FAILURES_TSV")"
+            sample_meaning_version="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $8; exit}' "$FAILURES_TSV")"
+            sample_idempotency_input_rel="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $9; exit}' "$FAILURES_TSV")"
+            sample_idempotency_once_rel="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $10; exit}' "$FAILURES_TSV")"
+            sample_idempotency_twice_rel="$(awk -F '\t' -v r="$source" -v t="$failure_type" '$1 == r && $2 == t {print $11; exit}' "$FAILURES_TSV")"
+            if [ -n "$sample_report_rel" ]; then
+              sample_report_path="$RESULTS_DIR/$sample_report_rel"
+            else
+              sample_report_path=""
+            fi
+
+            report_excerpt=""
+            sample_diff_line=""
+            if [ -n "$sample_report_path" ] && [ -f "$sample_report_path" ]; then
+              report_excerpt="$(report_excerpt_of "$sample_report_path")"
+              sample_diff_line="$(grep -Eo 'Approx\. diff start line: [0-9]+' "$sample_report_path" | head -n 1 | awk '{print $NF}' || true)"
+            fi
+
+            ISSUE_TITLE="$title"
+            export ISSUE_TITLE
+            issue_number="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json number,title --jq '.[] | select(.title == env.ISSUE_TITLE) | .number' | head -n 1)"
+
+            if [ -n "$issue_number" ]; then
+              comment_file="$RUNNER_TEMP/meaning-issue-comment.md"
+              {
+                echo "Regression still reproduces for \`$source\` (\`$failure_type\`)."
+                echo ""
+                echo "- New failure records: $count"
+                echo "- Workflow run: $RUN_URL"
+                echo "- Meaning command: \`meaning debug format --checks all --report <FILE>\`"
+                if [ -n "$sample_source_revision" ]; then
+                  case "$source" in
+                    arxiv:*) echo "- arXiv source archive SHA-256: \`$sample_source_revision\`" ;;
+                    *) echo "- Target repository commit: \`$sample_source_revision\`" ;;
+                  esac
+                fi
+                if [ -n "$sample_meaning_version" ]; then
+                  echo "- Meaning version used in scan: \`$sample_meaning_version\`"
+                fi
+                if [ -n "$sample_meaning_sha" ]; then
+                  echo "- Meaning commit used in scan: \`$sample_meaning_sha\`"
+                fi
+                if [ -n "$sample_log_rel" ]; then
+                  echo "- Sample log path: \`$sample_log_rel\`"
+                fi
+                if [ -n "$sample_report_rel" ]; then
+                  echo "- Sample report path: \`$sample_report_rel\`"
+                fi
+                if [ -n "$sample_idempotency_input_rel" ]; then
+                  echo "- Sample idempotency input artifact: \`$sample_idempotency_input_rel\`"
+                fi
+                if [ -n "$sample_idempotency_once_rel" ]; then
+                  echo "- Sample idempotency pass1 artifact: \`$sample_idempotency_once_rel\`"
+                fi
+                if [ -n "$sample_idempotency_twice_rel" ]; then
+                  echo "- Sample idempotency pass2 artifact: \`$sample_idempotency_twice_rel\`"
+                fi
+                if [ -n "$sample_diff_line" ]; then
+                  echo "- Approx. diff start line: $sample_diff_line"
+                fi
+                echo ""
+                echo "Sample files:"
+                echo "$samples"
+                if [ -n "$sample_file" ] && [ -n "$sample_source_revision" ]; then
+                  echo ""
+                  echo "Reproduce locally:"
+                  echo ""
+                  echo '```bash'
+                  case "$source" in
+                    arxiv:*)
+                      arxiv_id="${source#arxiv:}"
+                      echo "curl --fail --location https://arxiv.org/src/$arxiv_id --output source.tar.gz"
+                      echo "mkdir source && tar -xzf source.tar.gz -C source"
+                      echo "cd source"
+                      echo "meaning --no-config debug format --checks all --report \"$sample_file\""
+                      ;;
+                    *)
+                      echo "git clone https://github.com/$source.git"
+                      echo "cd $(basename "$source")"
+                      echo "git checkout $sample_source_revision"
+                      echo "meaning debug format --checks all --report \"$sample_file\""
+                      ;;
+                  esac
+                  echo '```'
+                fi
+                if [ -n "$report_excerpt" ]; then
+                  echo ""
+                  echo "<details>"
+                  echo "<summary>Sample report excerpt</summary>"
+                  echo ""
+                  echo '````text'
+                  printf '%s\n' "$report_excerpt"
+                  echo '````'
+                  echo "</details>"
+                fi
+              } > "$comment_file"
+              clamp_body "$comment_file"
+              gh issue comment "$issue_number" --repo "$GITHUB_REPOSITORY" --body-file "$comment_file"
+            else
+              body_file="$RUNNER_TEMP/meaning-issue-body.md"
+              {
+                echo "<!-- $marker -->"
+                echo "# Debug-format regression detected"
+                echo ""
+                echo "- Target source: \`$source\`"
+                echo "- Failure type: \`$failure_type\`"
+                echo "- Failure records in this run: $count"
+                echo "- Workflow run: $RUN_URL"
+                echo "- Meaning command: \`meaning debug format --checks all --report <FILE>\`"
+                if [ -n "$sample_source_revision" ]; then
+                  case "$source" in
+                    arxiv:*) echo "- arXiv source archive SHA-256: \`$sample_source_revision\`" ;;
+                    *) echo "- Target repository commit: \`$sample_source_revision\`" ;;
+                  esac
+                fi
+                if [ -n "$sample_meaning_version" ]; then
+                  echo "- Meaning version used in scan: \`$sample_meaning_version\`"
+                fi
+                if [ -n "$sample_meaning_sha" ]; then
+                  echo "- Meaning commit used in scan: \`$sample_meaning_sha\`"
+                fi
+                if [ -n "$sample_file" ]; then
+                  echo "- Sample file: \`$sample_file\`"
+                fi
+                if [ -n "$sample_log_rel" ]; then
+                  echo "- Sample log path: \`$sample_log_rel\`"
+                fi
+                if [ -n "$sample_report_rel" ]; then
+                  echo "- Sample report path: \`$sample_report_rel\`"
+                fi
+                if [ -n "$sample_idempotency_input_rel" ]; then
+                  echo "- Sample idempotency input artifact: \`$sample_idempotency_input_rel\`"
+                fi
+                if [ -n "$sample_idempotency_once_rel" ]; then
+                  echo "- Sample idempotency pass1 artifact: \`$sample_idempotency_once_rel\`"
+                fi
+                if [ -n "$sample_idempotency_twice_rel" ]; then
+                  echo "- Sample idempotency pass2 artifact: \`$sample_idempotency_twice_rel\`"
+                fi
+                if [ -n "$sample_diff_line" ]; then
+                  echo "- Approx. diff start line: $sample_diff_line"
+                fi
+                echo ""
+                echo "Sample files:"
+                echo "$samples"
+                if [ -n "$sample_file" ] && [ -n "$sample_source_revision" ]; then
+                  echo ""
+                  echo "Reproduce locally:"
+                  echo ""
+                  echo '```bash'
+                  case "$source" in
+                    arxiv:*)
+                      arxiv_id="${source#arxiv:}"
+                      echo "curl --fail --location https://arxiv.org/src/$arxiv_id --output source.tar.gz"
+                      echo "mkdir source && tar -xzf source.tar.gz -C source"
+                      echo "cd source"
+                      echo "meaning --no-config debug format --checks all --report \"$sample_file\""
+                      ;;
+                    *)
+                      echo "git clone https://github.com/$source.git"
+                      echo "cd $(basename "$source")"
+                      echo "git checkout $sample_source_revision"
+                      echo "meaning debug format --checks all --report \"$sample_file\""
+                      ;;
+                  esac
+                  echo '```'
+                fi
+                if [ -n "$report_excerpt" ]; then
+                  echo ""
+                  echo "<details>"
+                  echo "<summary>Sample report excerpt</summary>"
+                  echo ""
+                  echo '````text'
+                  printf '%s\n' "$report_excerpt"
+                  echo '````'
+                  echo "</details>"
+                fi
+                echo ""
+                echo "See the debug-format scan artifacts for full logs."
+              } > "$body_file"
+              clamp_body "$body_file"
+
+              ensure_label "ci" "0366D6" "Continuous integration"
+              ensure_label "debug-format" "5319E7" "Meaning debug format scan regressions"
+              case "$failure_type" in
+                idempotency) failure_color="B60205" ;;
+                losslessness) failure_color="D93F0B" ;;
+                format-error) failure_color="FBCA04" ;;
+                content-change) failure_color="B60205" ;;
+                comment-change) failure_color="D93F0B" ;;
+                timeout) failure_color="1D76DB" ;;
+                unknown) failure_color="6E7781" ;;
+                *) failure_color="6E7781" ;;
+              esac
+              ensure_label "$failure_type" "$failure_color" "Regression category from debug format scan"
+
+              label_args=()
+              for label in "ci" "debug-format" "$failure_type"; do
+                if has_label "$label"; then
+                  label_args+=(--label "$label")
+                fi
+              done
+
+              gh issue create \
+                --repo "$GITHUB_REPOSITORY" \
+                --title "$title" \
+                "${label_args[@]}" \
+                --body-file "$body_file"
+            fi
+          done
+
+      - name: Comment on issues that no longer reproduce
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RESULTS_DIR="$RUNNER_TEMP/meaning-debug-format-scan"
+          FAILURES_TSV="$RESULTS_DIR/failures.tsv"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Build the set of source/failure-type pairs that failed in this run.
+          current_keys="$RUNNER_TEMP/meaning-current-keys.txt"
+          : > "$current_keys"
+          if [ -f "$FAILURES_TSV" ]; then
+            tail -n +2 "$FAILURES_TSV" \
+              | awk -F '\t' 'NF >= 2 && $1 != "" && $2 != "" {
+                  if ($1 ~ /^arxiv:/) printf "meaning-debug-format-key:source=%s;type=%s\n", $1, $2
+                  else printf "meaning-debug-format-key:repo=%s;type=%s\n", $1, $2
+                }' \
+              | sort -u > "$current_keys"
+          fi
+
+          # List open issues that carry our marker, then check each one.
+          open_issues_json="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search 'in:body "meaning-debug-format-key:"' \
+            --limit 500 \
+            --json number,body)"
+
+          echo "$open_issues_json" | jq -c '.[]' | while IFS= read -r issue; do
+            number="$(jq -r '.number' <<< "$issue")"
+            body="$(jq -r '.body' <<< "$issue")"
+            marker="$(grep -Eo 'meaning-debug-format-key:(repo|source)=[^;]+;type=[^[:space:]<>]+' <<< "$body" | head -n 1 || true)"
+            if [ -z "$marker" ]; then
+              continue
+            fi
+            if grep -Fxq "$marker" "$current_keys"; then
+              # Still reproducing — handled by the create/update step above.
+              continue
+            fi
+
+            # Avoid spamming: skip if the latest comment already reports a green run.
+            latest_comment="$(gh issue view "$number" --repo "$GITHUB_REPOSITORY" --json comments \
+              --jq '.comments | last | .body // ""')"
+            if grep -Fq 'No longer reproducing' <<< "$latest_comment"; then
+              continue
+            fi
+
+            comment_file="$RUNNER_TEMP/meaning-issue-green-comment.md"
+            {
+              echo "No longer reproducing in the latest scan."
+              echo ""
+              echo "- Marker: \`$marker\`"
+              echo "- Workflow run: $RUN_URL"
+              echo ""
+              echo "If this stays green over the next few weekly scans, this issue can be closed."
+            } > "$comment_file"
+            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body-file "$comment_file"
+          done
+
+      - name: Fail workflow when regressions are detected
+        if: needs.debug-format-repo-scan.outputs.failure_count != '0' || needs.debug-format-arxiv-scan.outputs.failure_count != '0'
+        env:
+          REPO_FAILURES: ${{ needs.debug-format-repo-scan.outputs.failure_count }}
+          ARXIV_FAILURES: ${{ needs.debug-format-arxiv-scan.outputs.failure_count }}
+        shell: bash
+        run: |
+          echo "Debug format regressions detected: $((REPO_FAILURES + ARXIV_FAILURES))"
+          exit 1

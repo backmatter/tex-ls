@@ -1,0 +1,243 @@
+{
+  "name": "meaning",
+  "displayName": "Meaning: LaTeX language tools",
+  "description": "Language server, formatter, and linter for LaTeX",
+  "version": "0.1.0",
+  "publisher": "backmatter",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backmatter/meaning.git"
+  },
+  "homepage": "https://backmatter.github.io/meaning/",
+  "bugs": {
+    "url": "https://github.com/backmatter/meaning/issues"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Formatters",
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "latex",
+    "tex",
+    "formatter",
+    "linter",
+    "language-server"
+  ],
+  "activationEvents": [
+    "onLanguage:latex",
+    "onLanguage:tex",
+    "onLanguage:bibtex",
+    "workspaceContains:**/*.tex"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "Meaning",
+      "properties": {
+        "meaning.formatting.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Meaning as a formatter. When `false`, Meaning contributes no formatting edits (document, range, and on-type formatting), so another formatter can own LaTeX without disabling the extension. The language server keeps running for diagnostics and language features."
+        },
+        "meaning.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show Meaning diagnostics (the linter) in the editor. When `false`, all diagnostics are suppressed, including the syntax/parse errors that a `meaning.toml` `[lint]` selection cannot silence. Formatting and language features are unaffected."
+        },
+        "meaning.languageFeatures.enable": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Enable Meaning language features: hover, completion, signature help, go-to-definition, references, document/workspace symbols, rename, code actions, folding, selection ranges, and document links. When `false`, these are suppressed. Formatting and diagnostics are unaffected."
+        },
+        "meaning.lineWidth": {
+          "type": "number",
+          "markdownDescription": "Maximum line width before the formatter breaks a line. A fallback only: a discovered `meaning.toml` always wins. Unset by default."
+        },
+        "meaning.indentWidth": {
+          "type": "number",
+          "markdownDescription": "Spaces per indent step. A fallback only: a discovered `meaning.toml` wins outright, and absent one your editor's tab size wins. Unset by default."
+        },
+        "meaning.texmf": {
+          "type": "object",
+          "default": {},
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to scan the TEXMF tree at all."
+            },
+            "roots": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [],
+              "description": "Extra TEXMF root directories to index ahead of the discovered ones."
+            },
+            "useKpsewhich": {
+              "type": "boolean",
+              "default": true,
+              "description": "Whether to shell out to `kpsewhich` to discover TEXMF roots."
+            }
+          },
+          "markdownDescription": "How the language server discovers the installed TeX tree, for document links, package hover, go-to-definition, and installed-set completion. Where TeX is installed is a fact about the machine, not the project, so this lives here rather than in `meaning.toml`. Never affects `meaning format` or `meaning lint`."
+        },
+        "meaning.forwardSearch.executable": {
+          "type": "string",
+          "markdownDescription": "PDF viewer launched by the **Meaning: Forward Search** command. A program name, **not a command line** \u2014 it is spawned directly, with no shell, so flags must go in `#meaning.forwardSearch.args#`. Unset by default, which disables forward search."
+        },
+        "meaning.forwardSearch.args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "markdownDescription": "Arguments for the viewer. `%f` is the file the cursor is in, `%p` the root document's PDF, `%l` the line number counting from 1, and `%%f` a literal `%f`. Required \u2014 forward search stays off until both this and `#meaning.forwardSearch.executable#` are set. For zathura: `[\"--synctex-forward\", \"%l:1:%f\", \"%p\"]`."
+        },
+        "meaning.executableStrategy": {
+          "type": "string",
+          "enum": [
+            "bundled",
+            "environment",
+            "path"
+          ],
+          "enumDescriptions": [
+            "Use the binary bundled inside the extension; fall back to downloading from GitHub if none is bundled or `meaning.version`/`meaning.releaseTag` is set explicitly (default).",
+            "Look for `meaning` on the system PATH.",
+            "Use the binary at `meaning.executablePath`."
+          ],
+          "default": "environment",
+          "markdownDescription": "Strategy used to locate the `meaning` executable for the language server."
+        },
+        "meaning.executablePath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "markdownDescription": "Path to the `meaning` executable. Only used when `meaning.executableStrategy` is set to `path`."
+        },
+        "meaning.version": {
+          "type": "string",
+          "default": "latest",
+          "description": "Meaning version to install (for example: latest or 0.2.0)."
+        },
+        "meaning.releaseTag": {
+          "type": "string",
+          "default": "latest",
+          "description": "Advanced override for exact GitHub release tag (for example: v0.2.0). If explicitly set, this takes precedence over meaning.version."
+        },
+        "meaning.githubRepo": {
+          "type": "string",
+          "default": "backmatter/meaning",
+          "description": "GitHub repository used for Meaning binary downloads (<owner>/<repo>)."
+        },
+        "meaning.serverArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional command-line arguments passed after `meaning lsp`."
+        },
+        "meaning.serverEnv": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Environment variables merged into the Meaning language server process."
+        },
+        "meaning.extraPath": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra PATH entries prepended for the Meaning language server process."
+        },
+        "meaning.logLevel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            null,
+            "off",
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "default": null,
+          "markdownDescription": "Log level for the Meaning language server. Maps to the `RUST_LOG` environment variable. Leave unset to use the server's default. If `meaning.serverEnv.RUST_LOG` is also set, it takes precedence."
+        },
+        "meaning.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace communication between VS Code and the Meaning language server."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "[latex]": {
+        "editor.defaultFormatter": "backmatter.meaning"
+      }
+    },
+    "commands": [
+      {
+        "command": "meaning.restart",
+        "title": "Restart Server",
+        "category": "Meaning"
+      },
+      {
+        "command": "meaning.forwardSearch",
+        "title": "Forward Search",
+        "category": "Meaning"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run clean && npm run check-types && npm run bundle:prod",
+    "compile": "npm run clean && npm run check-types && npm run bundle",
+    "clean": "rm -rf dist",
+    "check-types": "tsc --noEmit -p .",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --sourcemap --external:vscode --outfile=dist/extension.js",
+    "bundle:prod": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --minify --external:vscode --outfile=dist/extension.js",
+    "watch": "npm-run-all -p watch:esbuild watch:tsc",
+    "watch:esbuild": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --sourcemap --watch --external:vscode --outfile=dist/extension.js",
+    "watch:tsc": "tsc --noEmit -w -p .",
+    "package": "vsce package",
+    "test": "esbuild tests/zip.test.ts --bundle --platform=node --format=cjs --outfile=dist/zip.test.cjs && node --test dist/zip.test.cjs"
+  },
+  "dependencies": {
+    "tar": "^7.5.22",
+    "vscode-languageclient": "^10.1.1",
+    "fflate": "^0.8.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "^3.9.2",
+    "esbuild": "^0.28.2",
+    "npm-run-all2": "^9.0.3",
+    "typescript": "^7.0.2"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=24.15.0 <25",
+      "onFail": "error"
+    }
+  }
+}

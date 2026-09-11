@@ -1,0 +1,127 @@
+name: Documentation
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+    tags:
+      # Release tags for the CLI stream; only these (and a manual dispatch)
+      # deploy the built book to Pages. Branch pushes and PRs build-only.
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history so the sitemap can derive per-page <lastmod> from git.
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Cache cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            docs/doc-utils/target
+          key: ${{ runner.os }}-docs-${{ hashFiles('docs/doc-utils/Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-docs-
+
+      # Workspace target cache for the playground wasm build (the cache above
+      # only covers the doc-utils preprocessor).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs-wasm
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      # Build the playground's wasm bundle before the mdBook build so it is
+      # copied into the book alongside the committed playground assets.
+      - name: Build playground wasm bundle
+        run: >-
+          wasm-pack build crates/meaning-wasm --target web --release
+          --out-dir ../../docs/src/playground/pkg
+
+      - uses: jontze/action-mdbook@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Build the version-substitution preprocessor up front so the (optional)
+      # plugin actually runs during `mdbook build`. Without this the build still
+      # succeeds but ships raw `{{ meaning-version }}` markers.
+      - name: Build docs preprocessor
+        run: cargo build --manifest-path docs/doc-utils/Cargo.toml
+
+      - name: Build documentation
+        run: mdbook build docs
+
+      # mdbook has no `canonical-site-url` setting (rust-lang/mdBook#2706), so
+      # inject a <link rel="canonical"> into every rendered page post-build.
+      - name: Inject canonical links
+        run: |
+          cargo run --quiet --manifest-path docs/doc-utils/Cargo.toml \
+            --bin canonical -- docs/book https://backmatter.github.io/meaning/
+
+      # mdbook has no built-in sitemap; generate one from the rendered pages.
+      # `lastmod` is derived from git history, so this runs against full history.
+      - name: Generate sitemap
+        run: |
+          cargo run --quiet --manifest-path docs/doc-utils/Cargo.toml \
+            --bin sitemap -- docs/book https://backmatter.github.io/meaning/
+
+      - name: Publish installers
+        run: |
+          install -m 0644 scripts/meaning-installer.sh docs/book/install
+          install -m 0644 scripts/meaning-installer.ps1 docs/book/install.ps1
+          cmp scripts/meaning-installer.sh docs/book/install
+          cmp scripts/meaning-installer.ps1 docs/book/install.ps1
+          sh -n docs/book/install
+
+      - name: Upload Pages artifact
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/book
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

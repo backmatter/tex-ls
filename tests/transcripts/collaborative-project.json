@@ -1,0 +1,255 @@
+[
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex",
+        "languageId": "latex",
+        "version": 0,
+        "text": "\\documentclass{article}\n\\begin{document}\n\\input{chapter}\n\\ref{old}\n\\end{document}\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex",
+        "languageId": "latex",
+        "version": 0,
+        "text": "\\section{Chapter}\n\\label{old}\n\ud835\udd4f prose\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      }
+    },
+    "request": true
+  },
+  {
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex",
+        "version": 1
+      },
+      "contentChanges": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 3
+            },
+            "end": {
+              "line": 2,
+              "character": 8
+            }
+          },
+          "text": "remote"
+        },
+        {
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 7
+            },
+            "end": {
+              "line": 1,
+              "character": 10
+            }
+          },
+          "text": "new"
+        }
+      ]
+    }
+  },
+  {
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex",
+        "version": 2
+      },
+      "contentChanges": [
+        {
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 3
+            },
+            "end": {
+              "line": 2,
+              "character": 3
+            }
+          },
+          "text": "local "
+        },
+        {
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 9
+            },
+            "end": {
+              "line": 0,
+              "character": 16
+            }
+          },
+          "text": "Updated"
+        }
+      ]
+    }
+  },
+  {
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex",
+        "version": 1
+      },
+      "contentChanges": [
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 5
+            },
+            "end": {
+              "line": 3,
+              "character": 8
+            }
+          },
+          "text": "new"
+        }
+      ]
+    }
+  },
+  {
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      }
+    },
+    "request": true
+  },
+  {
+    "method": "textDocument/rename",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      },
+      "newName": "renamed"
+    },
+    "request": true
+  },
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex",
+        "languageId": "latex",
+        "version": 0,
+        "text": "\\section{Reattached}\n\\label{fresh}\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/didChange",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex",
+        "version": 2
+      },
+      "contentChanges": [
+        {
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 5
+            },
+            "end": {
+              "line": 3,
+              "character": 8
+            }
+          },
+          "text": "fresh"
+        }
+      ]
+    }
+  },
+  {
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      }
+    },
+    "request": true
+  },
+  {
+    "method": "textDocument/didClose",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex"
+      }
+    }
+  },
+  {
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      }
+    },
+    "request": true
+  },
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/chapter.tex",
+        "languageId": "latex",
+        "version": 0,
+        "text": "\\section{Returned}\n\\label{fresh}\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/definition",
+    "params": {
+      "textDocument": {
+        "uri": "file:///project/main.tex"
+      },
+      "position": {
+        "line": 3,
+        "character": 6
+      }
+    },
+    "request": true
+  }
+]

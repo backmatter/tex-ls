@@ -1,0 +1,8 @@
+latexindent	corpus	files=5209	bytes=9827417
+latexindent	word-typing	spliced=28202/44485	token=28150	verbatim=52	math=0	region=0	files=3381
+latexindent	word-deleting	spliced=28074/44485	token=28010	verbatim=64	math=0	region=0	files=3381
+latexindent	protected-typing	spliced=2000/2080	token=0	verbatim=2000	math=0	region=0	files=282
+latexindent	math-word-typing	spliced=2020/4785	token=2020	verbatim=0	math=0	region=0	files=383
+latexindent	math-shape-typing	spliced=3490/3975	token=0	verbatim=0	math=3490	region=0	files=441
+latexindent	hazard-single	spliced=19184/83344	token=17426	verbatim=882	math=876	region=0	files=5209
+latexindent	hazard-chain	spliced=853/26045	token=690	verbatim=100	math=63	region=0	files=5209

@@ -1,0 +1,15 @@
+[package]
+name = "zed_meaning"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Keep the WebAssembly extension independent from Meaning's native workspace.
+[workspace]

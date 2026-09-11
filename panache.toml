@@ -1,0 +1,17 @@
+flavor = "gfm"
+
+extend-exclude = [
+  "CHANGELOG.md",
+  "TODO.md",
+  "docs/PARSE_COMPAT.md",
+  "docs/BIB_PARSE_COMPAT.md",
+  "npm/platform-template/README.md",
+  "docs/src/reference/cli.md",
+  "docs/src/reference/linter-rules.md",
+  "docs/src/reference/bib-linter-rules.md",
+  ".github/**/*.md",
+]
+
+[flavor-overrides]
+"docs/src/**/*.md" = "gfm"
+"README.md" = "gfm"

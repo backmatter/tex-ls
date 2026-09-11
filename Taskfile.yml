@@ -1,0 +1,344 @@
+version: "3"
+
+tasks:
+  default:
+    deps: [build]
+
+  build:
+    desc: Dev build
+    cmds:
+      - cargo build --workspace
+
+  build-release:
+    desc: Build release version
+    cmds:
+      - cargo build --release
+
+  test:
+    desc: Run all tests
+    cmds:
+      - cargo test --workspace
+
+  smoke-scripts:test:
+    desc: Test smoke-test source acquisition and project scanning scripts
+    cmds:
+      - python3 -m unittest tests/test_smoke_scripts.py
+
+  parser-properties:
+    desc: Run parser losslessness properties at nightly depth
+    env:
+      MEANING_PROPERTY_CASES: 4096
+    cmds:
+      - cargo test -p meaning-parser --test property_losslessness
+
+  fmt:
+    desc: Format the code
+    cmds:
+      - cargo fmt --all
+
+  fmt-check:
+    desc: Check formatting (CI)
+    cmds:
+      - cargo fmt --all -- --check
+
+  lint:
+    desc: Clippy with warnings as errors
+    cmds:
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  snapshots:
+    desc: Regenerate / accept insta snapshots
+    cmds:
+      - INSTA_UPDATE=always cargo test --workspace
+
+  parse-compat:
+    desc: Soft differential parse-concordance report vs texlab (writes PARSE_COMPAT.md)
+    cmds:
+      - cargo test -p meaning-parser --test parse_compat -- --ignored --nocapture
+
+  bib-parse-compat:
+    desc: Soft differential BibTeX parse-concordance report vs texlab (writes BIB_PARSE_COMPAT.md)
+    cmds:
+      - cargo test -p meaning-parser --test bib_parse_compat -- --ignored --nocapture
+
+  bib-fields:check:
+    desc: Check crates/meaning-parser/data/bib_fields.json is in sync with biblatex's data model (blx-dm.def)
+    cmds:
+      - python3 scripts/gen_bib_fields.py
+
+  bib-fields:sync:
+    desc: Re-sync crates/meaning-parser/data/bib_fields.json's mechanical facts from biblatex's data model
+    cmds:
+      - python3 scripts/gen_bib_fields.py --write
+
+  cwl:check:
+    desc: Check crates/meaning-parser/data/cwl_signatures.json is in sync with the pinned TeXstudio CWL corpus
+    cmds:
+      - python3 scripts/gen_cwl_signatures.py
+
+  cwl:sync:
+    desc: Re-generate crates/meaning-parser/data/cwl_signatures.json from the pinned TeXstudio CWL corpus
+    cmds:
+      - python3 scripts/gen_cwl_signatures.py --write
+
+  pkg-names:check:
+    desc: Check crates/meaning-parser/data/{package,class}_names.txt are in sync with the pinned TeX Live tlpdb
+    cmds:
+      - python3 scripts/gen_package_names.py
+
+  pkg-names:sync:
+    desc: Re-generate crates/meaning-parser/data/{package,class}_names.txt from the pinned TeX Live tlpdb
+    cmds:
+      - python3 scripts/gen_package_names.py --write
+
+  math-symbols:check:
+    desc: Check the generated math-symbol data and LPPL files against pinned unicode-math v0.8r
+    cmds:
+      - python3 scripts/gen_math_symbols.py
+
+  math-symbols:sync:
+    desc: Re-generate math-symbol data and LPPL files from pinned unicode-math v0.8r
+    cmds:
+      - python3 scripts/gen_math_symbols.py --write
+
+  aur:push:
+    desc: "Manually publish meaning-bin to the AUR (CI fallback; args: [version] [pkgrel])"
+    cmds:
+      - ./scripts/aur_push.sh {{.CLI_ARGS}}
+
+  check:
+    desc: Core local checks, including the wasm build
+    deps: [architecture, fmt-check, lint, test, smoke-scripts:test, wasm]
+
+  wasm:
+    desc: Build the wasm-targeting crates for wasm32-unknown-unknown (local embeddability guard)
+    cmds:
+      - cargo build -p meaning-parser -p meaning-formatter -p meaning-wasm -p meaning-browser --target wasm32-unknown-unknown
+
+  bench:
+    desc: Benchmark formatter speed vs tex-fmt & latexindent (writes benches/benchmark_results.json for the docs page)
+    cmds:
+      - ./benches/compare_format.sh --out benches/benchmark_results.json
+
+  bench:lsp:
+    desc: Compare LSP speed and whole-process-tree memory vs texlab (writes benches/memory_results.json for the docs page)
+    cmds:
+      - ./benches/compare_lsp_memory.sh --out benches/memory_results.json
+
+  bench:memory:
+    desc: Alias for bench:lsp
+    cmds:
+      - task: bench:lsp
+
+  bench:lsp-test:
+    desc: Test the external LSP harness and docs renderer
+    cmds:
+      - python3 -m unittest benches/test_lsp_memory_compare.py
+      - cargo test --manifest-path docs/doc-utils/Cargo.toml
+
+  bench:memory-test:
+    desc: Alias for bench:lsp-test
+    cmds:
+      - task: bench:lsp-test
+
+  bench:download:
+    desc: Fetch the real-world LaTeX corpus for the formatter benchmark
+    cmds:
+      - ./benches/documents/download.sh
+
+  gate-corpora:fetch:
+    desc: Clone/pin the trivia-invariant-layout gate corpora into corpora/ (latex3, latex2e, pgf, latexindent)
+    cmds:
+      - ./scripts/fetch_gate_corpora.sh
+
+  gate-corpora:check:
+    desc: Re-run both gates over the pinned corpora and diff the failure sets against tests/gate_baselines/ (two-sided ratchet)
+    cmds:
+      - cargo build --release
+      - ./scripts/check_gate_baselines.sh
+
+  bench:edit-reparse-gate:
+    desc: Verify release equivalence and speed floors for command and BibTeX edits
+    cmds:
+      - cargo run --release --example reparse_profile
+
+  reparse-bib:check:
+    desc: Verify seeded BibTeX splice counts and full-parse equivalence
+    cmds:
+      - cargo test --release -p meaning-parser --test bib_reparse
+
+  reparse-corpora:check:
+    desc: Sweep seeded edits over the pinned corpora and diff the splice tallies against tests/reparse_baselines/ (two-sided ratchet)
+    cmds:
+      - ./scripts/check_reparse_baselines.sh
+
+  reparse-corpora:record:
+    desc: Re-record tests/reparse_baselines/ from a fresh sweep
+    env:
+      RECORD: "1"
+    cmds:
+      - ./scripts/check_reparse_baselines.sh
+
+  gate-corpora:strict-survey:
+    desc: "Survey strict trivia invariance over the pinned corpora and print a reproducer histogram (non-gating: strict is the end-state contract, so most files still fail)"
+    cmds:
+      - cargo build --release
+      - ./scripts/strict_trivia_survey.sh
+
+  typeset:check:
+    desc: Compile tests/typeset/*.tex before and after formatting and diff the typeset output (needs a TeX install; not run in CI)
+    cmds:
+      - cargo build --release
+      - ./scripts/check_typeset_stability.sh
+
+  bench:micro:
+    desc: In-process formatter micro-bench (parse vs format vs full, no startup floor)
+    cmds:
+      - cargo bench --bench formatting
+
+  bench:browser-profile:
+    desc: Profile shared completion stages using a Citet fixture JSON path
+    cmds:
+      - cargo run --release --example browser_profile -- {{.CLI_ARGS}}
+
+  bench:keystroke:
+    desc: In-process LSP keystroke bench (didChange splice -> salsa upsert -> parse)
+    cmds:
+      - cargo bench --bench keystroke
+
+  bench:keystroke-verbatim:
+    desc: The same, typing a line inside an injected lstlisting (protected-body tier)
+    env:
+      MEANING_BENCH_SITE: verbatim
+    cmds:
+      - cargo bench --bench keystroke
+
+  bench:reparse:
+    desc: In-process incremental reparse bench (parser::reparse, timed directly, per tier)
+    cmds:
+      - cargo bench --bench reparse
+
+  bench:reparse-gate:
+    desc: Run the reparse bench with every case checked against its declared contract
+    env:
+      MEANING_BENCH_ASSERT: "1"
+    cmds:
+      - cargo bench --bench reparse
+
+  bench:keystroke-gate:
+    desc: Run the keystroke bench with every row checked against its declared contract
+    env:
+      MEANING_BENCH_ASSERT: "1"
+    cmds:
+      - cargo bench --bench keystroke
+
+  bench:lsp-memory:
+    desc: Reproduce retained LSP heap across query and project generations
+    cmds:
+      - cargo bench --bench lsp_memory
+
+  bench:lsp-memory-gate:
+    desc: Gate retained LSP heap against the paired-history controls
+    env:
+      MEANING_MEMORY_ASSERT: "1"
+    cmds:
+      - cargo bench --bench lsp_memory
+
+  bench:gate:
+    desc: Run both incremental benchmark gates (reparse tiers + keystroke write phase)
+    cmds:
+      - task: bench:reparse-gate
+      - task: bench:keystroke-gate
+
+  bench:profile:
+    desc: Flamegraph the masters_dissertation per-byte hot paths (writes benches/flamegraph_masters.svg)
+    env:
+      MEANING_BENCH_DOC: masters_dissertation.tex
+      MEANING_BENCH_ITERATIONS: 60
+    cmds:
+      - cargo flamegraph --bench formatting -o benches/flamegraph_masters.svg
+
+  docs:
+    desc: Build the documentation book
+    deps: [docs:build]
+
+  docs:build:
+    desc: Build the mdBook docs into docs/book
+    deps: [docs:rules, playground:wasm]
+    dir: docs
+    cmds:
+      - mdbook build
+      - task: docs:canonical
+      - task: docs:sitemap
+
+  playground:wasm:
+    desc: Build the meaning-wasm playground bundle into docs/src/playground/pkg
+    cmds:
+      - >-
+        wasm-pack build crates/meaning-wasm --target web --release
+        --out-dir ../../docs/src/playground/pkg
+
+  playground:vendor:
+    desc: Rebuild the vendored CodeMirror bundle (commit the result)
+    dir: docs/playground-build
+    cmds:
+      - pnpm install
+      - pnpm run build
+
+  docs:rules:
+    desc: Regenerate the linter-rules reference from rule metadata
+    cmds:
+      - cargo run --quiet --example docgen
+
+  docs:canonical:
+    desc: Inject <link rel="canonical"> into each rendered page
+    dir: docs
+    cmds:
+      - >-
+        cargo run --quiet --manifest-path doc-utils/Cargo.toml --bin canonical --
+        book https://backmatter.github.io/meaning/
+
+  docs:sitemap:
+    desc: Generate docs/book/sitemap.xml from the rendered book
+    dir: docs
+    cmds:
+      - >-
+        cargo run --quiet --manifest-path doc-utils/Cargo.toml --bin sitemap --
+        book https://backmatter.github.io/meaning/
+
+  docs:serve:
+    desc: Serve the docs locally with live reload
+    dir: docs
+    cmds:
+      - mdbook serve --open
+
+  docs:clean:
+    desc: Remove built docs
+    dir: docs
+    cmds:
+      - mdbook clean
+
+  bench:edit-batch-gate:
+    desc: Release equivalence and speed floors for touching edit batches
+    cmds:
+      - cargo run --release --example edit_batch_profile
+
+  bench:lint-query-gate:
+    desc: Verify equivalent findings and reuse across repeated native queries
+    cmds:
+      - cargo run --release --example lint_query_profile
+
+  bench:citation-range-gate:
+    desc: Compare equivalent citation node lookup by traversal and source range
+    cmds:
+      - cargo run --release --example citation_range_profile
+
+  architecture:
+    desc: Check analysis, protocol, browser, and native dependency boundaries
+    cmds:
+      - python3 scripts/check_architecture.py
+
+  hosts:check:
+    desc: Replay identical source events through native LSP and actual WASM
+    cmds:
+      - bash scripts/check_host_parity.sh

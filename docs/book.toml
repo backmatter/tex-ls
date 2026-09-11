@@ -1,0 +1,37 @@
+[book]
+title = "Meaning"
+authors = ["Backmatter contributors"]
+description = "Meaning is a formatter, linter, and language server for LaTeX."
+language = "en"
+
+[output.html]
+smart-punctuation = true
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/backmatter/meaning"
+edit-url-template = "https://github.com/backmatter/meaning/edit/main/docs/{path}"
+# Vendored Vega runtime + the benchmark dot-plot renderer (theme/bench-charts.js).
+# Load order matters: vega, then vega-lite, then vega-embed, then our script.
+additional-js = [
+    "theme/vendor/vega.min.js",
+    "theme/vendor/vega-lite.min.js",
+    "theme/vendor/vega-embed.min.js",
+    "theme/bench-charts.js",
+    "theme/playground-nav.js",
+]
+additional-css = ["theme/bench-charts.css", "theme/playground-nav.css"]
+
+[output.html.redirect]
+"/reference/wrap-modes.html" = "configuration.html#wrap"
+"/playground.html" = "playground/index.html"
+# The four per-subsystem development pages were merged into Architecture.
+"/development/parser.html" = "architecture.html#the-parser"
+"/development/formatter.html" = "architecture.html#the-formatter"
+"/development/linter.html" = "architecture.html#the-linter"
+"/development/lsp.html" = "architecture.html#the-language-server"
+
+[preprocessor]
+
+[preprocessor.doc-utils]
+command = "cargo run --quiet --manifest-path doc-utils/Cargo.toml"
+optional = true

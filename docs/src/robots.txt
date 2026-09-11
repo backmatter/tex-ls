@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://backmatter.github.io/meaning/sitemap.xml

@@ -1,0 +1,188 @@
+name: Build and Test
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "0 3 * * *"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    if: github.event_name != 'schedule'
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - name: Cache cargo registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check architecture boundaries
+        run: python3 scripts/check_architecture.py
+
+      - name: Build
+        run: cargo build --workspace --verbose
+
+      - name: Run tests
+        run: cargo test --workspace --verbose
+
+      # `meaning-formatter`'s `serde`/`schema` features are off by default, so
+      # the workspace run above never compiles them. They are what the dprint
+      # plugin borrows its published config schema from.
+      - name: Run formatter feature tests
+        run: cargo test -p meaning-formatter --features schema --verbose
+
+  msrv:
+    if: github.event_name != 'schedule'
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust 1.89.0
+        run: |
+          rustup toolchain install 1.89.0 --profile minimal
+          rustup target add --toolchain 1.89.0 wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.89
+
+      - name: Check every host target and feature
+        run: cargo +1.89.0 check --workspace --all-targets --all-features --locked
+
+      - name: Check published libraries for Wasm
+        run: >
+          cargo +1.89.0 check -p meaning-parser -p meaning-formatter
+          --all-features --locked --target wasm32-unknown-unknown
+
+  parser-properties:
+    if: github.event_name == 'schedule'
+    name: Parser Properties
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parser-properties
+
+      - name: Run parser losslessness properties
+        env:
+          MEANING_PROPERTY_CASES: 4096
+        run: cargo test -p meaning-parser --test property_losslessness
+
+  wasm:
+    if: github.event_name != 'schedule'
+    name: Wasm Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wasm
+
+      # `meaning-formatter` is meant to be embedded by a dprint Wasm plugin,
+      # and `meaning-parser` by other Wasm-hosted tools; `meaning-wasm` is the
+      # wasm-bindgen shim behind the docs playground. This job is what keeps
+      # the library crates free of filesystem/thread/time dependencies.
+      - name: Build library crates for wasm
+        run: >
+          cargo build -p meaning-parser -p meaning-formatter -p meaning-wasm
+          --release --target wasm32-unknown-unknown
+
+      # Both libraries expose a `schema` feature, so schemars has to stay
+      # wasm-clean too.
+      - name: Build libraries with the schema feature for wasm
+        run: >
+          cargo build -p meaning-parser -p meaning-formatter --features schema
+          --release --target wasm32-unknown-unknown
+
+  smoke-scripts:
+    if: github.event_name != 'schedule'
+    name: Smoke Test Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Test source acquisition and project scanning
+        run: python3 -m unittest tests/test_smoke_scripts.py
+
+  extension:
+    name: VS Code Extension
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/code/package-lock.json
+
+      - name: Install dependencies
+        working-directory: editors/code
+        run: npm ci
+
+      - name: Test archive handling
+        working-directory: editors/code
+        run: npm test
+
+      # Packaging validates compatibility between the VS Code API types and
+      # the extension's declared minimum VS Code version.
+      - name: Package extension
+        working-directory: editors/code
+        run: npm run package -- --target win32-arm64 -o /tmp/meaning.vsix
+
+  cargo-audit:
+    name: Cargo Audit
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  cargo-deny:
+    name: Cargo Deny
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      checks: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: EmbarkStudios/cargo-deny-action@v2

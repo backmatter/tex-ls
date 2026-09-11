@@ -1,0 +1,292 @@
+//! `meaning format --check`: format each file and report which ones would change,
+//! without writing anything.
+//!
+//! The input paths are resolved to
+//! the concrete `.tex`/`.bib` files via [`collect_lint_files`] (explicit files
+//! and/or recursively-walked directories) before checking, then each file is
+//! checked through its own formatter (LaTeX or BibTeX) by [`FileKind`].
+
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use rayon::prelude::*;
+
+use crate::declarations::ResolvedDeclarations;
+use crate::file_discovery::{ExcludeFilter, FileDiscoveryError, collect_lint_files};
+use crate::format::{
+    FormatError, FormatStyle, SentenceOptions, WrapMode, format_file_with_packages_sentence,
+};
+use meaning_analysis::source::FileKind;
+
+/// A file whose formatted output differs from what is on disk. Both texts are
+/// retained so the CLI can render a diff without formatting a second time; they
+/// are held only for files that actually changed, so a clean run allocates
+/// nothing beyond the path list it already built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: PathBuf,
+    /// The file as read from disk.
+    pub original: String,
+    /// What `format` would have written.
+    pub formatted: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckResult {
+    pub checked_files: usize,
+    pub changed_files: Vec<ChangedFile>,
+}
+
+impl CheckResult {
+    /// The paths that would be reformatted, in discovery order.
+    pub fn changed_paths(&self) -> impl Iterator<Item = &Path> {
+        self.changed_files.iter().map(|file| file.path.as_path())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckError {
+    MissingPaths,
+    NoFiles,
+    UnsupportedFilePath {
+        path: PathBuf,
+    },
+    WalkError {
+        path: PathBuf,
+        message: String,
+    },
+    ReadError {
+        path: PathBuf,
+        source: String,
+    },
+    FormatError {
+        path: PathBuf,
+        source: FormatError,
+    },
+    BibFormatError {
+        path: PathBuf,
+        source: crate::bib::FormatError,
+    },
+}
+
+impl fmt::Display for CheckError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingPaths => {
+                write!(
+                    f,
+                    "--check requires at least one input path (file or directory)"
+                )
+            }
+            Self::NoFiles => {
+                write!(
+                    f,
+                    "no .tex, .sty, .cls, or .bib files found under the provided input paths"
+                )
+            }
+            Self::UnsupportedFilePath { path } => {
+                write!(
+                    f,
+                    "input file {} is not a .tex, .sty, .cls, .dtx, .ins, or .bib file",
+                    path.display()
+                )
+            }
+            Self::WalkError { path, message } => {
+                write!(f, "failed while scanning {}: {message}", path.display())
+            }
+            Self::ReadError { path, source } => {
+                write!(f, "failed to read {}: {source}", path.display())
+            }
+            Self::FormatError { path, source } => {
+                write!(f, "failed to format {}: {source}", path.display())
+            }
+            Self::BibFormatError { path, source } => {
+                write!(f, "failed to format {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CheckError {}
+
+impl From<FileDiscoveryError> for CheckError {
+    fn from(value: FileDiscoveryError) -> Self {
+        match value {
+            FileDiscoveryError::UnsupportedLintFilePath { path } => {
+                Self::UnsupportedFilePath { path }
+            }
+            FileDiscoveryError::WalkError { path, message } => Self::WalkError { path, message },
+        }
+    }
+}
+
+pub fn check_paths(paths: &[PathBuf]) -> Result<CheckResult, CheckError> {
+    check_paths_with_style(
+        paths,
+        FormatStyle::default(),
+        None,
+        SentenceOptions::default(),
+        &ResolvedDeclarations::default(),
+        &ExcludeFilter::none(),
+    )
+}
+
+/// Check `paths` under `style`. `wrap_override` is the global `--wrap` value: when
+/// `None`, every file uses [`WrapMode::default`] (`reflow`). `sentence`
+/// carries the `sentence`/`semantic` language options (ignored by other modes), so
+/// `--check` matches what `format` would produce. `exclude` prunes directory
+/// discovery (explicitly-named files are pruned only in its force mode).
+pub fn check_paths_with_style(
+    paths: &[PathBuf],
+    style: FormatStyle,
+    wrap_override: Option<WrapMode>,
+    sentence: SentenceOptions<'_>,
+    declared: &ResolvedDeclarations,
+    exclude: &ExcludeFilter,
+) -> Result<CheckResult, CheckError> {
+    if paths.is_empty() {
+        return Err(CheckError::MissingPaths);
+    }
+
+    let files = collect_lint_files(paths, exclude)?;
+    if files.is_empty() {
+        // Under `--force-exclude` an empty set is expected (a runner like
+        // pre-commit may pass only excluded files), so it checks clean.
+        if exclude.force() {
+            return Ok(CheckResult {
+                checked_files: 0,
+                changed_files: Vec::new(),
+            });
+        }
+        return Err(CheckError::NoFiles);
+    }
+
+    let checked_files = files.len();
+
+    // Read + format each file in parallel (formatting is a pure function of input
+    // plus shipped data, so it is thread-safe). `Some(file)` marks a file that
+    // would change. The order-preserving collect keeps `changed_files`
+    // deterministic, and returning the first `Err` in that order reports the same
+    // failure the serial loop would.
+    let results: Vec<Result<Option<ChangedFile>, CheckError>> = files
+        .par_iter()
+        .map(|(path, kind)| {
+            let content = fs::read_to_string(path).map_err(|err| CheckError::ReadError {
+                path: path.clone(),
+                source: err.to_string(),
+            })?;
+
+            let mut style = style;
+            style.wrap = wrap_override.unwrap_or_default();
+            let formatted = match kind {
+                FileKind::Tex
+                | FileKind::CodeTex
+                | FileKind::Sty
+                | FileKind::Cls
+                | FileKind::Dtx
+                | FileKind::Ins => format_file_with_packages_sentence(
+                    &content,
+                    path,
+                    style,
+                    kind.lex_config(),
+                    sentence,
+                    declared,
+                )
+                .map_err(|err| CheckError::FormatError {
+                    path: path.clone(),
+                    source: err,
+                })?,
+                FileKind::Bib => crate::bib::format_with_style(&content, style).map_err(|err| {
+                    CheckError::BibFormatError {
+                        path: path.clone(),
+                        source: err,
+                    }
+                })?,
+            };
+            Ok((formatted != content).then(|| ChangedFile {
+                path: path.clone(),
+                original: content,
+                formatted,
+            }))
+        })
+        .collect();
+
+    let mut changed_files = Vec::new();
+    for result in results {
+        if let Some(file) = result? {
+            changed_files.push(file);
+        }
+    }
+
+    Ok(CheckResult {
+        checked_files,
+        changed_files,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn check_flags_unformatted_bib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refs.bib");
+        // Lowercase entry type, no padding: the bib formatter would rewrite this.
+        fs::write(&path, "@article{k,title={T}}\n").unwrap();
+
+        let result = check_paths(std::slice::from_ref(&path)).unwrap();
+        assert_eq!(result.checked_files, 1);
+        assert_eq!(result.changed_paths().collect::<Vec<_>>(), vec![&*path]);
+    }
+
+    #[test]
+    fn check_retains_both_texts_for_the_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refs.bib");
+        let original = "@article{k,title={T}}\n";
+        fs::write(&path, original).unwrap();
+
+        let result = check_paths(std::slice::from_ref(&path)).unwrap();
+        let [changed] = &result.changed_files[..] else {
+            panic!("expected one changed file, got {:?}", result.changed_files);
+        };
+        // The original is what is on disk and the formatted text is what
+        // `format` would write, so a diff of the two is the pending change.
+        assert_eq!(changed.original, original);
+        assert_eq!(changed.formatted, crate::bib::format(original).unwrap());
+        assert_ne!(changed.original, changed.formatted);
+    }
+
+    #[test]
+    fn check_passes_formatted_bib() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("refs.bib");
+        // Pre-format so a second pass is a no-op (idempotence).
+        let formatted = crate::bib::format("@article{k,title={T}}\n").unwrap();
+        fs::write(&path, &formatted).unwrap();
+
+        let result = check_paths(std::slice::from_ref(&path)).unwrap();
+        assert!(
+            result.changed_files.is_empty(),
+            "got: {:?}",
+            result.changed_files
+        );
+    }
+
+    #[test]
+    fn check_mixes_tex_and_bib() {
+        let dir = tempfile::tempdir().unwrap();
+        let bib = dir.path().join("refs.bib");
+        let tex = dir.path().join("doc.tex");
+        fs::write(&bib, "@misc{k,title={T}}\n").unwrap();
+        fs::write(&tex, "\\section{Hi}\n").unwrap();
+
+        let result = check_paths(&[dir.path().to_path_buf()]).unwrap();
+        assert_eq!(result.checked_files, 2);
+        // Only the unformatted bib should be flagged.
+        assert_eq!(result.changed_paths().collect::<Vec<_>>(), vec![&*bib]);
+    }
+}

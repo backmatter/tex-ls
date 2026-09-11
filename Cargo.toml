@@ -1,0 +1,195 @@
+[workspace]
+members = [
+    "crates/meaning-analysis",
+    "crates/meaning-protocol",
+    "crates/meaning-parser",
+    "crates/meaning-formatter",
+    "crates/meaning-wasm",
+    "crates/meaning-browser",
+]
+exclude = ["docs/doc-utils"]
+
+[workspace.dependencies]
+clap = "4.6.6"
+insta = "1.48.0"
+log = "0.4.34"
+lsp-types = { package = "gen-lsp-types", version = "0.11.0" }
+rayon = "1.12.0"
+rowan = "0.17.0"
+salsa = "0.28.2"
+schemars = "1.2.2"
+serde = "1.0.229"
+serde_json = "1.0.151"
+smol_str = "0.3.6"
+tempfile = "3.27.0"
+toml = "1.1.6"
+wasm-bindgen = "0.2.128"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/backmatter/meaning"
+authors = ["Backmatter contributors"]
+
+[package]
+publish = false
+name = "meaning"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A language server, formatter, and linter for LaTeX"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/backmatter/meaning"
+documentation = "https://github.com/backmatter/meaning/tree/main/docs/src"
+authors.workspace = true
+include = ["/src/**/*", "/build.rs", "/README.md", "/LICENSE"]
+keywords = ["latex", "language-server", "formatter", "linter"]
+categories = [
+    "command-line-utilities",
+    "text-processing",
+    "parsing",
+    "parser-implementations",
+]
+
+# `benches/sites.rs` is a module the bench binaries share, not a bench of its own.
+# Cargo would otherwise auto-discover it as a target, so every bench is declared
+# explicitly below.
+autobenches = false
+
+[lib]
+name = "meaning"
+
+[[bin]]
+name = "meaning"
+path = "src/main.rs"
+
+[dependencies]
+env_logger = "0.11.11"
+meaning-analysis = { path = "crates/meaning-analysis", features = ["schema"] }
+meaning-protocol = { path = "crates/meaning-protocol" }
+meaning-formatter = { path = "crates/meaning-formatter", version = "0.1.0", features = ["schema"] }
+meaning-parser = { path = "crates/meaning-parser", version = "0.1.0", features = [
+    "schema",
+] }
+clap = { workspace = true, features = ["derive"] }
+crossbeam-channel = "0.5.17"
+dirs = "7.0.0"
+ignore = "0.4.33"
+log = { workspace = true }
+lsp-server = "0.10.0"
+lsp-types = { workspace = true, features = ["fluent-uri"] }
+rayon = { workspace = true }
+rowan = { workspace = true }
+salsa = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+similar = { version = "3.2.0", features = ["text"] }
+smol_str = { workspace = true }
+toml = { workspace = true }
+
+[build-dependencies]
+clap = { workspace = true, features = ["derive"] }
+clapdown = "0.2.0"
+clap_complete = "4.6.9"
+clap_mangen = "0.3.3"
+
+[package.metadata.deb]
+maintainer = "Backmatter contributors"
+copyright = "2026, Johan Larsson <johan@jolars.co>"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+Meaning is a formatter, linter, and language server for LaTeX. It formats \
+.tex, .sty/.cls, .dtx/.ins, and .bib files with deterministic, rule-based \
+layout, reports diagnostics with optional autofixes, and exposes an integrated \
+language server for editor support."""
+depends = "$auto"
+section = "text"
+priority = "optional"
+assets = [
+    [
+        "target/release/meaning",
+        "usr/bin/",
+        "755",
+    ],
+    [
+        "README.md",
+        "usr/share/doc/meaning/",
+        "644",
+    ],
+    [
+        "LICENSE",
+        "usr/share/doc/meaning/",
+        "644",
+    ],
+    [
+        "target/man/*.1",
+        "usr/share/man/man1/",
+        "644",
+    ],
+    [
+        "target/completions/meaning.bash",
+        "usr/share/bash-completion/completions/meaning",
+        "644",
+    ],
+    [
+        "target/completions/meaning.fish",
+        "usr/share/fish/vendor_completions.d/meaning.fish",
+        "644",
+    ],
+    [
+        "target/completions/_meaning",
+        "usr/share/zsh/vendor-completions/_meaning",
+        "644",
+    ],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/meaning", dest = "/usr/bin/meaning", mode = "755" },
+    { source = "README.md", dest = "/usr/share/doc/meaning/README.md", mode = "644", doc = true },
+    { source = "LICENSE", dest = "/usr/share/doc/meaning/LICENSE", mode = "644", doc = true },
+    { source = "target/man/*.1", dest = "/usr/share/man/man1/", mode = "644" },
+    { source = "target/completions/meaning.bash", dest = "/usr/share/bash-completion/completions/meaning", mode = "644" },
+    { source = "target/completions/meaning.fish", dest = "/usr/share/fish/vendor_completions.d/meaning.fish", mode = "644" },
+    { source = "target/completions/_meaning", dest = "/usr/share/zsh/vendor-completions/_meaning", mode = "644" },
+]
+
+[[bench]]
+name = "formatting"
+harness = false
+
+[[bench]]
+name = "keystroke"
+harness = false
+
+[[bench]]
+name = "reparse"
+harness = false
+
+[[bench]]
+name = "lsp_memory"
+harness = false
+
+[profile.release]
+strip = "symbols"
+
+# Browser workers benefit from cross-crate optimization of the shared engine.
+[profile.browser]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[dev-dependencies]
+meaning-browser = { path = "crates/meaning-browser" }
+insta = { workspace = true }
+jsonschema = { version = "0.56.0", default-features = false }
+similar-asserts = "2.0.0"
+tempfile = { workspace = true }
+
+[[example]]
+name = "session_profile"
+required-features = ["meaning-browser/allocation-metrics"]

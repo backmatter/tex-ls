@@ -1,0 +1,31 @@
+[package]
+publish = false
+name = "meaning-formatter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Deterministic, rule-based formatter for LaTeX and BibTeX"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/backmatter/meaning"
+documentation = "https://github.com/backmatter/meaning/tree/main/crates/meaning-formatter"
+authors.workspace = true
+include = ["/src/**/*", "/README.md", "/CHANGELOG.md"]
+keywords = ["latex", "bibtex", "formatter"]
+categories = ["development-tools", "text-processing"]
+
+[dependencies]
+meaning-parser = { path = "../meaning-parser", version = "0.1.0" }
+rowan = { workspace = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+schema = ["serde", "dep:schemars"]

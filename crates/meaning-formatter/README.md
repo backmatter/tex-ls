@@ -1,0 +1,31 @@
+# meaning-formatter
+
+The formatting engine behind [meaning](../../README.md), a formatter,
+linter, and language server for LaTeX — extracted so that other tools (for
+example a dprint Wasm plugin) can embed it.
+
+Formatting is deterministic and rule-based on the lossless CST from
+[`meaning-parser`](../meaning-parser/README.md), through a
+Wadler/Prettier-style layout engine. The formatter changes only *trivia*
+(whitespace, newlines, comments, `.dtx` margins) — it never inserts, deletes, or
+rewrites a non-trivia token — and it is idempotent: `fmt(fmt(x)) == fmt(x)`.
+Protected regions (`verbatim`, `lstlisting`, `\verb`, comments) are never
+altered. Both LaTeX (`.tex`, `.sty`/`.cls`, `.dtx`, `.ins`) and BibTeX (`.bib`,
+via the `bib` module) are covered.
+
+The crate builds for `wasm32-unknown-unknown`; the filesystem-facing batch APIs
+live in the `meaning` CLI crate instead.
+
+Entry points: `formatter::format` / `formatter::format_with_style` with
+`FormatStyle`, and `bib::format` / `bib::format_with_style`.
+
+Two optional features, both off by default, exist for embedders that expose the
+style as configuration: `serde` makes `FormatStyle` and its enums
+(de)serializable under `meaning.toml`'s kebab-case spellings (`single-line`),
+and `schema` additionally derives `schemars::JsonSchema`, so an embedder can
+publish a config schema that enumerates the real accepted values instead of
+restating them.
+
+See the [architecture
+documentation](../../docs/src/development/architecture.md#the-formatter)
+for the engine's design.

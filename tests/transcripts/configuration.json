@@ -1,0 +1,79 @@
+{
+  "nativeConfig": "[format]\nline-width = 17\n[lint]\nselect = ['duplicate-label']\n[environments.code]\nlike = 'lstlisting'\n",
+  "settings": {
+    "format": {
+      "line-width": 17
+    },
+    "lint": {
+      "select": [
+        "duplicate-label"
+      ]
+    },
+    "declarations": {
+      "environments": {
+        "code": {
+          "like": "lstlisting"
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 0,
+          "languageId": "latex",
+          "text": "A paragraph with enough words to wrap at the configured width.\n\\begin{code}\n\\section{Hidden}\n\\end{code}\n\\label{same}\n\\label{same}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/formatting",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      }
+    }
+  ],
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {}
+      }
+    }
+  }
+}

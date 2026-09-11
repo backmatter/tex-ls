@@ -1,0 +1,135 @@
+{
+  "initialize": {
+    "capabilities": {},
+    "workspaceFolders": [
+      {
+        "uri": "file:///architecture-projects",
+        "name": "outer"
+      },
+      {
+        "uri": "file:///architecture-projects/nested",
+        "name": "nested"
+      }
+    ]
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/main.tex",
+          "version": 0,
+          "languageId": "latex",
+          "text": "\\input{nested/chapter}\n\\ref{inside}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/nested/main.tex",
+          "version": 0,
+          "languageId": "latex",
+          "text": "\\input{chapter}\n\\ref{inside}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/nested/chapter.tex",
+          "version": 0,
+          "languageId": "latex",
+          "text": "\\label{inside}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 7
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/nested/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 7
+        }
+      },
+      "expected": [
+        {
+          "uri": "file:///architecture-projects/nested/chapter.tex",
+          "range": {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 14
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "workspace/symbol",
+      "request": true,
+      "params": {
+        "query": "inside"
+      }
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/nested/chapter.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 7
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-projects/nested/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 7
+        }
+      },
+      "expected": []
+    }
+  ]
+}

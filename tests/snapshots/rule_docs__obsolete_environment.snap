@@ -1,0 +1,33 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `obsolete-environment`
+
+Flag math environments the community has superseded, naming the modern replacement in the message. The canonical case is `eqnarray`, which `amsmath` replaced with `align` decades ago (it mis-spaces relations and is a perennial l2tabu warning). The autofix renames the `\begin`/`\end` pair in place, leaving the body untouched, so it is correct by construction.
+
+This rule is **enabled by default**.
+
+The superseded `eqnarray` environment:
+
+```tex
+\begin{eqnarray}
+  a &=& b
+\end{eqnarray}
+```
+
+```text
+warning: obsolete-environment
+ --> example.tex:1:7
+  |
+1 | \begin{eqnarray}
+  |       ^^^^^^^^^^ `eqnarray` is obsolete; use `align`
+```
+
+After applying the fix:
+
+```tex
+\begin{align}
+  a &=& b
+\end{align}
+```

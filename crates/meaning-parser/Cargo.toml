@@ -1,0 +1,52 @@
+[package]
+publish = false
+name = "meaning-parser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Lossless CST parser, semantic model, and command-signature database for LaTeX and BibTeX"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/backmatter/meaning"
+documentation = "https://github.com/backmatter/meaning/tree/main/crates/meaning-parser"
+authors.workspace = true
+include = [
+  "/src/**/*",
+  "/build.rs",
+  "/data/**/*",
+  "/README.md",
+  "/CHANGELOG.md",
+]
+keywords = ["latex", "bibtex", "parser", "cst"]
+categories = ["parsing", "parser-implementations", "text-processing"]
+
+[dependencies]
+phf = "0.14.0"
+rowan = { workspace = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# `serde` here is for `declarations`, whose wire spellings are public API: the
+# CLI, the dprint plugin, and (later) a comment directive all deserialize the
+# same types, so `SmolStr` has to cross the wire.
+smol_str = { workspace = true, features = ["serde"] }
+
+[features]
+default = []
+schema = ["dep:schemars"]
+
+[build-dependencies]
+phf_codegen = "0.14.0"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = "1.11.0"
+# Test-only: the reparse corpus sweep is ~6.3k files of seeded edits. A
+# dev-dependency is invisible to consumers and to the wasm build, so this does
+# not touch the crate's wasm-clean contract.
+rayon = { workspace = true }
+texlab-parser = { git = "https://github.com/latex-lsp/texlab", package = "parser", rev = "4cc18b37c0b46baf39189f173d1bd7468d3f56e1" }
+texlab-syntax = { git = "https://github.com/latex-lsp/texlab", package = "syntax", rev = "4cc18b37c0b46baf39189f173d1bd7468d3f56e1" }

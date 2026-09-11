@@ -1,0 +1,449 @@
+//! CLI-level tests for `meaning lint --output json`: the machine-readable
+//! findings contract consumed by external tools (e.g. panache's external
+//! linter integration).
+//!
+//! These run the real binary (`CARGO_BIN_EXE_meaning`) so they cover the
+//! stdout-vs-stderr split and exit codes, not just the serialization unit
+//! tests in `src/linter/render.rs`. Each test works in a tempdir containing a
+//! `.git` entry so the config ancestor walk stops there and a developer's own
+//! `meaning.toml` cannot leak in.
+
+use std::io::Write;
+use std::path::Path;
+use std::process::{Command, Output, Stdio};
+
+use tempfile::TempDir;
+
+/// Triggers the `ellipsis` rule, which carries a safe fix (`...` → `\dots`).
+const FIXABLE: &str = "Wait ... what\n";
+const CLEAN: &str = "Nothing to see here.\n";
+const OPT_IN_DASH: &str = "A global--local search.\n";
+
+fn repo_dir() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    dir
+}
+
+fn lint(dir: &Path, args: &[&str], stdin: Option<&str>) -> Output {
+    lint_with_env(dir, args, stdin, &[])
+}
+
+fn lint_with_env(dir: &Path, args: &[&str], stdin: Option<&str>, env: &[(&str, &Path)]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_meaning"));
+    cmd.arg("lint")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("MEANING_CONFIG")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
+    let mut child = cmd.spawn().expect("run meaning");
+    if let Some(input) = stdin {
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+    }
+    child.wait_with_output().expect("wait for meaning")
+}
+
+#[test]
+fn dash_length_is_disabled_by_default_and_selectable() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), OPT_IN_DASH).unwrap();
+
+    let default = lint(dir.path(), &["--output=json", "doc.tex"], None);
+    assert!(default.status.success());
+    assert_eq!(String::from_utf8(default.stdout).unwrap(), "[]\n");
+
+    let selected = lint(
+        dir.path(),
+        &["--output=json", "--select", "dash-length", "doc.tex"],
+        None,
+    );
+    assert!(!selected.status.success());
+    let stdout = String::from_utf8(selected.stdout).unwrap();
+    let findings: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(findings[0]["rule"], "dash-length");
+}
+
+#[test]
+fn json_reports_findings_with_fix_on_stdout() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), FIXABLE).unwrap();
+
+    let output = lint(dir.path(), &["--output=json", "doc.tex"], None);
+
+    assert!(!output.status.success(), "findings should exit non-zero");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    let findings = value.as_array().expect("top-level array");
+    let ellipsis = findings
+        .iter()
+        .find(|d| d["rule"] == "ellipsis")
+        .expect("ellipsis finding");
+    assert_eq!(ellipsis["severity"], "warning");
+    assert_eq!(ellipsis["path"], "doc.tex");
+    // `...` sits at bytes 5..8 of `Wait ... what\n`.
+    assert_eq!(ellipsis["start"], 5);
+    assert_eq!(ellipsis["end"], 8);
+    assert_eq!(ellipsis["fix"]["applicability"], "safe");
+    assert_eq!(ellipsis["fix"]["edits"][0]["start"], 5);
+    // Findings must not leak into stderr in JSON mode.
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains("ellipsis"),
+        "stderr should carry no findings, got: {stderr}"
+    );
+}
+
+#[test]
+fn json_reads_stdin_with_stdin_filepath() {
+    let dir = repo_dir();
+
+    let output = lint(
+        dir.path(),
+        &["--output=json", "--stdin-filepath", "doc.tex"],
+        Some(FIXABLE),
+    );
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    // The stdin buffer is always reported as `<stdin>`, never the named path.
+    assert_eq!(value[0]["path"], "<stdin>");
+}
+
+#[test]
+fn json_clean_file_emits_empty_array_and_exits_zero() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), CLEAN).unwrap();
+
+    let output = lint(dir.path(), &["--output=json", "doc.tex"], None);
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.trim(), "[]", "clean run still emits valid JSON");
+}
+
+#[test]
+fn default_output_keeps_findings_on_stderr() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), FIXABLE).unwrap();
+
+    let output = lint(dir.path(), &["doc.tex"], None);
+
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "pretty mode writes nothing to stdout"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("ellipsis"), "got: {stderr}");
+}
+
+/// `-` is the explicit stdin spelling here too, and `--fix` has nowhere to write
+/// it back (issue #111 added the spelling; the no-paths-at-a-terminal gate it
+/// pairs with is unit-tested in `main.rs`).
+#[test]
+fn dash_lints_stdin() {
+    let dir = repo_dir();
+
+    let output = lint(dir.path(), &["--output=json", "-"], Some(FIXABLE));
+
+    assert!(!output.status.success(), "findings should exit non-zero");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(value[0]["path"], "<stdin>");
+}
+
+#[test]
+fn fix_leaves_stdin_alone() {
+    let dir = repo_dir();
+
+    let output = lint(dir.path(), &["--fix", "--output=json", "-"], Some(FIXABLE));
+
+    // Nothing to write back to, so the finding is still reported, not silently
+    // fixed into stdout.
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(value.as_array().expect("top-level array").len(), 1);
+    assert_eq!(value[0]["path"], "<stdin>");
+}
+
+/// The pretty report is piped here (`Stdio::piped`), so `--color auto` must
+/// resolve to plain — the same contract `format --check` keeps for its diff.
+#[test]
+fn pretty_is_not_colored_when_redirected() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), FIXABLE).unwrap();
+
+    let output = lint(dir.path(), &["doc.tex"], None);
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        !stderr.contains('\x1b'),
+        "piped output should carry no escapes, got:\n{stderr:?}"
+    );
+}
+
+#[test]
+fn pretty_colors_on_demand() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), FIXABLE).unwrap();
+
+    let output = lint(dir.path(), &["--color", "always", "doc.tex"], None);
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains('\x1b'),
+        "`--color always` should style the snippet, got:\n{stderr:?}"
+    );
+}
+
+/// `--color always` is about the human-facing report; JSON is a data contract
+/// and stays plain no matter what.
+#[test]
+fn json_is_never_colored() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), FIXABLE).unwrap();
+
+    let output = lint(
+        dir.path(),
+        &["--color", "always", "--output=json", "doc.tex"],
+        None,
+    );
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    serde_json::from_str::<serde_json::Value>(&stdout).expect("stdout is JSON");
+    assert!(!stdout.contains('\x1b'), "got:\n{stdout:?}");
+}
+
+/// A declaration block naming an environment the document's own text gives no
+/// way to recognize as verbatim (`AGENTS.md` decision #12).
+const DECLARES_VERBATIM: &str = "[environments.mycode]\nlike = 'lstlisting'\n";
+
+/// The same `...` the `ellipsis` rule flags in prose, inside that environment.
+const IN_MYCODE: &str = "\\begin{mycode}\nWait ... what\n\\end{mycode}\n";
+
+/// The linter parses through the project's declarations, so a declared verbatim
+/// body is protected from lint rules exactly as `lstlisting`'s own is. The
+/// no-config half of the pair is what keeps this from passing vacuously.
+#[test]
+fn lint_honors_declared_environments() {
+    let dir = repo_dir();
+    std::fs::write(dir.path().join("doc.tex"), IN_MYCODE).unwrap();
+
+    let blind = lint(dir.path(), &["--output=json", "doc.tex"], None);
+    let stdout = String::from_utf8(blind.stdout).unwrap();
+    let findings: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(
+        findings.as_array().expect("array").len(),
+        1,
+        "undeclared, the body is ordinary prose: {stdout}"
+    );
+
+    std::fs::write(dir.path().join("meaning.toml"), DECLARES_VERBATIM).unwrap();
+    let declared = lint(dir.path(), &["--output=json", "doc.tex"], None);
+    let stdout = String::from_utf8(declared.stdout).unwrap();
+    assert!(
+        declared.status.success(),
+        "a declared verbatim body carries no findings: {stdout}"
+    );
+    assert_eq!(stdout.trim(), "[]");
+}
+
+/// The `--fix` fixpoint loop reparses each round through its own entry
+/// (`check_document_fixable`), so it needs the declarations too — otherwise a
+/// clean report and a rewritten file would disagree.
+#[test]
+fn fix_honors_declared_environments() {
+    let dir = repo_dir();
+    let doc = dir.path().join("doc.tex");
+    std::fs::write(&doc, IN_MYCODE).unwrap();
+    std::fs::write(dir.path().join("meaning.toml"), DECLARES_VERBATIM).unwrap();
+
+    let output = lint(dir.path(), &["--fix", "doc.tex"], None);
+
+    assert!(output.status.success());
+    assert_eq!(
+        std::fs::read_to_string(&doc).unwrap(),
+        IN_MYCODE,
+        "`\\dots` must not be spliced into a protected body"
+    );
+}
+
+#[test]
+fn lint_honors_declared_reference_commands() {
+    let dir = repo_dir();
+    let doc = "\\documentclass{article}\n\\begin{document}\n\\label{a}\\label{b}\\eqrefs{a,b}\n\\end{document}\n";
+    std::fs::write(dir.path().join("doc.tex"), doc).unwrap();
+
+    let blind = lint(dir.path(), &["--output=json", "doc.tex"], None);
+    let blind_json: serde_json::Value =
+        serde_json::from_slice(&blind.stdout).expect("stdout is JSON");
+    assert_eq!(
+        blind_json
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter(|finding| finding["rule"] == "unreferenced-label")
+            .count(),
+        2,
+        "{}",
+        String::from_utf8_lossy(&blind.stdout)
+    );
+
+    std::fs::write(
+        dir.path().join("meaning.toml"),
+        "[commands.eqrefs]\nlike = 'cref'\n",
+    )
+    .unwrap();
+    let declared = lint(dir.path(), &["--output=json", "doc.tex"], None);
+    assert!(
+        declared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&declared.stdout)
+    );
+    assert_eq!(String::from_utf8(declared.stdout).unwrap().trim(), "[]");
+}
+
+#[test]
+fn lint_honors_declared_citation_commands() {
+    let dir = repo_dir();
+    std::fs::write(
+        dir.path().join("doc.tex"),
+        "\\documentclass{article}\n\\addbibresource{refs.bib}\n\\begin{document}\n\\projectcite{missing}\n\\end{document}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("refs.bib"),
+        "@article{present, title = {Present}}\n",
+    )
+    .unwrap();
+
+    let blind = lint(dir.path(), &["--output=json", "doc.tex", "refs.bib"], None);
+    let blind_json: serde_json::Value =
+        serde_json::from_slice(&blind.stdout).expect("stdout is JSON");
+    assert!(
+        blind_json
+            .as_array()
+            .expect("array")
+            .iter()
+            .all(|finding| finding["rule"] != "undefined-citation")
+    );
+
+    std::fs::write(
+        dir.path().join("meaning.toml"),
+        "[commands.projectcite]\nlike = 'parencite'\n",
+    )
+    .unwrap();
+    let declared = lint(dir.path(), &["--output=json", "doc.tex", "refs.bib"], None);
+    let declared_json: serde_json::Value =
+        serde_json::from_slice(&declared.stdout).expect("stdout is JSON");
+    assert!(
+        declared_json
+            .as_array()
+            .expect("array")
+            .iter()
+            .any(|finding| finding["rule"] == "undefined-citation"),
+        "{}",
+        String::from_utf8_lossy(&declared.stdout)
+    );
+}
+
+#[test]
+fn undefined_citation_resolves_bibinputs_bibliography() {
+    let project = repo_dir();
+    let bibliographies = TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("doc.tex"),
+        "\\documentclass{article}\n\\bibliography{shared}\n\\begin{document}\n\\cite{present,missing}\n\\end{document}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        bibliographies.path().join("shared.bib"),
+        "@article{present, title = {Present}}\n",
+    )
+    .unwrap();
+
+    let output = lint_with_env(
+        project.path(),
+        &["--output=json", "doc.tex"],
+        None,
+        &[("BIBINPUTS", bibliographies.path())],
+    );
+
+    let findings: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    let undefined: Vec<_> = findings
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|finding| finding["rule"] == "undefined-citation")
+        .collect();
+    assert_eq!(
+        undefined.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        undefined[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn undefined_citation_follows_symlinked_bibliography() {
+    use std::os::unix::fs::symlink;
+
+    let project = repo_dir();
+    let bibliography = TempDir::new().unwrap();
+    std::fs::write(
+        project.path().join("doc.tex"),
+        "\\documentclass{article}\n\\addbibresource{shared.bib}\n\\begin{document}\n\\cite{present,missing}\n\\end{document}\n",
+    )
+    .unwrap();
+    let target = bibliography.path().join("shared.bib");
+    std::fs::write(&target, "@article{present, title = {Present}}\n").unwrap();
+    symlink(&target, project.path().join("shared.bib")).unwrap();
+
+    let output = lint(project.path(), &["--output=json", "."], None);
+
+    let findings: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+    let undefined: Vec<_> = findings
+        .as_array()
+        .expect("array")
+        .iter()
+        .filter(|finding| finding["rule"] == "undefined-citation")
+        .collect();
+    assert_eq!(
+        undefined.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        undefined[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
+    );
+}

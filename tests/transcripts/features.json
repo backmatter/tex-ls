@@ -1,0 +1,160 @@
+[
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex",
+        "version": 0,
+        "languageId": "latex",
+        "text": "\\newcommand{\\greet}[1]{Hello #1}\n\\greet{world}\n\\section{Heading}\n\\label{key}\n\\ref{k}\n\\bf old style\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/completion",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "position": {
+        "line": 4,
+        "character": 6
+      }
+    }
+  },
+  {
+    "method": "textDocument/hover",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "position": {
+        "line": 1,
+        "character": 3
+      }
+    }
+  },
+  {
+    "method": "textDocument/signatureHelp",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "position": {
+        "line": 1,
+        "character": 9
+      }
+    }
+  },
+  {
+    "method": "textDocument/codeAction",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "range": {
+        "start": {
+          "line": 5,
+          "character": 0
+        },
+        "end": {
+          "line": 5,
+          "character": 13
+        }
+      },
+      "context": {
+        "diagnostics": [],
+        "only": [
+          "quickfix"
+        ]
+      }
+    }
+  },
+  {
+    "method": "textDocument/rangeFormatting",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "range": {
+        "start": {
+          "line": 0,
+          "character": 0
+        },
+        "end": {
+          "line": 5,
+          "character": 13
+        }
+      },
+      "options": {
+        "tabSize": 2,
+        "insertSpaces": true
+      }
+    }
+  },
+  {
+    "method": "textDocument/onTypeFormatting",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/main.tex"
+      },
+      "position": {
+        "line": 1,
+        "character": 13
+      },
+      "ch": "}",
+      "options": {
+        "tabSize": 2,
+        "insertSpaces": true
+      }
+    }
+  },
+  {
+    "method": "textDocument/didOpen",
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/refs.bib",
+        "version": 0,
+        "languageId": "bibtex",
+        "text": "@article{key, doi={10.1234/example}, title={A title}}\n"
+      }
+    }
+  },
+  {
+    "method": "textDocument/documentLink",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/refs.bib"
+      }
+    }
+  },
+  {
+    "method": "textDocument/documentSymbol",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/refs.bib"
+      }
+    }
+  },
+  {
+    "method": "textDocument/completion",
+    "request": true,
+    "params": {
+      "textDocument": {
+        "uri": "file:///architecture-features/refs.bib"
+      },
+      "position": {
+        "line": 0,
+        "character": 4
+      }
+    }
+  }
+]
