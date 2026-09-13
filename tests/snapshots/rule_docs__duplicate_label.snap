@@ -1,0 +1,26 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `duplicate-label`
+
+Report repeated label keys within one document's namespace, including shared source files. Definitions in mutually exclusive conditional branches are excluded. No fix is offered because either renaming or deleting a definition may be appropriate.
+
+This rule is **enabled by default**.
+
+The same key defined twice in one file:
+
+```tex
+\section{One}\label{sec:x}
+\section{Two}\label{sec:x}
+```
+
+```text
+warning: duplicate-label
+ --> example.tex:2:14
+  |
+1 | \section{One}\label{sec:x}
+  |                     ----- first definition of `sec:x`
+2 | \section{Two}\label{sec:x}
+  |              ^^^^^^^^^^^^^ label `sec:x` is defined more than once
+```

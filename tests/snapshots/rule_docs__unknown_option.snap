@@ -1,0 +1,31 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `unknown-option`
+
+Report package options absent from a loaded local package's `\DeclareOption` declarations. The rule skips installed packages, class options, and `key=value` options. A default handler, key-value processor, option forwarding, or `\input` makes the package's declared set incomplete and disables the check. No fix is offered because removing or renaming an option changes the requested behavior.
+
+This rule is **enabled by default**.
+
+With a sibling `mypkg.sty`:
+
+```tex
+\ProvidesPackage{mypkg}[2026/01/01 v1.0 Demo package]
+\DeclareOption{draft}{}
+\ProcessOptions\relax
+```
+
+Loading the sibling package with an option it never declares:
+
+```tex
+\usepackage[final]{mypkg}
+```
+
+```text
+warning: unknown-option
+ --> example.tex:1:13
+  |
+1 | \usepackage[final]{mypkg}
+  |             ^^^^^ unknown option `final` for package `mypkg`
+```

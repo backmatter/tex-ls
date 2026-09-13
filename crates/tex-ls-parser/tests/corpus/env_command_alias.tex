@@ -1,0 +1,58 @@
+\documentclass{article}
+
+% Issue #109: a command pair that stands in for \begin{X}/\end{X}. tex-ls
+% learns the pairing from these definitions, in this file, and nothing else.
+\newcommand{\bea}{\begin{eqnarray}}
+\newcommand{\eea}{\end{eqnarray}}
+\newcommand{\bc}{\begin{center}}
+\newcommand{\ec}{\end{center}}
+
+% Rejected targets: not curated, verbatim, argument-taking, parameterized.
+\newcommand{\bq}{\begin{notacuratedenv}}
+\newcommand{\eq}{\end{notacuratedenv}}
+\newcommand{\bv}{\begin{verbatim}}
+\newcommand{\ev}{\end{verbatim}}
+\newcommand{\bt}{\begin{tabular}}
+\newcommand{\et}{\end{tabular}}
+\newcommand{\bp}[1]{\begin{center}#1}
+
+% The `\def` form, whose definee reaches the dispatch as an ordinary command.
+\def\bd{\begin{center}}
+\def\ed{\end{center}}
+
+\begin{document}
+
+\bea a &=& b \\ &=& c \eea
+
+\begin{eqnarray} a &=& b \\ &=& c \end{eqnarray}
+
+\bc
+  Centered text.
+\ec
+
+\bd centered by a primitive definition \ed
+
+\bc \bc nested \ec \ec
+
+% `\let` binds two names, so neither operand is a call. The `\bc` here must not
+% open anything, or it would pair with the stray `\ec` below and swallow the
+% paragraph in between.
+\let\oldbc\bc
+prose that belongs to nobody
+\ec
+
+% A literal `\begin{bc}` is an ordinary environment that happens to spell the
+% alias's name; it pairs on its own terms and inherits nothing from `center`.
+\begin{bc} x \end{bc}
+
+% Gated shapes: none of these pair, and none of them diagnose.
+\foo{\bea stranded}
+\eea
+\bea $x$ behind math \eea
+\bea \begin{itemize} \item crossing \eea \end{itemize}
+\bq uncurated \eq
+\bv verbatim \ev
+\bt tabular \et
+\bp{arg-taking}
+
+\end{document}

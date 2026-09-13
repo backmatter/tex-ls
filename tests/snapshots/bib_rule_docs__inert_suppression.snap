@@ -1,0 +1,24 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `inert-suppression`
+
+Report `skip` without a following entry, `on` without `off`, and format-suppression directives, which BibTeX formatting does not support. Also report an unclosed `off`, which suppresses through the end of the file. No fix is offered because the intended boundary is unknown. Suppression comments cannot hide this finding; use `[lint].ignore` to disable it.
+
+This rule is **enabled by default**.
+
+BibTeX recognizes the directive grammar, but its formatter has no suppression mechanism:
+
+```bib
+@comment{tex-ls-format skip-file: preserve this file}
+@book{key}
+```
+
+```text
+warning: inert-suppression
+ --> references.bib:1:1
+  |
+1 | @comment{tex-ls-format skip-file: preserve this file}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the BibTeX formatter does not support format suppression, so this directive does nothing
+```

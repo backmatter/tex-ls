@@ -1,0 +1,55 @@
+name: Check
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked --no-fail-fast
+      - run: cargo doc --workspace --all-features --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - run: python3 scripts/check_architecture.py
+      - run: python3 scripts/test_installers.py
+        if: runner.os != 'Windows'
+      - run: python3 scripts/gen_cwl_signatures.py --selftest
+      - run: python3 scripts/gen_math_symbols.py --selftest
+      - run: python3 scripts/gen_package_names.py --selftest
+      - run: cargo build -p tex-ls-browser -p tex-ls-parser -p tex-ls-formatter --all-features --locked --target wasm32-unknown-unknown
+
+  hosts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.128
+      - run: bash scripts/check_host_parity.sh

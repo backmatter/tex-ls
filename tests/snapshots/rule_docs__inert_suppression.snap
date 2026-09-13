@@ -1,0 +1,24 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `inert-suppression`
+
+Report suppression directives that cannot act: `skip` without a following construct, `on` without `off`, or directives in `.dtx` documentation margins. Also report an unclosed `off`, which suppresses through the end of the file. No fix is offered because the intended boundary is unknown. Suppression comments cannot hide this finding; use `[lint].ignore` to disable it.
+
+This rule is **enabled by default**.
+
+An `on` directive with no matching open region does nothing:
+
+```tex
+% tex-ls-lint on deprecated-command
+{\bf text}
+```
+
+```text
+warning: inert-suppression
+ --> example.tex:1:1
+  |
+1 | % tex-ls-lint on deprecated-command
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `on` has no matching `off`, so this directive closes no region
+```

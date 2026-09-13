@@ -1,0 +1,910 @@
+//! Build a document-symbol outline from the CST: the sectioning hierarchy
+//! (`\part` … `\subparagraph`), with titled Beamer frames, float/theorem
+//! environments, `\label`s, and a `.dtx`'s documented macros/environments (via
+//! [`doc_associations`]) as leaves.
+//! LSP-agnostic by design (byte ranges, no `lsp_types`) so it is
+//! unit-testable without the language server; the `lsp` module converts the
+//! [`OutlineItem`] tree into `lsp_types::DocumentSymbol`.
+//!
+//! Classification reads the built-in [`signature`] DB: a command's
+//! [`sectioning`](signature::CommandSig::sectioning) level and an environment's
+//! [`outline`](signature::EnvironmentSig::outline) category. User-defined
+//! sectioning commands are out of scope here — sectioning is a static, standard
+//! set — so we consult [`signature::builtin`] directly rather than the scanned
+//! two-tier [`signature::Signatures`].
+//!
+//! Two passes. `collect` walks the CST in document order into a flat list of
+//! `(level, item)` pairs: sectioning commands carry their level, while frames,
+//! floats, theorems, and labels carry `None`. Non-outline environments
+//! (`document`, `itemize`, …), along with untitled frames, are *transparent* —
+//! their contents splice into the parent stream so a `\label` inside `itemize`
+//! still surfaces. `nest_sections` then folds the flat list into the hierarchy
+//! with a level stack (sectioning commands are CST siblings; nesting is implied by
+//! level, not tree shape), attaching each non-section item to the deepest open
+//! section and stretching each section's range to where it closes.
+
+use rowan::{TextRange, TextSize};
+
+use crate::ast::{
+    AstNode, Begin, Environment, Optional, child, command_name, first_group_range,
+    group_inner_source, nth_group, nth_group_text,
+};
+use crate::semantic::doc::{DocAssociation, DocKind, doc_associations};
+use crate::semantic::signature::{self, OutlineKind};
+use crate::syntax::{SyntaxKind, SyntaxNode};
+
+/// The kind of an outline entry, driving the LSP `SymbolKind` mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutlineSymbol {
+    /// A sectioning command (`\section`, `\subsection`, …).
+    Section,
+    Equation,
+    Item,
+    Container,
+    /// A float environment (`figure`, `table`).
+    Float,
+    /// A theorem-like environment (`theorem`, `lemma`, `proof`, …).
+    Theorem,
+    /// A titled Beamer frame.
+    Frame,
+    /// A `\label{…}` definition.
+    Label,
+    /// A documented `.dtx` macro: a `macro` environment or `\DescribeMacro`.
+    Macro,
+    /// A documented `.dtx` environment: an `environment` environment or
+    /// `\DescribeEnv`.
+    Environment,
+}
+
+/// One node in the document-symbol outline tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutlineItem {
+    /// Display name: a section title, an environment name, or a label key.
+    pub name: String,
+    pub environment: Option<String>,
+    pub kind: OutlineSymbol,
+    /// The full extent of the symbol (a section spans to where it closes).
+    pub range: TextRange,
+    /// The identifier sub-range to highlight on selection (always `⊆ range`).
+    pub selection_range: TextRange,
+    pub children: Vec<OutlineItem>,
+}
+
+/// Build the outline tree for `root`.
+///
+/// The sectioning/float/label stream from `collect` is merged with the `.dtx`
+/// documentation constructs from [`doc_associations`], re-sorted into document
+/// order, then folded into the hierarchy by `nest_sections` — so a documented
+/// macro nests under its enclosing section like any other leaf. (A doc construct
+/// nested *inside* a float surfaces as a top-level sibling rather than under that
+/// float, since `collect_environment` pre-nests float children from its own walk;
+/// real `.dtx` files don't put doc constructs inside floats.)
+pub fn outline(root: &SyntaxNode) -> Vec<OutlineItem> {
+    let mut raws = collect(root);
+    raws.extend(doc_associations(root).into_iter().map(doc_raw));
+    // Stable sort keeps co-located items (e.g. a section and a label at the same
+    // offset) in their original relative order.
+    raws.sort_by_key(|raw| raw.item.range.start());
+    nest_sections(raws, root.text_range().end())
+}
+
+/// Convert a `.dtx` [`DocAssociation`] into a leaf `Raw` (never a section, so
+/// `level: None`); `nest_sections` then attaches it to the deepest open section.
+fn doc_raw(assoc: DocAssociation) -> Raw {
+    Raw {
+        level: None,
+        item: OutlineItem {
+            environment: None,
+            name: assoc.name,
+            kind: match assoc.kind {
+                DocKind::Macro | DocKind::DescribeMacro => OutlineSymbol::Macro,
+                DocKind::Environment | DocKind::DescribeEnv => OutlineSymbol::Environment,
+            },
+            range: assoc.range,
+            selection_range: assoc.name_range,
+            children: Vec::new(),
+        },
+    }
+}
+
+/// A collected item plus, for a sectioning command, its nesting level.
+#[derive(Clone)]
+struct Raw {
+    level: Option<u8>,
+    item: OutlineItem,
+}
+
+/// Walk `node`'s children in document order, producing the flat `(level, item)`
+/// stream. Recurses into transparent environments and other container nodes so
+/// nested labels/floats/sections surface; outline environments (float/theorem)
+/// become a single item whose own children are nested independently.
+fn collect(node: &SyntaxNode) -> Vec<Raw> {
+    let mut out = Vec::new();
+    for child in node.children() {
+        match child.kind() {
+            SyntaxKind::COMMAND => collect_command(&child, &mut out),
+            SyntaxKind::ENVIRONMENT => collect_environment(&child, &mut out),
+            SyntaxKind::DISPLAY_MATH => collect_equation(&child, None, &mut out),
+            // Any other container (PARAGRAPH, GROUP, BEGIN, END, …): recurse so a
+            // command or environment nested inside still reaches the stream.
+            _ => out.extend(collect(&child)),
+        }
+    }
+    out
+}
+
+/// Emit a sectioning, command-form Beamer frame, or `\label` item for a `COMMAND`
+/// node, if it is one.
+fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>) {
+    let Some(name) = command_name(command) else {
+        return;
+    };
+
+    // `\frame{\frametitle{…} …}` is Beamer's command form. Requiring the nested
+    // title keeps LaTeX's unrelated box-drawing `\frame{…}` command out.
+    if name == "frame"
+        && let Some((title, selection_range)) = frametitle_command(command)
+    {
+        out.push(Raw {
+            level: None,
+            item: OutlineItem {
+                environment: None,
+                name: title,
+                kind: OutlineSymbol::Frame,
+                range: command.text_range(),
+                selection_range,
+                children: nest_sections(collect(command), command.text_range().end()),
+            },
+        });
+        return;
+    }
+
+    // Curated [`signature::builtin`] only — never the bulk CWL tier: the symbol
+    // outline is a curated judgment, and CWL's sectioning classifications are not
+    // trustworthy enough to drive it (the CWL tier carries no `sectioning` anyway).
+    if let Some(level) = signature::builtin()
+        .command(&name)
+        .and_then(|c| c.sectioning)
+    {
+        let selection = nth_group(command, 0)
+            .map(|g| g.text_range())
+            .unwrap_or_else(|| command.text_range());
+        out.push(Raw {
+            level: Some(level),
+            item: OutlineItem {
+                environment: None,
+                name: section_title(command).unwrap_or_else(|| name.to_string()),
+                kind: OutlineSymbol::Section,
+                range: command.text_range(),
+                selection_range: selection,
+                children: Vec::new(),
+            },
+        });
+    } else if name == "label" {
+        // Skip an empty or nested-macro key (`\label{\foo}`), matching the
+        // semantic model's conservative collection.
+        if let Some(key) = nth_group_text(command, 0) {
+            let key = key.trim();
+            if !key.is_empty() {
+                let range = first_group_range(command);
+                out.push(Raw {
+                    level: None,
+                    item: OutlineItem {
+                        environment: None,
+                        name: key.to_owned(),
+                        kind: OutlineSymbol::Label,
+                        range,
+                        selection_range: range,
+                        children: Vec::new(),
+                    },
+                });
+            }
+        }
+    }
+}
+
+/// Emit a frame/float/theorem item for an `ENVIRONMENT` node, or splice its
+/// contents in transparently when it is not outline-worthy.
+fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
+    // The name lives in the `\begin{name}` (`BEGIN` node), not on `ENVIRONMENT`.
+    let begin = Environment::cast(env.clone()).and_then(|e| e.begin());
+    let name = begin.as_ref().and_then(Begin::name);
+    if matches!(
+        name.as_deref(),
+        Some("enumerate" | "itemize" | "description")
+    ) {
+        collect_items(env, name.as_deref().unwrap(), out);
+        return;
+    }
+    if name.as_deref().is_some_and(|name| {
+        name != "math"
+            && signature::builtin()
+                .environment(name)
+                .is_some_and(|sig| sig.math)
+    }) && !env
+        .ancestors()
+        .skip(1)
+        .any(|parent| matches!(parent.kind(), SyntaxKind::MATH | SyntaxKind::DISPLAY_MATH))
+    {
+        collect_equation(env, name.as_deref(), out);
+        return;
+    }
+    let kind = name.as_deref().and_then(|name| {
+        signature::builtin()
+            .environment(name)
+            .and_then(|e| e.outline)
+    });
+
+    let Some(kind) = kind else {
+        if matches!(name.as_deref(), Some("macro" | "environment")) {
+            out.extend(collect(env));
+            return;
+        }
+        out.push(Raw {
+            level: None,
+            item: OutlineItem {
+                name: name.clone().unwrap_or_default(),
+                environment: name,
+                kind: OutlineSymbol::Container,
+                range: env.text_range(),
+                selection_range: begin
+                    .as_ref()
+                    .map_or(env.text_range(), |begin| begin.syntax().text_range()),
+                children: nest_sections(collect(env), env.text_range().end()),
+            },
+        });
+        return;
+    };
+
+    let name = name.unwrap_or_default();
+    let begin_selection = begin
+        .as_ref()
+        .map(|b| b.syntax().text_range())
+        .unwrap_or_else(|| env.text_range());
+    let (display_name, symbol, selection) = match kind {
+        OutlineKind::Float => (name, OutlineSymbol::Float, begin_selection),
+        OutlineKind::Theorem => (name, OutlineSymbol::Theorem, begin_selection),
+        OutlineKind::Frame => {
+            let Some((title, selection)) = frame_title(env, begin.as_ref()) else {
+                // An untitled frame contributes no useful navigation target, but
+                // its labels and other outline constructs must still surface.
+                out.extend(collect(env));
+                return;
+            };
+            (title, OutlineSymbol::Frame, selection)
+        }
+    };
+    out.push(Raw {
+        level: None,
+        item: OutlineItem {
+            environment: begin.as_ref().and_then(Begin::name),
+            name: display_name,
+            kind: symbol,
+            range: env.text_range(),
+            selection_range: selection,
+            // Inner labels and nested outline environments belong to this
+            // container; nest its body independently against the environment's end.
+            children: nest_sections(collect(env), env.text_range().end()),
+        },
+    });
+}
+
+/// A Beamer frame's long title and its source range. The environment shorthand
+/// (`\begin{frame}[opts]{Title}`) is checked first; an absent or empty shorthand
+/// falls through to an explicit `\frametitle[short]{Long}` in the body.
+fn frame_title(env: &SyntaxNode, begin: Option<&Begin>) -> Option<(String, TextRange)> {
+    begin
+        .and_then(|begin| title_argument(begin.syntax(), 0))
+        .or_else(|| frametitle_command(env))
+}
+
+/// Find the first `\frametitle` below `node` and return its long-title argument.
+fn frametitle_command(node: &SyntaxNode) -> Option<(String, TextRange)> {
+    node.descendants()
+        .filter(|descendant| descendant.kind() == SyntaxKind::COMMAND)
+        .find(|command| command_name(command).as_deref() == Some("frametitle"))
+        .and_then(|command| title_argument(&command, 0))
+}
+
+/// Fold the flat `(level, item)` stream into the sectioning hierarchy. `end_bound`
+/// is the closing offset of the enclosing scope (document or environment body),
+/// used to stretch sections still open at the end.
+fn nest_sections(raws: Vec<Raw>, end_bound: TextSize) -> Vec<OutlineItem> {
+    let mut roots: Vec<OutlineItem> = Vec::new();
+    // (level, the section being accumulated) — innermost on top.
+    let mut stack: Vec<(u8, OutlineItem)> = Vec::new();
+
+    for raw in raws {
+        match raw.level {
+            Some(level) => {
+                let start = raw.item.range.start();
+                // A section at this level (or a shallower one) closes every open
+                // section it is not nested under; each ends where this one begins.
+                while stack.last().is_some_and(|(open, _)| *open >= level) {
+                    let (_, mut section) = stack.pop().unwrap();
+                    section.range = TextRange::new(section.range.start(), start);
+                    attach(&mut roots, &mut stack, section);
+                }
+                stack.push((level, raw.item));
+            }
+            // A float/theorem/label sits inside the deepest open section.
+            None => attach(&mut roots, &mut stack, raw.item),
+        }
+    }
+
+    // Drain still-open sections; they run to the end of the enclosing scope.
+    while let Some((_, mut section)) = stack.pop() {
+        section.range = TextRange::new(section.range.start(), end_bound);
+        attach(&mut roots, &mut stack, section);
+    }
+    roots
+}
+
+/// Attach `item` to the deepest open section, or to the roots when none is open.
+fn attach(roots: &mut Vec<OutlineItem>, stack: &mut [(u8, OutlineItem)], item: OutlineItem) {
+    match stack.last_mut() {
+        Some((_, parent)) => parent.children.push(item),
+        None => roots.push(item),
+    }
+}
+
+/// The display title of a sectioning command: the first `{…}` argument (the
+/// `[opt]` short title is skipped by [`nth_group`]). Falls back to the raw inner
+/// source when the title holds nested macros, and to `None` when there is no title
+/// group at all (the caller substitutes the command name).
+fn section_title(command: &SyntaxNode) -> Option<String> {
+    title_argument(command, 0).map(|(title, _)| title)
+}
+
+/// A trimmed, nonempty title from the `n`-th braced argument, retaining nested
+/// macro source when the group is not flat, together with the group range.
+fn title_argument(node: &SyntaxNode, n: usize) -> Option<(String, TextRange)> {
+    let group = nth_group(node, n)?;
+    let text = nth_group_text(node, n)
+        .map(|text| text.to_string())
+        .unwrap_or_else(|| group_inner_source(&group));
+    let text = text.trim().to_owned();
+    (!text.is_empty()).then(|| (text, group.text_range()))
+}
+
+/// What a `\label` at some offset labels: the classification driving label
+/// hover (kind + nearest heading/caption). Like [`OutlineItem`], LSP-agnostic
+/// and classified from the curated [`signature::builtin`] DB only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelContext {
+    /// Directly under a sectioning command; `title` is its heading text.
+    Section { title: String },
+    /// Inside a float environment (`figure`, `table`, …); `caption` is the
+    /// text of a `\caption` in that float, when present.
+    Float {
+        env: String,
+        caption: Option<String>,
+    },
+    /// Inside a theorem-like environment; `description` is the optional
+    /// `\begin{thm}[…]` argument, when present.
+    Theorem {
+        env: String,
+        description: Option<String>,
+    },
+    /// Inside math (`$…$`, `\[…\]`, or a math environment).
+    Equation,
+    /// Inside a list environment (`enumerate`, `itemize`, …).
+    Item,
+}
+
+/// Classify the `\label` whose key sits at `offset`: the innermost classifying
+/// ancestor wins (float/theorem/math/list environment), matching how the label
+/// resolves in TeX; a label in plain prose falls back to the nearest *preceding*
+/// sectioning command. `None` in unclassifiable plain text before any section.
+pub fn label_context(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext> {
+    let element = root.covering_element(TextRange::empty(offset));
+    let mut node = match element {
+        rowan::NodeOrToken::Node(n) => Some(n),
+        rowan::NodeOrToken::Token(t) => t.parent(),
+    };
+    while let Some(current) = node {
+        match current.kind() {
+            SyntaxKind::MATH | SyntaxKind::INLINE_MATH | SyntaxKind::DISPLAY_MATH => {
+                return Some(LabelContext::Equation);
+            }
+            SyntaxKind::ENVIRONMENT => {
+                let begin = Environment::cast(current.clone()).and_then(|e| e.begin());
+                if let Some(name) = begin.as_ref().and_then(Begin::name)
+                    && let Some(sig) = signature::builtin().environment(&name)
+                {
+                    match sig.outline {
+                        Some(OutlineKind::Float) => {
+                            return Some(LabelContext::Float {
+                                caption: caption_text(&current),
+                                env: name,
+                            });
+                        }
+                        Some(OutlineKind::Theorem) => {
+                            return Some(LabelContext::Theorem {
+                                description: begin.as_ref().and_then(optional_text),
+                                env: name,
+                            });
+                        }
+                        Some(OutlineKind::Frame) => {}
+                        None => {
+                            if sig.math {
+                                return Some(LabelContext::Equation);
+                            }
+                            if sig.list {
+                                return Some(LabelContext::Item);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        node = current.parent();
+    }
+
+    // Plain prose: the label belongs to the current sectioning unit — the last
+    // sectioning command starting before the label.
+    let mut best: Option<SyntaxNode> = None;
+    for command in root
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::COMMAND)
+    {
+        if command.text_range().start() > offset {
+            break;
+        }
+        let is_sectioning = command_name(&command)
+            .and_then(|name| {
+                signature::builtin()
+                    .command(&name)
+                    .and_then(|c| c.sectioning)
+            })
+            .is_some();
+        if is_sectioning {
+            best = Some(command);
+        }
+    }
+    let section = best?;
+    let title = section_title(&section)
+        .or_else(|| command_name(&section).map(|name| name.to_string()))
+        .unwrap_or_default();
+    Some(LabelContext::Section { title })
+}
+
+/// The text of the first `\caption` inside `env`, via the same first-group
+/// extraction as [`section_title`].
+fn caption_text(env: &SyntaxNode) -> Option<String> {
+    env.descendants()
+        .filter(|n| n.kind() == SyntaxKind::COMMAND)
+        .find(|c| command_name(c).as_deref() == Some("caption"))
+        .and_then(|caption| section_title(&caption))
+}
+
+/// The inner text of a `\begin{…}[…]` optional argument (its `OPTIONAL` child,
+/// brackets stripped), trimmed; `None` when absent or empty.
+fn optional_text(begin: &Begin) -> Option<String> {
+    let optional = child::<Optional>(begin.syntax())?;
+    let text = optional.syntax().text().to_string();
+    let inner = text
+        .strip_prefix('[')
+        .map(|t| t.strip_suffix(']').unwrap_or(t))
+        .unwrap_or(&text)
+        .trim()
+        .to_owned();
+    (!inner.is_empty()).then_some(inner)
+}
+
+fn collect_equation(node: &SyntaxNode, environment: Option<&str>, out: &mut Vec<Raw>) {
+    let children = nest_sections(collect(node), node.text_range().end());
+    let label = children
+        .iter()
+        .find(|child| child.kind == OutlineSymbol::Label);
+    out.push(Raw {
+        level: None,
+        item: OutlineItem {
+            name: label.map_or_else(|| "Equation".into(), |label| label.name.clone()),
+            environment: environment.map(str::to_owned),
+            kind: OutlineSymbol::Equation,
+            range: node.text_range(),
+            selection_range: label.map_or(node.text_range(), |label| label.selection_range),
+            children,
+        },
+    });
+}
+
+fn collect_items(env: &SyntaxNode, environment: &str, out: &mut Vec<Raw>) {
+    let items = env
+        .descendants()
+        .filter(|node| {
+            node.kind() == SyntaxKind::COMMAND && command_name(node).as_deref() == Some("item")
+        })
+        .filter(|node| {
+            node.ancestors()
+                .skip(1)
+                .find(|parent| parent.kind() == SyntaxKind::ENVIRONMENT)
+                .as_ref()
+                == Some(env)
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        out.extend(collect(env));
+        return;
+    }
+    let mut inner = collect(env);
+    let mut collected = Vec::new();
+    let end = Environment::cast(env.clone())
+        .and_then(|env| env.end())
+        .map_or(env.text_range().end(), |end| {
+            end.syntax().text_range().start()
+        });
+    for (index, item) in items.iter().enumerate() {
+        let start = item.text_range().start();
+        let end = items
+            .get(index + 1)
+            .map_or(end, |next| next.text_range().start());
+        let mut children = Vec::new();
+        inner.retain(|raw| {
+            if raw.item.range.start() >= start && raw.item.range.start() < end {
+                children.push(raw.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let label = item
+            .children()
+            .find(|node| node.kind() == SyntaxKind::OPTIONAL)
+            .map(|node| group_inner_source(&node));
+        let name = label
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| {
+                let text = env.text().to_string();
+                let relative = usize::from(item.text_range().end() - env.text_range().start());
+                let tail = &text[relative..usize::from(end - env.text_range().start())];
+                let preview = tail.split_whitespace().collect::<Vec<_>>().join(" ");
+                if preview.is_empty() {
+                    "Item".into()
+                } else {
+                    format!("Item: {}", preview.chars().take(80).collect::<String>())
+                }
+            });
+        collected.push(Raw {
+            level: None,
+            item: OutlineItem {
+                name,
+                environment: Some(environment.into()),
+                kind: OutlineSymbol::Item,
+                range: TextRange::new(start, end),
+                selection_range: item.text_range(),
+                children: nest_sections(children, end),
+            },
+        });
+    }
+    collected.extend(inner);
+    collected.sort_by_key(|raw| raw.item.range.start());
+    out.extend(collected);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{LatexFlavor, LexConfig, parse, parse_with_flavor};
+
+    fn outline_of(src: &str) -> Vec<OutlineItem> {
+        outline(&SyntaxNode::new_root(parse(src).green))
+    }
+
+    fn outline_of_dtx(src: &str) -> Vec<OutlineItem> {
+        let config = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: true,
+        };
+        let parsed = parse_with_flavor(src, config);
+        assert_eq!(parsed.syntax().to_string(), src, "losslessness violated");
+        outline(&parsed.syntax())
+    }
+
+    #[test]
+    fn sibling_sections_are_roots() {
+        let items = outline_of("\\section{A}\ntext\n\\section{B}\n");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "A");
+        assert_eq!(items[0].kind, OutlineSymbol::Section);
+        assert_eq!(items[1].name, "B");
+        assert!(items[0].children.is_empty());
+    }
+
+    #[test]
+    fn deeper_levels_nest() {
+        let items = outline_of("\\section{A}\n\\subsection{B}\n\\subsubsection{C}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "A");
+        assert_eq!(items[0].children.len(), 1);
+        let b = &items[0].children[0];
+        assert_eq!(b.name, "B");
+        assert_eq!(b.children.len(), 1);
+        assert_eq!(b.children[0].name, "C");
+    }
+
+    #[test]
+    fn shallower_section_pops_back_to_root() {
+        let items = outline_of("\\section{A}\n\\subsection{B}\n\\section{C}\n");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "A");
+        assert_eq!(items[0].children[0].name, "B");
+        assert_eq!(items[1].name, "C");
+        assert!(items[1].children.is_empty());
+    }
+
+    #[test]
+    fn figure_with_label_nests_label() {
+        let items = outline_of("\\begin{figure}\n\\label{fig:x}\n\\end{figure}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, OutlineSymbol::Float);
+        assert_eq!(items[0].name, "figure");
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Label);
+        assert_eq!(items[0].children[0].name, "fig:x");
+    }
+
+    #[test]
+    fn theorem_is_theorem_kind() {
+        let items = outline_of("\\begin{theorem}\nx\n\\end{theorem}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, OutlineSymbol::Theorem);
+        assert_eq!(items[0].name, "theorem");
+    }
+
+    #[test]
+    fn label_after_section_nests_under_it() {
+        let items = outline_of("\\section{A}\n\\label{sec:a}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Label);
+        assert_eq!(items[0].children[0].name, "sec:a");
+    }
+
+    #[test]
+    fn float_inside_section_nests() {
+        let items = outline_of("\\section{A}\n\\begin{table}\nx\n\\end{table}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Float);
+        assert_eq!(items[0].children[0].name, "table");
+    }
+
+    #[test]
+    fn titled_beamer_frames_nest_inside_sections() {
+        let src = "\\section{Talk}\n\
+            \\begin{frame}[fragile]\n\
+            \\frametitle[Short]{First \\emph{slide}}\n\
+            \\label{frame:first}\n\
+            \\end{frame}\n\
+            \\begin{frame}[plain]{Second slide}\n\
+            body\n\
+            \\end{frame}\n";
+        let items = outline_of(src);
+
+        assert_eq!(items.len(), 1);
+        let frames = &items[0].children;
+        assert_eq!(
+            frames
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["First \\emph{slide}", "Second slide"]
+        );
+        assert!(frames.iter().all(|item| item.kind == OutlineSymbol::Frame));
+        assert_eq!(
+            &src[usize::from(frames[0].selection_range.start())
+                ..usize::from(frames[0].selection_range.end())],
+            "{First \\emph{slide}}"
+        );
+        assert_eq!(frames[0].children.len(), 1);
+        assert_eq!(frames[0].children[0].name, "frame:first");
+        assert_eq!(
+            &src[usize::from(frames[1].selection_range.start())
+                ..usize::from(frames[1].selection_range.end())],
+            "{Second slide}"
+        );
+    }
+
+    #[test]
+    fn untitled_beamer_frame_remains_transparent() {
+        let items =
+            outline_of("\\section{Talk}\n\\begin{frame}\n\\label{frame:untitled}\n\\end{frame}\n");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Label);
+        assert_eq!(items[0].children[0].name, "frame:untitled");
+    }
+
+    #[test]
+    fn command_form_beamer_frame_uses_frametitle() {
+        let items = outline_of(
+            "\\section{Talk}\n\\frame{\\frametitle{Command slide}\\label{frame:command}body}\n",
+        );
+
+        assert_eq!(items.len(), 1);
+        let frame = &items[0].children[0];
+        assert_eq!(frame.kind, OutlineSymbol::Frame);
+        assert_eq!(frame.name, "Command slide");
+        assert_eq!(frame.children.len(), 1);
+        assert_eq!(frame.children[0].name, "frame:command");
+    }
+
+    #[test]
+    fn label_inside_itemize_belongs_to_its_item() {
+        let items =
+            outline_of("\\section{A}\n\\begin{itemize}\n\\item \\label{x}\n\\end{itemize}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Item);
+        assert_eq!(items[0].children[0].children[0].name, "x");
+    }
+
+    #[test]
+    fn section_extent_ends_at_next_sibling_start() {
+        let src = "\\section{A}\ntext\n\\section{B}\n";
+        let items = outline_of(src);
+        let next = src.rfind("\\section").unwrap();
+        assert_eq!(usize::from(items[0].range.end()), next);
+    }
+
+    #[test]
+    fn nested_macro_title_falls_back_to_source() {
+        let items = outline_of("\\section{\\textsc{Intro}}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "\\textsc{Intro}");
+    }
+
+    fn context_of(src: &str) -> Option<LabelContext> {
+        let offset = src.find("\\label").expect("marker") + "\\label{".len();
+        let root = SyntaxNode::new_root(parse(src).green);
+        label_context(&root, TextSize::new(offset as u32))
+    }
+
+    #[test]
+    fn label_after_section_is_section_context() {
+        let ctx = context_of("\\section{Intro}\ntext\n\\label{sec:a}\nmore\n");
+        assert_eq!(
+            ctx,
+            Some(LabelContext::Section {
+                title: "Intro".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn label_in_figure_gets_caption() {
+        let ctx =
+            context_of("\\begin{figure}\n\\caption{A chart}\n\\label{fig:x}\n\\end{figure}\n");
+        assert_eq!(
+            ctx,
+            Some(LabelContext::Float {
+                env: "figure".to_owned(),
+                caption: Some("A chart".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn label_in_captionless_table() {
+        let ctx = context_of("\\begin{table}\nx\\label{tab:x}\n\\end{table}\n");
+        assert_eq!(
+            ctx,
+            Some(LabelContext::Float {
+                env: "table".to_owned(),
+                caption: None
+            })
+        );
+    }
+
+    #[test]
+    fn label_in_theorem_with_description() {
+        let ctx = context_of("\\begin{theorem}[Euler]\nx \\label{thm:a}\n\\end{theorem}\n");
+        assert_eq!(
+            ctx,
+            Some(LabelContext::Theorem {
+                env: "theorem".to_owned(),
+                description: Some("Euler".to_owned())
+            })
+        );
+    }
+
+    #[test]
+    fn label_in_equation_environment_is_equation() {
+        let ctx = context_of("\\begin{equation}\nE = mc^2 \\label{eq:e}\n\\end{equation}\n");
+        assert_eq!(ctx, Some(LabelContext::Equation));
+    }
+
+    #[test]
+    fn label_in_display_math_is_equation() {
+        let ctx = context_of("\\[ x \\label{eq:x} \\]\n");
+        assert_eq!(ctx, Some(LabelContext::Equation));
+    }
+
+    #[test]
+    fn label_in_enumerate_is_item() {
+        let ctx = context_of("\\begin{enumerate}\n\\item one \\label{it:1}\n\\end{enumerate}\n");
+        assert_eq!(ctx, Some(LabelContext::Item));
+    }
+
+    #[test]
+    fn float_wins_over_enclosing_section() {
+        let ctx = context_of("\\section{A}\n\\begin{figure}\n\\label{fig:x}\n\\end{figure}\n");
+        assert!(matches!(ctx, Some(LabelContext::Float { .. })));
+    }
+
+    #[test]
+    fn item_label_inside_figure_stays_item() {
+        let ctx = context_of(
+            "\\begin{figure}\n\\begin{itemize}\n\\item \\label{it:x}\n\\end{itemize}\n\\end{figure}\n",
+        );
+        assert_eq!(ctx, Some(LabelContext::Item));
+    }
+
+    #[test]
+    fn label_before_any_section_is_none() {
+        assert_eq!(context_of("text \\label{x} more\n"), None);
+    }
+
+    #[test]
+    fn section_after_the_label_does_not_count() {
+        let ctx = context_of("text \\label{x}\n\\section{Later}\n");
+        assert_eq!(ctx, None);
+    }
+
+    #[test]
+    fn dtx_macro_env_is_a_macro_symbol() {
+        let items = outline_of_dtx("% \\begin{macro}{\\foo}\n% docs.\n% \\end{macro}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "\\foo");
+        assert_eq!(items[0].kind, OutlineSymbol::Macro);
+    }
+
+    #[test]
+    fn dtx_describe_macro_braced_and_braceless() {
+        let braced = outline_of_dtx("% \\DescribeMacro{\\foo} does foo.\n");
+        assert_eq!(braced.len(), 1);
+        assert_eq!(braced[0].name, "\\foo");
+        assert_eq!(braced[0].kind, OutlineSymbol::Macro);
+
+        let braceless = outline_of_dtx("% \\DescribeMacro\\foo does foo.\n");
+        assert_eq!(braceless.len(), 1);
+        assert_eq!(braceless[0].name, "\\foo");
+        assert_eq!(braceless[0].kind, OutlineSymbol::Macro);
+    }
+
+    #[test]
+    fn dtx_environment_constructs_are_environment_symbols() {
+        let env = outline_of_dtx("% \\begin{environment}{myenv}\n% docs.\n% \\end{environment}\n");
+        assert_eq!(env.len(), 1);
+        assert_eq!(env[0].name, "myenv");
+        assert_eq!(env[0].kind, OutlineSymbol::Environment);
+
+        let describe = outline_of_dtx("% \\DescribeEnv{myenv} is an env.\n");
+        assert_eq!(describe.len(), 1);
+        assert_eq!(describe[0].name, "myenv");
+        assert_eq!(describe[0].kind, OutlineSymbol::Environment);
+    }
+
+    #[test]
+    fn dtx_macro_nests_under_preceding_section() {
+        let items =
+            outline_of_dtx("\\section{Impl}\n% \\begin{macro}{\\foo}\n% docs.\n% \\end{macro}\n");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].name, "Impl");
+        assert_eq!(items[0].children.len(), 1);
+        assert_eq!(items[0].children[0].name, "\\foo");
+        assert_eq!(items[0].children[0].kind, OutlineSymbol::Macro);
+    }
+
+    #[test]
+    fn dtx_constructs_without_sections_are_roots_in_order() {
+        let items =
+            outline_of_dtx("% \\DescribeMacro\\foo\n% \\begin{macro}{\\bar}\n% \\end{macro}\n");
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["\\foo", "\\bar"]);
+    }
+}

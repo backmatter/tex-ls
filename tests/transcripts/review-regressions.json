@@ -1,0 +1,218 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {}
+      },
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": false
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/a.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\input{shared}\n\\gls{cpu}\n\\bibliography{refs}\n\\cite{old}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/b.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\input{shared}\n\\gls{cpu}\n\\bibliography{refs}\n\\cite{old}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/shared.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\newacronym{cpu}{CPU}{processor}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/refs.bib",
+          "languageId": "bibtex",
+          "version": 1,
+          "text": "@misc{old,title={Title}}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/a.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 7
+        }
+      },
+      "request": true,
+      "expected": null
+    },
+    {
+      "method": "textDocument/rename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/a.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 7
+        },
+        "newName": "replacement"
+      },
+      "request": true,
+      "expected": null
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/a.tex"
+        },
+        "position": {
+          "line": 4,
+          "character": 7
+        }
+      },
+      "request": true,
+      "expected": null
+    },
+    {
+      "method": "textDocument/rename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/a.tex"
+        },
+        "position": {
+          "line": 4,
+          "character": 7
+        },
+        "newName": "replacement"
+      },
+      "request": true,
+      "expected": null
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/bare.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "😀 \\input cha after"
+        }
+      },
+      "files": {
+        "chapter.tex": "Chapter"
+      }
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/bare.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 1
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 1,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings",
+              {
+                "kind": {
+                  "state": "present",
+                  "value": "directory"
+                },
+                "directory": {
+                  "state": "present",
+                  "value": {
+                    "entries": {
+                      "chapter.tex": "file"
+                    },
+                    "complete": true
+                  }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/bare.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 12
+        }
+      },
+      "request": true,
+      "expected": {
+        "isIncomplete": true,
+        "items": [
+          {
+            "kind": 17,
+            "label": "chapter.tex",
+            "sortText": "000000",
+            "textEdit": {
+              "newText": "chapter",
+              "range": {
+                "start": {
+                  "line": 0,
+                  "character": 10
+                },
+                "end": {
+                  "line": 0,
+                  "character": 13
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

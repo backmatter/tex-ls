@@ -1,0 +1,24 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `duplicate-package`
+
+Report repeated `\usepackage` or `\RequirePackage` loads in one file. Loads in mutually exclusive conditional branches are excluded. Macros such as `\ifthenelse` do not define recognized branches, and class loads are not checked. No fix is offered because removing a load may discard options.
+
+This rule is **enabled by default**.
+
+The same package loaded twice:
+
+```tex
+\usepackage{amsmath}
+\usepackage{amsmath}
+```
+
+```text
+warning: duplicate-package
+ --> example.tex:2:1
+  |
+2 | \usepackage{amsmath}
+  | ^^^^^^^^^^^^^^^^^^^^ package `amsmath` is loaded more than once
+```

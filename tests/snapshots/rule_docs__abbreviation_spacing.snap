@@ -1,0 +1,37 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `abbreviation-spacing`
+
+Report incorrect spacing after abbreviations and acronyms. Before a lowercase word, abbreviations such as `e.g.` need `\ ` to prevent sentence spacing. Before an uppercase word, a sentence ending in two or more capitals needs `\@` before its period. Initials, dotted acronyms, math, comments, and verbatim text are excluded. The rule is disabled under `\frenchspacing`. Both fixes require unsafe opt-in because they change typeset spacing.
+
+This rule is **enabled by default**.
+
+A lowercase abbreviation followed by more text takes an interword space:
+
+```tex
+We tried several methods, e.g. gradient descent.
+```
+
+```text
+warning: abbreviation-spacing
+ --> example.tex:1:31
+  |
+1 | We tried several methods, e.g. gradient descent.
+  |                               ^ `e.g.` is an abbreviation, not a sentence end; use an interword space `\ ` (`e.g.\ `) so TeX does not widen the gap
+```
+
+An acronym ending a sentence takes intersentence spacing:
+
+```tex
+The rover reached the USA. Then it stopped.
+```
+
+```text
+warning: abbreviation-spacing
+ --> example.tex:1:26
+  |
+1 | The rover reached the USA. Then it stopped.
+  |                          ^ capital before sentence-ending punctuation suppresses intersentence spacing; use `\@` (`Word\@.`) to restore it
+```

@@ -1,0 +1,24 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `duplicate-key`
+
+Report repeated citation keys within a bibliography or across one root's bibliography resources and manual `\bibitem` definitions. Keys are compared case-insensitively. Every definition after the first is reported. No fix is offered because the author must choose which entry to rename or remove.
+
+This rule is **enabled by default**.
+
+The same cite key defined by two entries:
+
+```bib
+@misc{knuth84, title = {Draft}}
+@book{knuth84, title = {Book}}
+```
+
+```text
+warning: duplicate-key
+ --> references.bib:2:7
+  |
+2 | @book{knuth84, title = {Book}}
+  |       ^^^^^^^ cite key `knuth84` is defined more than once
+```

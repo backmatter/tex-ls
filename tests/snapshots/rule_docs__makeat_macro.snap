@@ -1,0 +1,37 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `makeat-macro`
+
+Report a command containing `@` outside a `\makeatletter` region. The lexer splits such a name into a command and following text, so TeX will not call the intended macro. Names inside the region and sentence-spacing `\@` are excluded. No fix is offered because the author must choose the region's boundaries.
+
+This rule is **enabled by default**.
+
+An internal `@` macro used without `\makeatletter`:
+
+```tex
+\my@command
+```
+
+```text
+warning: makeat-macro
+ --> example.tex:1:1
+  |
+1 | \my@command
+  | ^^^^^^^^^^^ `\my@command` uses `@` in a macro name outside a `\makeatletter` region; `@` is not a letter here, so this reads as `\my` followed by the text `@command`
+```
+
+A leading-`@` macro (a `\@`-prefixed internal) outside a region:
+
+```tex
+\@ifstar{\StarredForm}{\PlainForm}
+```
+
+```text
+warning: makeat-macro
+ --> example.tex:1:1
+  |
+1 | \@ifstar{\StarredForm}{\PlainForm}
+  | ^^^^^^^^ `\@ifstar` uses `@` in a macro name outside a `\makeatletter` region; `@` is not a letter here, so this reads as `\@` followed by the text `ifstar`
+```

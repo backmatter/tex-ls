@@ -1,0 +1,86 @@
+{
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///policy.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\section{Intro}\n\\begin{itemize}\n\\item x\n\\end{itemize}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///policy.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///policy.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 3
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "params": {
+        "textDocument": {
+          "uri": "file:///policy.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 10
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///policy.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 12
+        }
+      },
+      "request": true
+    }
+  ],
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {},
+        "hover": {
+          "contentFormat": [
+            "plaintext"
+          ]
+        },
+        "documentSymbol": {
+          "hierarchicalDocumentSymbolSupport": false
+        },
+        "completion": {
+          "completionItem": {
+            "snippetSupport": false,
+            "documentationFormat": [
+              "plaintext"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,96 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "completion": {
+          "completionItem": {
+            "snippetSupport": true,
+            "insertReplaceSupport": true
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\ud83d\ude00 \\sectionobsolete{Title}\n\\label{sec:new-key}\n\\ref{sec:now-key}\n\\begin{itemize}\nbody\n\\end{itemize}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/main.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 9
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 10
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/main.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 10
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/tail.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{ite}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///completion/tail.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 10
+        }
+      },
+      "request": true
+    }
+  ]
+}

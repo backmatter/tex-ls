@@ -1,0 +1,30 @@
+[package]
+publish = false
+name = "tex-ls-formatter"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Deterministic, rule-based formatter for LaTeX and BibTeX"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/backmatter/tex-ls"
+documentation = "https://github.com/backmatter/tex-ls/tree/main/crates/tex-ls-formatter"
+authors.workspace = true
+keywords = ["latex", "bibtex", "formatter"]
+categories = ["development-tools", "text-processing"]
+
+[dependencies]
+tex-ls-parser = { path = "../tex-ls-parser", version = "0.1.0" }
+rowan = { workspace = true }
+schemars = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+schema = ["serde", "dep:schemars"]

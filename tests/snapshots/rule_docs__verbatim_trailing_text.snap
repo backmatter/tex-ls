@@ -1,0 +1,25 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `verbatim-trailing-text`
+
+Report text after a verbatim environment's closing delimiter on the same line. TeX discards that text when it closes the environment. Trailing comments and ordinary environments are excluded. No fix is offered because the author must decide whether to move or remove the text.
+
+This rule is **enabled by default**.
+
+Text after `\end{verbatim}` is silently discarded by LaTeX:
+
+```tex
+\begin{verbatim}
+sample
+\end{verbatim} and more
+```
+
+```text
+warning: verbatim-trailing-text
+ --> example.tex:3:16
+  |
+3 | \end{verbatim} and more
+  |                ^^^^^^^^ text after `\end{verbatim}` on the same line is silently discarded
+```

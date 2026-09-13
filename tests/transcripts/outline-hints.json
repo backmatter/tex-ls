@@ -1,0 +1,211 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "initializationOptions": {
+      "outline": {
+        "items": true,
+        "unlabelledEquations": true
+      },
+      "inlayHints": {
+        "maxLength": 3
+      },
+      "texmf": {
+        "enabled": false
+      }
+    },
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {},
+        "documentSymbol": {
+          "hierarchicalDocumentSymbolSupport": true
+        },
+        "inlayHint": {}
+      }
+    }
+  },
+  "settings": {
+    "outline": {
+      "items": true,
+      "unlabelledEquations": true
+    },
+    "inlayHints": {
+      "maxLength": 3
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\section{R\u00e9sum\u00e9 methods}\n\\begin{equation}x=1\\label{eq:a}\\end{equation}\n\\[y=2\\]\n\\begin{enumerate}\n\\item First\ncontinued\n\\item Second\n\\end{enumerate}\n% first\n% second\n\\ref{eq:a}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/foldingRange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/inlayHint",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 20,
+            "character": 0
+          }
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 1
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.aux": "\\newlabel{eq:a}{{12345}{1}}\n"
+      },
+      "params": {
+        "token": 1,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.aux",
+              {
+                "state": "present",
+                "value": {
+                  "identity": "1",
+                  "text": "\\newlabel{eq:a}{{12345}{1}}\n"
+                }
+              }
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "method": "textDocument/inlayHint",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 20,
+            "character": 0
+          }
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/symbol",
+      "params": {
+        "query": "r\u00e9sum\u00e9 eq:a"
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 2
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.aux": null
+      },
+      "params": {
+        "token": 2,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.aux",
+              {
+                "state": "absent"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "method": "textDocument/inlayHint",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 20,
+            "character": 0
+          }
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/symbol",
+      "params": {
+        "query": "r\u00e9sum\u00e9 eq:a"
+      },
+      "request": true
+    }
+  ]
+}

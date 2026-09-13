@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `missing-nonbreaking-space`
+
+Report a space or single newline before a bare-number reference or bracketed citation, such as `Figure \ref{x}` or `see \cite{a}`. A tie keeps the reference with its preceding word. Self-describing references such as `\autoref` and textual citations such as `\textcite` are excluded. A same-line space has an unsafe fix to `~` because line breaking changes. A newline receives no fix; blank lines are not reported.
+
+This rule is **enabled by default**.
+
+A plain space where a tie belongs before a cross-reference:
+
+```tex
+see Figure \ref{fig:plot}
+```
+
+```text
+warning: missing-nonbreaking-space
+ --> example.tex:1:11
+  |
+1 | see Figure \ref{fig:plot}
+  |           ^ missing non-breaking space before `\ref`; use a tie `~` so the reference stays on the same line
+```

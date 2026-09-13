@@ -1,0 +1,43 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `primitive-command`
+
+Report plain-TeX primitives with LaTeX alternatives. Most replacements restructure arguments, such as `\over` becoming `\frac`, so no automatic fix is offered. tex-ls-equivalent replacements such as `\sb` to `_` and `\sp` to `^` have safe fixes. Locally redefined names are excluded, and commands referenced by `\let` or `\ifx` receive no fix.
+
+This rule is **enabled by default**.
+
+A plain-TeX fraction primitive (report-only; the LaTeX form restructures its operands):
+
+```tex
+$a \over b$
+```
+
+```text
+warning: primitive-command
+ --> example.tex:1:4
+  |
+1 | $a \over b$
+  |    ^^^^^ `\over` is a raw TeX primitive; use `\frac{...}{...}`
+```
+
+The plain-TeX subscript alias, carrying a safe swap to `_`:
+
+```tex
+$x\sb2$
+```
+
+```text
+warning: primitive-command
+ --> example.tex:1:3
+  |
+1 | $x\sb2$
+  |   ^^^ `\sb` is a raw TeX primitive; use `_`
+```
+
+After applying the fix:
+
+```tex
+$x_2$
+```

@@ -1,0 +1,119 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///review-semantic/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\bibitem{alpha} Alpha\n\\bibitem{beta} Beta\n\ud83d\ude00 \\Cites{alpha}{beta}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///review-semantic/main.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 18
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true,
+      "expected": [
+        {
+          "uri": "file:///review-semantic/main.tex",
+          "range": {
+            "start": {
+              "line": 2,
+              "character": 9
+            },
+            "end": {
+              "line": 2,
+              "character": 13
+            }
+          }
+        },
+        {
+          "uri": "file:///review-semantic/main.tex",
+          "range": {
+            "start": {
+              "line": 3,
+              "character": 17
+            },
+            "end": {
+              "line": 3,
+              "character": 21
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///review-semantic/refs.bib",
+          "languageId": "bibtex",
+          "version": 1,
+          "text": "@article{key, title={\ud83d\ude00 \\\"{O}resund}}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///review-semantic/refs.bib"
+        },
+        "position": {
+          "line": 0,
+          "character": 26
+        }
+      },
+      "request": true,
+      "expected": {
+        "isIncomplete": false,
+        "items": [
+          {
+            "label": "\"",
+            "kind": 3,
+            "detail": "TeX text accent",
+            "sortText": "000000",
+            "textEdit": {
+              "range": {
+                "start": {
+                  "line": 0,
+                  "character": 25
+                },
+                "end": {
+                  "line": 0,
+                  "character": 26
+                }
+              },
+              "newText": "\""
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

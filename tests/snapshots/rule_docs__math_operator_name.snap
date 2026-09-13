@@ -1,0 +1,42 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `math-operator-name`
+
+Report operator names such as `sin`, `cos`, `log`, and `lim` written without a backslash in math. Names must start a word and end at a word boundary; longer matches such as `sinh` take precedence. Subscripts, superscripts, text arguments, and unknown arguments are excluded. Adding the backslash requires unsafe opt-in because it changes glyphs and spacing, and the letters could represent a product.
+
+This rule is **enabled by default**.
+
+A bare function name typesets as italic variables:
+
+```tex
+$sin x + cos x = 1$
+```
+
+```text
+warning: math-operator-name
+ --> example.tex:1:2
+  |
+1 | $sin x + cos x = 1$
+  |  ^^^ bare `sin` in math typesets as italic variables; use `\sin`
+warning: math-operator-name
+ --> example.tex:1:10
+  |
+1 | $sin x + cos x = 1$
+  |          ^^^ bare `cos` in math typesets as italic variables; use `\cos`
+```
+
+It fires through the glued `f(x)` form too:
+
+```tex
+The limit $lim(x)$ diverges.
+```
+
+```text
+warning: math-operator-name
+ --> example.tex:1:12
+  |
+1 | The limit $lim(x)$ diverges.
+  |            ^^^ bare `lim` in math typesets as italic variables; use `\lim`
+```

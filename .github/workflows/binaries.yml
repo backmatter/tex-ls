@@ -1,0 +1,93 @@
+name: Release binaries
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
+        default: v0.1.0
+permissions:
+  contents: read
+concurrency:
+  group: binaries-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      BUILD_TARGET: ${{ matrix.target }}
+      RUSTFLAGS: ${{ matrix.rustflags || '' }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: source
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+      - name: Install musl toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - run: rustup target add ${{ matrix.target }}
+        working-directory: source
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+          key: binaries-${{ matrix.target }}
+      - name: Build
+        run: cargo build --manifest-path source/Cargo.toml --release --locked --bin tex-ls --target ${{ matrix.target }}
+      - name: Test and package
+        shell: bash
+        run: python3 scripts/package_release.py --source source --target "$BUILD_TARGET" --tag "$RELEASE_TAG"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Prepare installers and checksums
+        run: python3 scripts/prepare_release_assets.py "$RELEASE_TAG" dist
+      - name: Upload to existing release
+        run: |
+          gh release view "$RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" dist/*

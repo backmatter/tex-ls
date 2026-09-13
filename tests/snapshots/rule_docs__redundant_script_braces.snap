@@ -1,0 +1,34 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `redundant-script-braces`
+
+Report braces around a single-token subscript or superscript. The safe fix removes the braces unless adjacent text would change tokenization. For example, `x^{2}-3` and `y_{\alpha}b` stay braced because `2-3` and `\alphab` would become single tokens. Named math operators such as `\max` also retain braces because they cannot be unbraced script fields.
+
+This rule is **enabled by default**.
+
+Redundant braces around a single-token script argument:
+
+```tex
+$x^{2}$ and $y_{\alpha}$
+```
+
+```text
+help: redundant-script-braces
+ --> example.tex:1:4
+  |
+1 | $x^{2}$ and $y_{\alpha}$
+  |    ^^^ redundant braces around a single-token script argument
+help: redundant-script-braces
+ --> example.tex:1:16
+  |
+1 | $x^{2}$ and $y_{\alpha}$
+  |                ^^^^^^^^ redundant braces around a single-token script argument
+```
+
+After applying the fix:
+
+```tex
+$x^2$ and $y_\alpha$
+```

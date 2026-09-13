@@ -1,0 +1,90 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "workspace": {
+        "workspaceEdit": {
+          "documentChanges": true
+        }
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "codeAction": {
+          "codeActionLiteralSupport": {
+            "codeActionKind": {
+              "valueSet": []
+            }
+          },
+          "isPreferredSupport": true
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///fix/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\ud83d\ude00 $x^{2}$ and $y_{3}$ {\\bf bold}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///fix/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 0
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "source.fixAll.tex-ls"
+          ]
+        }
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///fix/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 0
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      }
+    }
+  ]
+}

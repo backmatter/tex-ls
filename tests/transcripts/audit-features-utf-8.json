@@ -1,0 +1,249 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      },
+      "textDocument": {
+        "semanticTokens": {
+          "tokenTypes": [
+            "macro",
+            "variable"
+          ],
+          "tokenModifiers": [],
+          "formats": [
+            "relative"
+          ],
+          "requests": {
+            "full": true,
+            "range": true
+          }
+        },
+        "rangeFormatting": {
+          "rangesSupport": true
+        },
+        "signatureHelp": {
+          "signatureInformation": {
+            "activeParameterSupport": true,
+            "noActiveParameterSupport": true
+          }
+        }
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": false
+      }
+    }
+  },
+  "nativeConfig": "[options.custom]\n\"α key\" = [\"one\", \"two\"]\n",
+  "settings": {
+    "declarations": {
+      "options": {
+        "custom": {
+          "α key": [
+            "one",
+            "two"
+          ]
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "😀 \\textbf{x}\n\\label{kéy}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "expected": {
+        "data": [
+          0,
+          5,
+          7,
+          0,
+          0,
+          1,
+          0,
+          6,
+          0,
+          0,
+          0,
+          7,
+          4,
+          1,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 30
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          1,
+          0,
+          6,
+          0,
+          0,
+          0,
+          7,
+          4,
+          1,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "\\custom[α k]\n\\frac{a}{b}\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 11
+        }
+      },
+      "expectedCompletionLabels": [
+        "α key"
+      ]
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 8
+        }
+      },
+      "expectedActiveParameter": null
+    },
+    {
+      "method": "textDocument/rangesFormatting",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "ranges": [
+          {
+            "start": {
+              "line": 0,
+              "character": 0
+            },
+            "end": {
+              "line": 0,
+              "character": 11
+            }
+          },
+          {
+            "start": {
+              "line": 0,
+              "character": 3
+            },
+            "end": {
+              "line": 1,
+              "character": 11
+            }
+          }
+        ],
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 3
+        },
+        "contentChanges": [
+          {
+            "text": "\\frac{\\frac{a} {b}}{c}\n\\begin{tabular}[t] {cc}\n\\end{tabular}\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 14
+        }
+      },
+      "expectedActiveParameter": null
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      },
+      "expectedActiveParameter": null
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `missing-provides`
+
+Report a `.sty` file without `\ProvidesPackage` or a `.cls` file without `\ProvidesClass`. A declaration of the wrong kind does not satisfy the rule. Other file types are excluded. No fix is offered because the author must choose the declaration's placement, date, and version.
+
+This rule is **enabled by default**.
+
+A package source with no self-identification (the docs are rendered against a `.sty` path):
+
+```tex
+\NeedsTeXFormat{LaTeX2e}
+\RequirePackage{xcolor}
+```
+
+```text
+warning: missing-provides
+ --> example.sty:1:1
+  |
+1 | \NeedsTeXFormat{LaTeX2e}
+  | ^^^^^^^^^^^^^^^ package file lacks `\ProvidesPackage`
+```

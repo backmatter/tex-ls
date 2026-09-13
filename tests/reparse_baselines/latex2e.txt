@@ -1,0 +1,8 @@
+latex2e	corpus	files=441	bytes=13385462
+latex2e	word-typing	spliced=4110/5650	token=4090	verbatim=20	math=0	region=0	files=385
+latex2e	word-deleting	spliced=3997/5650	token=3965	verbatim=32	math=0	region=0	files=385
+latex2e	protected-typing	spliced=1175/3220	token=0	verbatim=1175	math=0	region=0	files=221
+latex2e	math-word-typing	spliced=370/555	token=370	verbatim=0	math=0	region=0	files=42
+latex2e	math-shape-typing	spliced=125/230	token=0	verbatim=0	math=125	region=0	files=20
+latex2e	hazard-single	spliced=2017/7056	token=1904	verbatim=110	math=3	region=0	files=441
+latex2e	hazard-chain	spliced=83/2205	token=76	verbatim=7	math=0	region=0	files=441

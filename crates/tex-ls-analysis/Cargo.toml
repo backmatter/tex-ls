@@ -1,0 +1,26 @@
+[package]
+publish = false
+name="tex-ls-analysis"
+version="0.1.0"
+edition.workspace=true
+rust-version.workspace=true
+license.workspace=true
+
+[dependencies]
+annotate-snippets = "0.12.16"
+tex-ls-parser={ version = "0.1.0", path="../tex-ls-parser"}
+tex-ls-formatter={ version = "0.1.0", path="../tex-ls-formatter"}
+log = { workspace = true }
+memchr = "2.8.3"
+rowan = { workspace = true }
+salsa = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true, optional = true }
+smol_str = { workspace = true }
+unicode-normalization = "0.1.24"
+[dev-dependencies]
+toml = { workspace = true }
+
+[features]
+schema = ["dep:schemars"]

@@ -1,0 +1,279 @@
+{
+  "nativeConfig": "",
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 1,
+          "languageId": "latex",
+          "text": "\\includegraphics{plot}\n\\section{Intro}\\label{intro}\\ref{intro}\n"
+        }
+      }
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 1
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 1,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings",
+              {
+                "kind": {
+                  "state": "present",
+                  "value": "directory"
+                },
+                "directory": {
+                  "state": "present",
+                  "value": {
+                    "entries": {
+                      "plot.png": "file"
+                    },
+                    "complete": true
+                  }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "plot.png": "image"
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 2
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 2,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings",
+              {
+                "kind": {
+                  "state": "present",
+                  "value": "directory"
+                },
+                "directory": {
+                  "state": "present",
+                  "value": {
+                    "entries": {},
+                    "complete": true
+                  }
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "plot.png": null
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 3
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 3,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.aux",
+              {
+                "state": "present",
+                "value": {
+                  "identity": "last-build",
+                  "text": "\\newlabel{intro}{{7}{1}}\n\\@input{main.aux}\n"
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.aux": "\\newlabel{intro}{{7}{1}}\n\\@input{main.aux}\n"
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 40
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 4
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 4,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.aux",
+              {
+                "state": "present",
+                "value": {
+                  "identity": "last-build",
+                  "text": "\\newlabel{intro}{{8}{1}}\n\\@input{main.aux}\n"
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.aux": "\\newlabel{intro}{{8}{1}}\n\\@input{main.aux}\n"
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 40
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "languageId": "latex",
+          "version": 0,
+          "text": "\\input{child}"
+        }
+      }
+    },
+    {
+      "method": "tex-ls/registerFile",
+      "embeddedOnly": true,
+      "params": {
+        "uri": "file:///architecture-settings/child.tex"
+      }
+    },
+    {
+      "method": "tex-ls/discoveryNeeds",
+      "embeddedOnly": true,
+      "params": {
+        "uri": "file:///architecture-settings/main.tex"
+      },
+      "expected": [
+        {
+          "kind": "source",
+          "path": "/architecture-settings/child.tex"
+        }
+      ]
+    }
+  ]
+}

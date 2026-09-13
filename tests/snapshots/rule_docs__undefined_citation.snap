@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `undefined-citation`
+
+Report citation keys absent from a document's bibliography. The rule requires a rooted project with every bibliography resource resolved to an analyzed file. Resource lookup respects `BIBINPUTS` and `TEXBIB`. A `\nocite{*}` marks entries as used but does not define explicit missing keys. Without cross-file citation resolution, the rule is inactive. No automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A citation of a key that matches no bibliography entry:
+
+```tex
+\cite{knuth:1984}
+```
+
+```text
+warning: undefined-citation
+ --> example.tex:1:1
+  |
+1 | \cite{knuth:1984}
+  | ^^^^^^^^^^^^^^^^^ citation of undefined key `knuth:1984`
+```

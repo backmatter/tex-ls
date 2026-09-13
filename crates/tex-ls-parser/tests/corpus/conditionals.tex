@@ -1,0 +1,16 @@
+Before the conditional block.
+\iffalse
+This text is conditionally skipped by TeX.
+\section{Hidden} should not become a real section.
+\fi
+After the conditional block.
+
+A counter test: \ifnum\value{page}>1 second \else first \fi page.
+
+\newif\if@draft
+\if@draft \typeout{draft} \else \typeout{final} \fi
+
+\ifcase\value{step}\relax zero\or one\or two\else more\fi
+
+An unpaired opener is macro code, not an error: \def\stopit{\fi}
+\ifthenelse{\value{page}>1}{second}{first} takes braces, never a \string\fi.

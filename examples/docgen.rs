@@ -1,0 +1,33 @@
+//! Generate the linter-rules reference pages (LaTeX and BibTeX) from rule
+//! metadata.
+//!
+//! Run with `cargo run --example docgen`. It renders the same markdown the
+//! snapshot tests pin ([`tex_ls_analysis::linter::docs::render_reference_page`] and
+//! [`tex_ls_analysis::bib::linter::docs::render_reference_page`]) and writes it to the
+//! committed Markdown references. It is an explicit development command.
+
+use std::fs;
+use std::io;
+use std::path::Path;
+
+fn main() -> io::Result<()> {
+    write_if_changed(
+        Path::new("docs/reference/linter-rules.md"),
+        &tex_ls_analysis::linter::docs::render_reference_page(),
+    )?;
+    write_if_changed(
+        Path::new("docs/reference/bib-linter-rules.md"),
+        &tex_ls_analysis::bib::linter::docs::render_reference_page(),
+    )
+}
+
+/// Write `content` to `path` only when it differs from what's already there, so
+/// re-running the generator leaves an unchanged file (and its mtime) alone.
+fn write_if_changed(path: &Path, content: &str) -> io::Result<()> {
+    if fs::read_to_string(path).is_ok_and(|existing| existing == content) {
+        return Ok(());
+    }
+    fs::write(path, content)?;
+    println!("wrote {}", path.display());
+    Ok(())
+}

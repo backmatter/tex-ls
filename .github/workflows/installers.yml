@@ -1,0 +1,47 @@
+name: Check installers
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published release to install
+        required: true
+        default: v0.1.0
+permissions:
+  contents: read
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, macos-15-intel, windows-2025, windows-11-arm]
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      TEX_LS_NO_MODIFY_PATH: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test Unix installer
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export TEX_LS_INSTALL_DIR="$RUNNER_TEMP/tex-ls-installed"
+          python3 scripts/test_installers.py
+          curl -fsSL "https://github.com/backmatter/tex-ls/releases/download/$RELEASE_TAG/install.sh" -o "$RUNNER_TEMP/install.sh"
+          sh "$RUNNER_TEMP/install.sh"
+          "$TEX_LS_INSTALL_DIR/tex-ls" --version
+          printf '\\section{Hello}\nA short paragraph.\n' > "$RUNNER_TEMP/main.tex"
+          "$TEX_LS_INSTALL_DIR/tex-ls" --no-config format "$RUNNER_TEMP/main.tex"
+          "$TEX_LS_INSTALL_DIR/tex-ls" --no-config format --check "$RUNNER_TEMP/main.tex"
+      - name: Test Windows installer
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:TEX_LS_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "tex-ls-installed"
+          Invoke-WebRequest -UseBasicParsing "https://github.com/backmatter/tex-ls/releases/download/$env:RELEASE_TAG/install.ps1" -OutFile "$env:RUNNER_TEMP/install.ps1"
+          & "$env:RUNNER_TEMP/install.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Installer failed' }
+          tex-ls --version
+          Set-Content -Path "$env:RUNNER_TEMP/main.tex" -Value '\section{Hello}'
+          tex-ls --no-config format "$env:RUNNER_TEMP/main.tex"
+          tex-ls --no-config format --check "$env:RUNNER_TEMP/main.tex"
+          if ($LASTEXITCODE -ne 0) { throw 'Installed executable failed' }

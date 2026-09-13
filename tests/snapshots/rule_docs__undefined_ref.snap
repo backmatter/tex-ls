@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `undefined-ref`
+
+Report references to labels absent from the document. The rule requires a rooted project with every include resolved to an analyzed file. It is inactive for stdin or without cross-file label resolution. No automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A reference to a label defined nowhere in the document:
+
+```tex
+\ref{sec:intro}
+```
+
+```text
+warning: undefined-ref
+ --> example.tex:1:1
+  |
+1 | \ref{sec:intro}
+  | ^^^^^^^^^^^^^^^ reference to undefined label `sec:intro`
+```

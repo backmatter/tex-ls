@@ -1,0 +1,70 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {}
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": false
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 1,
+          "languageId": "latex",
+          "text": "\\section{\ud835\udd4f\u00e9}\r\nalpha  beta % comment  kept\r\n\\begin{verbatim}\r\n\ud835\udd4f  x\r\n\\end{verbatim}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/formatting",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/refs.bib",
+          "version": 1,
+          "languageId": "bibtex",
+          "text": "@book{cl\u00e9,title={\ud835\udd4f title},author={Doe, Jane}}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/formatting",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/refs.bib"
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      },
+      "request": true
+    }
+  ]
+}

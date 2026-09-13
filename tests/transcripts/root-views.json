@@ -1,0 +1,149 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {}
+      },
+      "workspace": {
+        "workspaceFolders": true
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///views/a.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\\input{shared}\\label{a}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///views/b.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\\input{shared}\\label{b}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///views/shared.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\label{shared}"
+        }
+      }
+    },
+    {
+      "method": "workspace/executeCommand",
+      "params": {
+        "command": "tex-ls.inspectProject",
+        "arguments": [
+          {
+            "uri": "file:///views/a.tex"
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/executeCommand",
+      "params": {
+        "command": "tex-ls.inspectProject",
+        "arguments": [
+          {
+            "uri": "file:///views/b.tex"
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/executeCommand",
+      "params": {
+        "command": "tex-ls.inspectProject",
+        "arguments": [
+          {
+            "uri": "file:///views/shared.tex"
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/rename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///views/shared.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 9
+        },
+        "newName": "other"
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/didChangeWorkspaceFolders",
+      "params": {
+        "event": {
+          "added": [
+            {
+              "uri": "file:///views",
+              "name": "views"
+            }
+          ],
+          "removed": []
+        }
+      }
+    },
+    {
+      "method": "workspace/executeCommand",
+      "params": {
+        "command": "tex-ls.inspectProject",
+        "arguments": [
+          {
+            "uri": "file:///views/shared.tex"
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/didChangeWorkspaceFolders",
+      "params": {
+        "event": {
+          "added": [],
+          "removed": [
+            {
+              "uri": "file:///views",
+              "name": "views"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "workspace/executeCommand",
+      "params": {
+        "command": "tex-ls.inspectProject",
+        "arguments": [
+          {
+            "uri": "file:///views/shared.tex"
+          }
+        ]
+      },
+      "request": true
+    }
+  ]
+}

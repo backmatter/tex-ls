@@ -1,0 +1,197 @@
+//! BibTeX parser tests: tree-shape snapshots over representative inputs, plus
+//! targeted assertions on error-recovery behaviour. Every case also re-checks the
+//! losslessness invariant. Regenerate snapshots with `INSTA_UPDATE=always cargo test --workspace`.
+
+use rowan::NodeOrToken;
+use tex_ls_parser::bib::parse;
+use tex_ls_parser::bib::syntax::SyntaxNode;
+
+/// Render a CST as an indented `KIND@range` tree, with token text, followed by
+/// any syntax errors. Stable and snapshot-friendly.
+fn tree(input: &str) -> String {
+    let parsed = parse(input);
+    // Losslessness must hold for every input the parser sees.
+    assert_eq!(
+        parsed.syntax().to_string(),
+        input,
+        "losslessness violated for {input:?}"
+    );
+
+    let mut out = String::new();
+    render(&parsed.syntax(), 0, &mut out);
+    for err in &parsed.errors {
+        out.push_str(&format!(
+            "error @{}..{}: {}\n",
+            err.start, err.end, err.message
+        ));
+    }
+    out
+}
+
+fn render(node: &SyntaxNode, depth: usize, out: &mut String) {
+    out.push_str(&format!(
+        "{:indent$}{:?}@{:?}\n",
+        "",
+        node.kind(),
+        node.text_range(),
+        indent = depth * 2
+    ));
+    for child in node.children_with_tokens() {
+        match child {
+            NodeOrToken::Node(n) => render(&n, depth + 1, out),
+            NodeOrToken::Token(t) => out.push_str(&format!(
+                "{:indent$}{:?}@{:?} {:?}\n",
+                "",
+                t.kind(),
+                t.text_range(),
+                t.text(),
+                indent = (depth + 1) * 2
+            )),
+        }
+    }
+}
+
+// --- well-formed inputs ----------------------------------------------------
+
+#[test]
+fn regular_entry() {
+    insta::assert_snapshot!(tree(
+        "@article{knuth1984,\n  author = {Donald Knuth},\n  year = 2020,\n}"
+    ));
+}
+
+#[test]
+fn paren_delimited_entry() {
+    insta::assert_snapshot!(tree("@book(key, title = {T})"));
+}
+
+#[test]
+fn trailing_comma() {
+    insta::assert_snapshot!(tree("@misc{k, note = {n},}"));
+}
+
+#[test]
+fn key_only_entry() {
+    insta::assert_snapshot!(tree("@misc{lonelykey}"));
+}
+
+#[test]
+fn string_entry() {
+    insta::assert_snapshot!(tree(r#"@string{jan = "January"}"#));
+}
+
+#[test]
+fn preamble_entry() {
+    insta::assert_snapshot!(tree(r#"@preamble{ "\newcommand{\noop}[1]{}" }"#));
+}
+
+#[test]
+fn comment_entry() {
+    insta::assert_snapshot!(tree("@comment{ jabref-meta: databaseType:bibtex; }"));
+}
+
+#[test]
+fn quoted_and_braced_values() {
+    insta::assert_snapshot!(tree(r#"@article{k, a = "quoted", b = {braced}, c = 1999}"#));
+}
+
+#[test]
+fn concatenation() {
+    insta::assert_snapshot!(tree(r#"@string{x = "a" # foo # {b}}"#));
+}
+
+#[test]
+fn nested_braces() {
+    insta::assert_snapshot!(tree("@misc{k, title = {a {B{c}} d}}"));
+}
+
+#[test]
+fn braces_protect_quote_in_quoted_value() {
+    insta::assert_snapshot!(tree(r#"@misc{k, title = "a {\"} b"}"#));
+}
+
+#[test]
+fn junk_between_entries() {
+    insta::assert_snapshot!(tree("leading junk\n@misc{a}\n\nsome notes\n@misc{b}\n"));
+}
+
+// --- `%` comments ----------------------------------------------------------
+//
+// A `%` runs to the end of its line wherever the grammar expects structure, and
+// is an ordinary character everywhere else. Ground truth is biber 2.21 (btparse):
+// every input below compiles clean, and the braced/quoted `%`s survive verbatim
+// into the `.bbl`. (Classic `bibtex` 0.99d rejects all of them — it has no
+// comment syntax at all — so this follows biber, as the rest of the bib layer
+// does.)
+
+#[test]
+fn comment_between_value_and_comma() {
+    // The `latexindent` corpus shape that motivated this: a comment separating a
+    // field's value from the `,` that ends the field.
+    insta::assert_snapshot!(tree(
+        "@online{k,\n  keywords =\n    {contributor}\n  %\n  ,}"
+    ));
+}
+
+#[test]
+fn comment_on_its_own_line_between_fields() {
+    insta::assert_snapshot!(tree(
+        "@misc{k,\n  title = {a},\n  % why this author\n  author = {b},\n}"
+    ));
+}
+
+#[test]
+fn comment_inside_field_and_around_concatenation() {
+    insta::assert_snapshot!(tree("@misc{k, title = % pick one\n  {a} % or\n  # {b}}"));
+}
+
+#[test]
+fn percent_in_braced_and_quoted_values_is_literal() {
+    // Not a comment: the value keeps `% off` and the field list keeps parsing.
+    insta::assert_snapshot!(tree(
+        "@misc{k, title = {50% off}, note = \"90% sure\", year = 2020}"
+    ));
+}
+
+#[test]
+fn comment_eats_the_rest_of_a_bare_value_line() {
+    // A bare (unbraced) value ends at the `%`, and so does the `,` behind it —
+    // biber reads the comma on the *next* line as the field separator.
+    insta::assert_snapshot!(tree(
+        "@misc{k, month = nov % and the comma,\n  , year = 2020}"
+    ));
+}
+
+// --- error recovery --------------------------------------------------------
+
+#[test]
+fn unterminated_brace() {
+    insta::assert_snapshot!(tree("@misc{k, title = {unclosed"));
+}
+
+#[test]
+fn unterminated_quote() {
+    insta::assert_snapshot!(tree(r#"@misc{k, title = "unclosed}"#));
+}
+
+#[test]
+fn missing_equals() {
+    insta::assert_snapshot!(tree("@misc{k, title {v}}"));
+}
+
+#[test]
+fn missing_field_separator() {
+    // Two complete fields with no `,` between them: biber rejects this, so we
+    // recover by parsing both as fields and flag the missing separator.
+    insta::assert_snapshot!(tree("@misc{k, title = {a} author = {b}}"));
+}
+
+#[test]
+fn stray_at_starts_new_entry() {
+    insta::assert_snapshot!(tree("@misc{a, title = {x}\n@misc{b}"));
+}
+
+#[test]
+fn missing_entry_type() {
+    insta::assert_snapshot!(tree("@ {oops}"));
+}
