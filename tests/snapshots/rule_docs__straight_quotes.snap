@@ -1,0 +1,37 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `straight-quotes`
+
+Report ASCII double quotes used for quotation. LaTeX uses two backticks to open a quotation and two apostrophes to close it. A paired quotation produces one finding and one fix; an unpaired quote produces its own finding. The fix infers direction from surrounding whitespace and delimiters, so it requires unsafe opt-in. Apostrophes, math, comments, verbatim text, TeX hex constants, and `\pdfmapline` font maps are excluded.
+
+This rule is **enabled by default**.
+
+Straight ASCII double quotes around a phrase:
+
+```tex
+He said "hello world" to me.
+```
+
+```text
+warning: straight-quotes
+ --> example.tex:1:9
+  |
+1 | He said "hello world" to me.
+  |         ^^^^^^^^^^^^^ straight double quotes; use `` `` `` (opening) and `''` (closing)
+```
+
+An opening quote after a parenthesis:
+
+```tex
+("quoted")
+```
+
+```text
+warning: straight-quotes
+ --> example.tex:1:2
+  |
+1 | ("quoted")
+  |  ^^^^^^^^ straight double quotes; use `` `` `` (opening) and `''` (closing)
+```

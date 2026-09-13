@@ -1,0 +1,43 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `ellipsis`
+
+Report three or more literal periods. In text, the safe fix uses `\dots` and separates it from a following letter. In math, the fix chooses `\cdots` beside an operator or relation and `\ldots` elsewhere. This choice requires unsafe opt-in because it changes the glyph placement. Comments and verbatim text are excluded.
+
+This rule is **enabled by default**.
+
+Literal dots in text:
+
+```tex
+See Chapter 2, 3, ... for details.
+```
+
+```text
+warning: ellipsis
+ --> example.tex:1:19
+  |
+1 | See Chapter 2, 3, ... for details.
+  |                   ^^^ literal `...` ellipsis; use `\dots`
+```
+
+After applying the fix:
+
+```tex
+See Chapter 2, 3, \dots for details.
+```
+
+Literal dots in a math sum (an operator neighbor picks `\cdots`):
+
+```tex
+$a_1 + ... + a_n$
+```
+
+```text
+warning: ellipsis
+ --> example.tex:1:8
+  |
+1 | $a_1 + ... + a_n$
+  |        ^^^ literal `...` ellipsis; use `\cdots` in math (`\ldots` for lists, `\cdots` for operator chains)
+```

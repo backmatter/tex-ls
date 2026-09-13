@@ -1,0 +1,15 @@
+./l3kernel/testfiles-backend/support/driver.tex	format-error	format-error
+./support/docstrip.tex	format-error	format-error
+./texmf/tex/latex/base/doc-2016-02-15.sty	format-error	format-error
+./texmf/tex/latex/base/doc-2021-06-01.sty	format-error	format-error
+./texmf/tex/latex/base/doc.sty	format-error	format-error
+./texmf/tex/latex/base/docstrip.tex	format-error	format-error
+./texmf/tex/latex/base/ltxdoc.cls	format-error	format-error
+./texmf/tex/latex/base/nfssfont.tex	format-error	format-error
+./texmf/tex/latex/base/shortvrb.sty	format-error	format-error
+./texmf/tex/latex/base/source2edoc.cls	format-error	format-error
+./xpackages/galley/galley2.dtx	format-error	format-error
+./xpackages/xinitials/xinitials-test.tex	format-error	format-error
+./xpackages/xor/xo-balance.tex	format-error	format-error
+./xpackages/xor/xo-page.dtx	format-error	format-error
+./xpackages/xor/xo-pfloat.tex	format-error	format-error

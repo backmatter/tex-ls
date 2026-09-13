@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `space-before-command`
+
+Report a same-line space between a word and `\footnote`, `\footnotemark`, `\index`, or `\label`. Removing it requires unsafe opt-in because typeset spacing changes. Spaces after braces, at line starts, and inside math are excluded. For `\index` and `\label`, the fix also requires whitespace or paragraph end after the argument so it cannot join surrounding words.
+
+This rule is **enabled by default**.
+
+A space before a footnote sets a spurious space before the mark:
+
+```tex
+This is important \footnote{See the appendix.}
+```
+
+```text
+warning: space-before-command
+ --> example.tex:1:18
+  |
+1 | This is important \footnote{See the appendix.}
+  |                  ^ spurious space before `\footnote`; delete it so no stray space is typeset before the command
+```

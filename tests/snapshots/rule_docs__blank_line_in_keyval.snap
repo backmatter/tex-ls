@@ -1,0 +1,35 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `blank-line-in-keyval`
+
+Report a blank line between entries in a closed, curated `key=value` argument. TeX treats the blank line as `\par`, which aborts the keyval processor. Blank lines inside a value's braces are allowed; unclosed groups receive parse diagnostics instead. The safe fix removes the blank line and preserves the following indentation.
+
+This rule is **enabled by default**.
+
+A blank line separating two keys, which aborts the call:
+
+```tex
+\hypersetup{colorlinks=true,
+
+linkcolor=blue}
+```
+
+```text
+error: blank-line-in-keyval
+ --> example.tex:1:29
+  |
+1 |   \hypersetup{colorlinks=true,
+  |  _____________________________^
+2 | |
+3 | | linkcolor=blue}
+  | |_^ blank line in `\hypersetup`'s key-value argument; the `\par` aborts the call
+```
+
+After applying the fix:
+
+```tex
+\hypersetup{colorlinks=true,
+linkcolor=blue}
+```

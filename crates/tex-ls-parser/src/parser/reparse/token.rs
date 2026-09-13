@@ -1,0 +1,740 @@
+//! The token tier: relex one leaf in isolation and splice it in place.
+//!
+//! # What it does
+//!
+//! An edit that lands strictly inside a single `WORD` / `WHITESPACE` / `COMMENT`
+//! leaf changes that leaf's *text* and nothing else. A math `WORD` may be several
+//! adjacent CST leaves sliced from one lexer token, so that path reconstructs and
+//! relexes the coalesced word before splicing one leaf. Rowan's
+//! [`SyntaxToken::replace_with`] rebuilds only the leaf-to-root spine and shares
+//! every green node off it, so the splice is `O(depth)` rather than `O(file)`.
+//! Diagnostics keep their prefix, shift their suffix, and refuse anything that
+//! touches the leaf.
+//!
+//! # Why it is sound
+//!
+//! This is the argument a reviewer has to check, so it is written out rather than
+//! implied.
+//!
+//! Everything the parser does is a function of two things: the **token vector**
+//! and the [`ParseCtx`](crate::parser::lexer::ParseCtx). Fix those two and the
+//! grammar is deterministic — the shape gates, the prescan indices, the trivia
+//! binding, and the attachment walk all read tokens, never source offsets. So a
+//! splice reproduces a full parse exactly when it can show that
+//!
+//! 1. the token **kind** sequence is unchanged, and only the one leaf's text moved;
+//! 2. the `ParseCtx` is unchanged;
+//! 3. no decision that reads a token's **text** can flip.
+//!
+//! Each is a guard below.
+//!
+//! **(1) The kind sequence.** [`lex_with`] over ordinary new leaf text alone must
+//! yield exactly one token of the leaf's own kind, and the two join probes must show it
+//! still separates from its neighbours. The isolated relex is faithful because the
+//! lexer's modes cannot be entered or left by a token of these three kinds: every
+//! mode is armed by a control word, a brace, or a `\begin{…}` name — and a leaf
+//! that relexes to a single `WORD`/`WHITESPACE`/`COMMENT` spells none of them.
+//! Conversely the leaf's *presence* in the tree as one of these kinds is what
+//! proves the lexer was in the ordinary regime there: inside `\verb` or a verbatim
+//! body the same bytes would be a `VERB` or `VERBATIM_BODY`. The join probes are
+//! not decoration — `\foo` followed by `WORD("1ab")` is two tokens only because the
+//! word starts with a non-letter, and editing it to `aab` would merge the pair into
+//! one control word.
+//!
+//! **(2) The context.** [`scan_definitions`](crate::semantic::define::scan_definitions)
+//! walks only `COMMAND` nodes whose head names a definition family, so a leaf that
+//! sits under none of them cannot change what the scan found.
+//! [`context_admits`](super::leaf::context_admits) bans those, plus the
+//! environment-name positions and the commands whose *lexing* reads the raw text
+//! after them.
+//!
+//! **(3) The text reads.** [`text_reads_are_inert`](super::leaf::text_reads_are_inert)
+//! enumerates every place the grammar branches on a `WORD`'s text, and the survey in
+//! [`super::leaf`] reads the grammar sources to pin that the enumeration is still the
+//! whole set. A new one appears as a failing test, not as a silent divergence.
+//!
+//! Both live in [`super::leaf`], because they are the same question for any tier
+//! that splices one leaf. Math then adds a structural proof: a leaf directly under
+//! `SCRIPTED`, `SUBSCRIPT`, or `SUPERSCRIPT` must remain one Unicode scalar, while
+//! an unscripted prefix or remainder may change length.
+//!
+//! # What it refuses, and why that is free
+//!
+//! Every guard returns [`None`] and the caller full-parses, so the cost of being
+//! wrong about a guard's *necessity* is speed. The deliberate refusals worth
+//! knowing about: any edit carrying a line terminator, a leaf whose neighbour is
+//! too large to probe cheaply, and a math edit that changes an existing
+//! virtual-atom boundary (which the delimiter-bearing tier gets next).
+
+use rowan::{GreenToken, NodeOrToken, TextRange, TextSize};
+
+use crate::parser::lexer::lex_with;
+use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+
+use super::leaf::{Context, context_admits, shifted_errors, text_reads_are_inert};
+use super::{Edit, ReparseBase, ReparseTier, Reparsed, finish};
+
+/// How much neighbour text a join probe will relex.
+///
+/// A probe is `O(neighbour)`, so an unbounded one would make the tier `O(file)` the
+/// moment a leaf sits beside a 100 KB `VERBATIM_BODY` — the exact shape this tier
+/// exists to be cheaper than. Over the cap the tier refuses; a real neighbour is a
+/// newline, a space, or a word.
+const MAX_PROBE_BYTES: usize = 1024;
+
+/// Splice `edit` into the single leaf that contains it, or [`None`].
+pub(super) fn reparse_token(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+) -> Option<Reparsed> {
+    // Cheapest first, and a guard must bail on cheap evidence: a rejected attempt
+    // is paid *on top of* the full parse it falls back to.
+
+    // A line terminator restructures paragraphs, comment extents, and `.dtx` lines,
+    // none of which a single-leaf splice can account for. Checked on both sides of
+    // the edit: a `WORD` cannot contain one, but proving that here beats assuming it.
+    if edit.insert.contains(['\n', '\r']) || base.text[edit.range.clone()].contains(['\n', '\r']) {
+        return None;
+    }
+
+    let root = base.syntax();
+    let range = TextRange::new(
+        TextSize::try_from(edit.range.start).ok()?,
+        TextSize::try_from(edit.range.end).ok()?,
+    );
+
+    candidates(&root, range)
+        .into_iter()
+        .find_map(|leaf| try_leaf(base, edit, new_text, &leaf, range))
+}
+
+/// The leaves an edit of `range` could be inside, in preference order.
+///
+/// An insertion at a token boundary belongs to *either* neighbour, and which one
+/// works is not knowable up front: typing a letter after a space extends the word
+/// to its right, while typing one after a word extends the word to its left. Both
+/// are offered and the guards decide. A non-empty range has at most one covering
+/// token, and a range that straddles two lands on their parent node instead.
+pub(super) fn candidates(root: &SyntaxNode, range: TextRange) -> Vec<SyntaxToken> {
+    if range.is_empty() {
+        root.token_at_offset(range.start()).collect()
+    } else {
+        match root.covering_element(range) {
+            NodeOrToken::Token(t) => vec![t],
+            NodeOrToken::Node(_) => Vec::new(),
+        }
+    }
+}
+
+fn try_leaf(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+    leaf: &SyntaxToken,
+    range: TextRange,
+) -> Option<Reparsed> {
+    if !leaf.text_range().contains_range(range) {
+        return None;
+    }
+    if !matches!(
+        leaf.kind(),
+        SyntaxKind::WORD | SyntaxKind::WHITESPACE | SyntaxKind::COMMENT | SyntaxKind::CONTROL_WORD
+    ) {
+        return None;
+    }
+    let ctx = context_admits(leaf, leaf)?;
+
+    let leaf_start = usize::from(leaf.text_range().start());
+    let old = leaf.text();
+    let cut = edit.range.start.checked_sub(leaf_start)?..edit.range.end.checked_sub(leaf_start)?;
+    let mut new_leaf = String::with_capacity(old.len() + edit.insert.len());
+    new_leaf.push_str(old.get(..cut.start)?);
+    new_leaf.push_str(&edit.insert);
+    new_leaf.push_str(old.get(cut.end..)?);
+
+    // An emptied leaf is a token *removed*, which is a change to the kind sequence
+    // and so a different question than this tier answers.
+    if new_leaf.is_empty() {
+        return None;
+    }
+
+    if leaf.kind() == SyntaxKind::WORD && word_needs_math_proof(leaf, ctx) {
+        // Preserve the non-math text-read guards (`*`, statement `;`, and the
+        // backslash lookahead), then prove math's additional per-scalar slicing.
+        if !text_reads_are_inert(leaf.kind(), old, &new_leaf, Context { in_math: false })
+            || !math_word_relexes(base, leaf, &new_leaf)
+            || !math_partition_is_stable(leaf, &new_leaf)
+        {
+            return None;
+        }
+    } else {
+        let inert = if leaf.kind() == SyntaxKind::CONTROL_WORD {
+            inert_command(base, leaf, old, &new_leaf)
+        } else {
+            text_reads_are_inert(leaf.kind(), old, &new_leaf, ctx)
+        };
+        if !inert {
+            return None;
+        }
+
+        // The isolated relex, under the base's own context and flavor — a
+        // `\newcommand` the definition scan found must lex the fragment the way it
+        // lexed the tree.
+        let relexed = lex_with(&new_leaf, base.ctx, base.config);
+        if relexed.len() != 1 || relexed[0].kind != leaf.kind() {
+            return None;
+        }
+
+        if !joins(base, leaf.prev_token().as_ref(), &new_leaf, Side::Before)
+            || !joins(base, leaf.next_token().as_ref(), &new_leaf, Side::After)
+        {
+            return None;
+        }
+    }
+
+    let errors = shifted_errors(base.errors, leaf.text_range(), edit)?;
+    let green = leaf.replace_with(GreenToken::new(leaf.kind().into(), &new_leaf));
+    finish(green, errors, ReparseTier::Token, base, new_text)
+}
+
+/// An argument-free ordinary control word in prose, including environment bodies.
+/// Argument slots, math, definitions and sibling definition operands decline.
+/// Only the name changes; no pairing, lexer transition, argument policy or
+/// definition scan may observe a different classification.
+fn inert_command(base: &ReparseBase<'_>, leaf: &SyntaxToken, old: &str, new: &str) -> bool {
+    use crate::parser::{conditional, grammar};
+    let Some(command) = leaf.parent().filter(|n| n.kind() == SyntaxKind::COMMAND) else {
+        return false;
+    };
+    if command.children_with_tokens().count() != 1 {
+        return false;
+    }
+    let Some(paragraph) = command
+        .parent()
+        .filter(|n| n.kind() == SyntaxKind::PARAGRAPH)
+    else {
+        return false;
+    };
+    if base.config.dtx
+        || paragraph.ancestors().any(|n| {
+            !matches!(
+                n.kind(),
+                SyntaxKind::ROOT | SyntaxKind::PARAGRAPH | SyntaxKind::ENVIRONMENT
+            )
+        })
+    {
+        return false;
+    }
+    // Definition scanners may claim the next sibling COMMAND across trivia.
+    // Exclude that operand position even when the previous command is separated
+    // by a newline, where context_admits' line scan deliberately stops.
+    let mut previous = command.prev_sibling_or_token();
+    while let Some(element) = previous {
+        if matches!(
+            element.kind(),
+            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+        ) {
+            previous = element.prev_sibling_or_token();
+        } else {
+            if element.kind() == SyntaxKind::COMMAND {
+                return false;
+            }
+            break;
+        }
+    }
+    [old, new].iter().all(|text| {
+        let name = text.trim_start_matches('\\');
+        base.ctx.inert_control_word(text)
+            && !matches!(
+                name,
+                "begin" | "end" | "left" | "right" | "csname" | "endcsname"
+            )
+            && !grammar::is_special_reparse_command(text)
+            && conditional::flow_word(name).is_none()
+            && conditional::operand_skips(name).is_none()
+            && !crate::semantic::define::is_definition_command(name)
+    })
+}
+
+/// Whether the CST shows that this word participates in math's per-scalar
+/// slicing. Explicit math carries a `MATH` ancestor. Positional math arguments
+/// outside explicit delimiters expose the same fact structurally: the leaf is a
+/// scripted base/argument, or abuts another `WORD` leaf split from its lexer
+/// token. An unscripted, unsplit positional-math word needs only the ordinary
+/// token proof because changing its nonempty text cannot move a CST boundary.
+fn word_needs_math_proof(leaf: &SyntaxToken, ctx: Context) -> bool {
+    ctx.in_math
+        || leaf.parent().is_some_and(|parent| {
+            matches!(
+                parent.kind(),
+                SyntaxKind::SCRIPTED | SyntaxKind::SUBSCRIPT | SyntaxKind::SUPERSCRIPT
+            )
+        })
+        || leaf.prev_token().is_some_and(|previous| {
+            previous.kind() == SyntaxKind::WORD
+                && previous.text_range().end() == leaf.text_range().start()
+        })
+        || leaf.next_token().is_some_and(|next| {
+            next.kind() == SyntaxKind::WORD && leaf.text_range().end() == next.text_range().start()
+        })
+}
+
+/// Reconstruct the lexer `WORD` that math parsing sliced into CST leaves and
+/// prove the edited spelling is still exactly one `WORD` with unchanged outer
+/// joins.
+fn math_word_relexes(base: &ReparseBase<'_>, leaf: &SyntaxToken, new_leaf: &str) -> bool {
+    let mut first = leaf.clone();
+    while let Some(previous) = first.prev_token().filter(|token| {
+        token.kind() == SyntaxKind::WORD && token.text_range().end() == first.text_range().start()
+    }) {
+        first = previous;
+    }
+
+    let mut last = leaf.clone();
+    while let Some(next) = last.next_token().filter(|token| {
+        token.kind() == SyntaxKind::WORD && last.text_range().end() == token.text_range().start()
+    }) {
+        last = next;
+    }
+
+    let start = usize::from(first.text_range().start());
+    let end = usize::from(last.text_range().end());
+    if end
+        .checked_sub(start)
+        .is_none_or(|len| len > MAX_PROBE_BYTES)
+    {
+        return false;
+    }
+
+    let mut combined = String::with_capacity(end - start + new_leaf.len());
+    let mut cursor = first.clone();
+    loop {
+        if cursor == *leaf {
+            combined.push_str(new_leaf);
+        } else {
+            combined.push_str(cursor.text());
+        }
+        if cursor == last {
+            break;
+        }
+        let Some(next) = cursor.next_token() else {
+            return false;
+        };
+        cursor = next;
+    }
+
+    let relexed = lex_with(&combined, base.ctx, base.config);
+    if relexed.len() != 1 || relexed[0].kind != SyntaxKind::WORD || relexed[0].text != combined {
+        return false;
+    }
+
+    joins(base, first.prev_token().as_ref(), &combined, Side::Before)
+        && joins(base, last.next_token().as_ref(), &combined, Side::After)
+}
+
+/// Whether replacing this CST leaf preserves math's virtual-atom partition.
+///
+/// A `WORD` directly under `SCRIPTED` is a one-scalar base; one directly under a
+/// sub/superscript is a one-scalar bare argument. Every other `WORD` leaf is an
+/// unscripted remainder or prefix, whose length may change without moving a CST
+/// boundary. The fragment tier handles edits that add or remove a scalar at one
+/// of the one-atom leaves.
+fn math_partition_is_stable(leaf: &SyntaxToken, new_leaf: &str) -> bool {
+    let one_atom = leaf.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            SyntaxKind::SCRIPTED | SyntaxKind::SUBSCRIPT | SyntaxKind::SUPERSCRIPT
+        )
+    });
+    !one_atom || (leaf.text().chars().count() == 1 && new_leaf.chars().count() == 1)
+}
+
+/// Which side of the leaf a join probe is testing.
+#[derive(Clone, Copy)]
+enum Side {
+    Before,
+    After,
+}
+
+/// Whether the new leaf text still lexes apart from its neighbour.
+///
+/// The probe relexes just the pair and demands the same two tokens back. A missing
+/// neighbour is the file edge, where there is nothing to merge with. A neighbour
+/// that does not reproduce itself in isolation — a `VERB`, a `VERBATIM_BODY`, a
+/// `WORD` that is really a sub-slice of one the math split cut up — fails the probe
+/// and the tier refuses, which is the conservative answer in every one of those
+/// cases.
+fn joins(
+    base: &ReparseBase<'_>,
+    neighbour: Option<&SyntaxToken>,
+    leaf_text: &str,
+    side: Side,
+) -> bool {
+    let Some(neighbour) = neighbour else {
+        return true;
+    };
+    let n = neighbour.text();
+    if n.len() > MAX_PROBE_BYTES {
+        return false;
+    }
+    let (first, second) = match side {
+        Side::Before => (n, leaf_text),
+        Side::After => (leaf_text, n),
+    };
+    let mut probe = String::with_capacity(first.len() + second.len());
+    probe.push_str(first);
+    probe.push_str(second);
+
+    let toks = lex_with(&probe, base.ctx, base.config);
+    if toks.len() != 2 || toks[0].text != first || toks[1].text != second {
+        return false;
+    }
+    // The neighbour must also come back as *itself*. A token that lexes to a
+    // different kind in isolation than it holds in the tree means the probe was run
+    // in a regime the tree was not parsed in, so its verdict says nothing.
+    match side {
+        Side::Before => toks[0].kind == neighbour.kind(),
+        Side::After => toks[1].kind == neighbour.kind(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::declarations::ResolvedDeclarations;
+    use crate::parser::core::parse_with_declarations_resolved;
+    use crate::parser::lexer::{LatexFlavor, LexConfig, lex_with};
+    use crate::parser::reparse::{ReparseBase, reparse};
+
+    fn with_base<R>(text: &str, f: impl FnOnce(&ReparseBase<'_>) -> R) -> R {
+        let declared = ResolvedDeclarations::default();
+        let (parse, ctx) = parse_with_declarations_resolved(text, LatexFlavor::Document, &declared);
+        f(&ReparseBase::from_parts(
+            text,
+            &parse.green,
+            &parse.errors,
+            &ctx,
+            LatexFlavor::Document.into(),
+            &declared,
+        ))
+    }
+
+    fn with_dtx_base<R>(text: &str, f: impl FnOnce(&ReparseBase<'_>) -> R) -> R {
+        let declared = ResolvedDeclarations::default();
+        let config = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: true,
+        };
+        let (parse, ctx) = parse_with_declarations_resolved(text, config, &declared);
+        f(&ReparseBase::from_parts(
+            text,
+            &parse.green,
+            &parse.errors,
+            &ctx,
+            config,
+            &declared,
+        ))
+    }
+
+    fn edit(range: std::ops::Range<usize>, insert: &str) -> Edit {
+        Edit {
+            range,
+            insert: insert.to_string(),
+        }
+    }
+
+    fn edit_at(text: &str, needle: &str, offset: usize, insert: &str) -> Edit {
+        let start = text.find(needle).expect("fixture") + offset;
+        edit(start..start, insert)
+    }
+
+    fn replace_needle(text: &str, needle: &str, insert: &str) -> Edit {
+        let start = text.find(needle).expect("fixture");
+        edit(start..start + needle.len(), insert)
+    }
+
+    fn as_text_range(range: &std::ops::Range<usize>) -> TextRange {
+        TextRange::new(
+            TextSize::try_from(range.start).expect("range start"),
+            TextSize::try_from(range.end).expect("range end"),
+        )
+    }
+
+    fn candidate_leaf(base: &ReparseBase<'_>, e: &Edit) -> SyntaxToken {
+        let range = as_text_range(&e.range);
+        candidates(&base.syntax(), range)
+            .into_iter()
+            .find(|leaf| leaf.text_range().contains_range(range))
+            .expect("expected a covering token candidate")
+    }
+
+    fn try_leaf_without_dtx_bail(base: &ReparseBase<'_>, e: &Edit, leaf: &SyntaxToken) -> bool {
+        let next = e.apply(base.text);
+        let range = as_text_range(&e.range);
+        try_leaf(base, e, &next, leaf, range).is_some()
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum DtxLeafRefusal {
+        LeafKindAllowlist,
+        RelexNotSingleOrSameKind,
+    }
+
+    fn classify_dtx_leaf_refusal(
+        base: &ReparseBase<'_>,
+        e: &Edit,
+        leaf: &SyntaxToken,
+    ) -> DtxLeafRefusal {
+        if !matches!(
+            leaf.kind(),
+            SyntaxKind::WORD | SyntaxKind::WHITESPACE | SyntaxKind::COMMENT
+        ) {
+            return DtxLeafRefusal::LeafKindAllowlist;
+        }
+
+        let leaf_start = usize::from(leaf.text_range().start());
+        let old = leaf.text();
+        let cut = e.range.start - leaf_start..e.range.end - leaf_start;
+        let mut new_leaf = String::with_capacity(old.len() + e.insert.len());
+        new_leaf.push_str(&old[..cut.start]);
+        new_leaf.push_str(&e.insert);
+        new_leaf.push_str(&old[cut.end..]);
+
+        let relexed = lex_with(&new_leaf, base.ctx, base.config);
+        if relexed.len() != 1 || relexed[0].kind != leaf.kind() {
+            return DtxLeafRefusal::RelexNotSingleOrSameKind;
+        }
+
+        panic!("fixture no longer trips the expected guard: {e:?}");
+    }
+
+    #[track_caller]
+    fn assert_splices(text: &str, e: Edit) {
+        with_base(text, |base| {
+            let out = reparse(base, &e, &e.apply(text));
+            let out = out.unwrap_or_else(|| panic!("expected a token-tier splice for {e:?}"));
+            assert_eq!(out.tier, ReparseTier::Token);
+        });
+    }
+
+    #[track_caller]
+    fn assert_refuses(text: &str, e: Edit) {
+        with_base(text, |base| {
+            assert!(
+                reparse(base, &e, &e.apply(text)).is_none(),
+                "expected a refusal for {e:?}",
+            );
+        });
+    }
+
+    #[test]
+    fn splices_a_letter_typed_into_a_prose_word() {
+        assert_splices("Some ordinary prose.\n", edit(5..5, "x"));
+        assert_splices("Some ordinary prose.\n", edit(5..8, "sensible"));
+    }
+
+    #[test]
+    fn splices_inside_a_comment_and_inside_whitespace() {
+        assert_splices("text % a trailing note\nmore\n", edit(10..10, "z"));
+        assert_splices("a   b\n", edit(2..2, " "));
+    }
+
+    #[test]
+    fn splices_a_hyphenated_word_outside_math() {
+        assert_splices("a well-known result\n", edit(6..6, "l"));
+    }
+
+    #[test]
+    fn refuses_an_edit_that_carries_a_newline() {
+        assert_refuses("Some ordinary prose.\n", edit(5..5, "\n"));
+        assert_refuses("Some ordinary prose.\n", edit(5..5, "\r\n"));
+    }
+
+    #[test]
+    fn refuses_an_environment_name() {
+        assert_refuses(
+            "\\begin{itemize}\n\\item x\n\\end{itemize}\n",
+            edit(8..8, "z"),
+        );
+        assert_refuses("{\\begin{itemize}\\item x}\n", edit(9..9, "z"));
+    }
+
+    #[test]
+    fn refuses_a_definition_body_and_a_document_class() {
+        assert_refuses("\\newcommand{\\bea}{\\begin{align}}\n", edit(26..26, "z"));
+        assert_refuses("\\documentclass{ltxdoc}\n", edit(16..16, "z"));
+    }
+
+    #[test]
+    fn splices_partition_preserving_math_words() {
+        assert_splices("$ab$\n", edit(2..2, "c"));
+        assert_splices("$a b$\n", edit(3..3, "+"));
+        assert_splices("\\begin{align}\n  a b\n\\end{align}\n", edit(17..17, "+"));
+        assert_splices("$abc_i$\n", edit(2..2, "z"));
+        assert_splices("$abc_i$\n", edit(3..4, "α"));
+        assert_splices("$x^23_i$\n", edit(3..4, "α"));
+
+        let text = "\\frac{abc_i}{n}\n";
+        assert_splices(text, edit_at(text, "abc", 1, "z"));
+    }
+
+    #[test]
+    fn token_tier_refuses_a_changed_math_partition() {
+        let text = "$x^23_i$\n";
+        with_base(text, |base| {
+            let e = edit(4..4, "z");
+            assert!(reparse_token(base, &e, &e.apply(text)).is_none());
+            let out = reparse(base, &e, &e.apply(text)).expect("math tier should splice");
+            assert_eq!(out.tier, ReparseTier::Math);
+        });
+
+        let text = "\\frac{x^23_i}{n}\n";
+        assert_refuses(text, edit_at(text, "3", 1, "z"));
+
+        let text = "\\frac{abc}{n}\n";
+        assert_refuses(text, edit_at(text, "b", 1, "_"));
+    }
+
+    #[test]
+    fn refuses_a_word_that_gains_a_statement_terminator() {
+        let text = "\\begin{tikzpicture}\n  \\draw (0,0) -- (1,1);\n\\end{tikzpicture}\n";
+        let at = text.find("(0,0)").expect("fixture") + 5;
+        assert_refuses(text, edit(at..at, ";"));
+    }
+
+    #[test]
+    fn refuses_an_edit_that_would_merge_with_the_previous_token() {
+        assert_refuses("\\foo1ab\n", edit(4..5, "a"));
+    }
+
+    #[test]
+    fn dtx_state_bit_survey_is_complete_for_the_token_tier() {
+        use DtxLeafRefusal::{LeafKindAllowlist, RelexNotSingleOrSameKind};
+
+        struct Case {
+            state_bit: &'static str,
+            text: &'static str,
+            edit: Edit,
+            expected: DtxLeafRefusal,
+        }
+
+        let cases = [
+            Case {
+                state_bit: "at_line_start",
+                text: "% alpha\n",
+                edit: edit_at("% alpha\n", "alpha", 0, "%"),
+                expected: RelexNotSingleOrSameKind,
+            },
+            Case {
+                state_bit: "in_doc_line",
+                text: "% alpha\n",
+                edit: edit_at("% alpha\n", "alpha", 0, "^^A"),
+                expected: RelexNotSingleOrSameKind,
+            },
+            Case {
+                state_bit: "at_letter",
+                text: "%    \\begin{macrocode}\n\\foo@bar\n%    \\end{macrocode}\n",
+                edit: edit_at(
+                    "%    \\begin{macrocode}\n\\foo@bar\n%    \\end{macrocode}\n",
+                    "foo@bar",
+                    4,
+                    "z",
+                ),
+                expected: LeafKindAllowlist,
+            },
+            Case {
+                state_bit: "expl_syntax",
+                text: "%    \\begin{macrocode}\n\\ExplSyntaxOn\n\\foo_bar:n\n%    \\end{macrocode}\n",
+                edit: edit_at(
+                    "%    \\begin{macrocode}\n\\ExplSyntaxOn\n\\foo_bar:n\n%    \\end{macrocode}\n",
+                    "foo_bar:n",
+                    3,
+                    "z",
+                ),
+                expected: LeafKindAllowlist,
+            },
+            Case {
+                state_bit: "macrocode",
+                text: "%    \\begin{macrocode}\n% comment\n%    \\end{macrocode}\n",
+                edit: edit_at(
+                    "%    \\begin{macrocode}\n% comment\n%    \\end{macrocode}\n",
+                    "comment",
+                    3,
+                    "x",
+                ),
+                expected: RelexNotSingleOrSameKind,
+            },
+            Case {
+                state_bit: "implicit_expl",
+                text: "%<@@=demo>\n%    \\begin{macrocode}\n\\foo_bar:n\n%    \\end{macrocode}\n",
+                edit: edit_at(
+                    "%<@@=demo>\n%    \\begin{macrocode}\n\\foo_bar:n\n%    \\end{macrocode}\n",
+                    "foo_bar:n",
+                    3,
+                    "z",
+                ),
+                expected: LeafKindAllowlist,
+            },
+            Case {
+                state_bit: "short_verbs",
+                text: "% alpha\n",
+                edit: replace_needle("% alpha\n", "alpha", "|a|"),
+                expected: RelexNotSingleOrSameKind,
+            },
+        ];
+        assert_eq!(cases.len(), 7, "enumerate every dtx state bit exactly once");
+
+        for case in cases {
+            with_dtx_base(case.text, |base| {
+                let leaf = candidate_leaf(base, &case.edit);
+                assert!(
+                    !try_leaf_without_dtx_bail(base, &case.edit, &leaf),
+                    "fixture for `{}` unexpectedly spliced",
+                    case.state_bit
+                );
+                let got = classify_dtx_leaf_refusal(base, &case.edit, &leaf);
+                assert_eq!(got, case.expected, "state bit `{}`", case.state_bit);
+            });
+        }
+    }
+
+    #[test]
+    fn splices_a_doc_line_word_in_a_dtx_parse() {
+        let text = "% alpha beta\n";
+        with_dtx_base(text, |base| {
+            let e = edit_at(text, "alpha", 3, "z");
+            let out = reparse(base, &e, &e.apply(text)).expect("expected dtx splice");
+            assert_eq!(out.tier, ReparseTier::Token);
+        });
+    }
+
+    #[test]
+    fn refuses_an_edit_that_empties_the_leaf() {
+        assert_refuses("a bb c\n", edit(2..4, ""));
+    }
+
+    #[test]
+    fn shifts_errors_after_the_leaf_and_refuses_ones_that_touch_it() {
+        let text = "word\n\n\\begin{itemize}\n";
+        with_base(text, |base| {
+            assert!(
+                !base.errors.is_empty(),
+                "this fixture exists to carry an error"
+            );
+            let e = edit(2..2, "z");
+            let out = reparse(base, &e, &e.apply(text)).expect("a splice before the error");
+            assert_eq!(out.errors.len(), base.errors.len());
+            assert_eq!(out.errors[0].start, base.errors[0].start + 1);
+        });
+    }
+
+    #[test]
+    fn refuses_a_leaf_beside_an_oversized_neighbour() {
+        let long = "a".repeat(MAX_PROBE_BYTES + 10);
+        assert_refuses(&format!("{long} b\n"), edit(long.len()..long.len(), " "));
+
+        let short = "a".repeat(8);
+        assert_splices(&format!("{short} b\n"), edit(short.len()..short.len(), " "));
+    }
+}

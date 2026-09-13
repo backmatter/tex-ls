@@ -1,0 +1,23 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `encoding-hints`
+
+Report non-ASCII field text as a hint. Accented text is valid when the file encoding and TeX toolchain agree. Check the encoding or use an escape such as `\'e` for `é`. No fix is offered because the choice depends on the project's toolchain.
+
+This rule is **enabled by default**.
+
+An accented name entered as raw UTF-8:
+
+```bib
+@article{erdos47, author = {Erdős, Paul}}
+```
+
+```text
+help: encoding-hints
+ --> references.bib:1:32
+  |
+1 | @article{erdos47, author = {Erdős, Paul}}
+  |                                ^ non-ASCII text `ő`; ensure the file is UTF-8 and the document loads an input encoding (inputenc/fontspec), or use a LaTeX escape
+```

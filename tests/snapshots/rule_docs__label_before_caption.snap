@@ -1,0 +1,61 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `label-before-caption`
+
+Report a `\label` before the caption or first numbered item that establishes its counter. Such a label captures the previous counter and can print the wrong reference number. The rule checks curated floats, `\captionof` containers, and the standard `enumerate` list. It skips labels nested in command arguments and ambiguous counter changes. The fix moves the label after the caption or item marker while preserving custom item labels and Beamer overlays. It requires unsafe opt-in because it changes reference output.
+
+This rule is **enabled by default**.
+
+A `\label` above its `\caption` picks up the section counter, not the figure number:
+
+```tex
+\begin{figure}
+  \includegraphics{plot}
+  \label{fig:plot}
+  \caption{A plot.}
+\end{figure}
+```
+
+```text
+warning: label-before-caption
+ --> example.tex:3:3
+  |
+3 |   \label{fig:plot}
+  |   ^^^^^^^^^^^^^^^^ `\label` before the outer `\caption` in this `figure` does not capture the float number
+```
+
+A `\label` before the first `\item` has not seen the item counter step:
+
+```tex
+\begin{enumerate}
+  \label{item:first}
+  \item First
+\end{enumerate}
+```
+
+```text
+warning: label-before-caption
+ --> example.tex:2:3
+  |
+2 |   \label{item:first}
+  |   ^^^^^^^^^^^^^^^^^^ `\label` before the first `\item` in this `enumerate` does not capture the item number
+```
+
+A `\label` above `\captionof` in a minipage likewise precedes the explicit counter step:
+
+```tex
+\begin{minipage}{\textwidth}
+  \label{fig:plot}
+  \captionof{figure}{A plot.}
+\end{minipage}
+```
+
+```text
+warning: label-before-caption
+ --> example.tex:2:3
+  |
+2 |   \label{fig:plot}
+  |   ^^^^^^^^^^^^^^^^ `\label` before `\captionof` in this `minipage` does not capture the caption number
+```

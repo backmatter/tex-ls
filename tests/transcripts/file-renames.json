@@ -1,0 +1,90 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {},
+        "definition": {
+          "linkSupport": true
+        }
+      },
+      "workspace": {
+        "fileOperations": {
+          "willRename": true,
+          "didRename": true
+        },
+        "workspaceEdit": {
+          "documentChanges": true
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///rename/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\input{old}\n\\bibitem{manual}Body\n\\cite{manual}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///rename/old.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\section{Unsaved}"
+        }
+      }
+    },
+    {
+      "method": "workspace/willRenameFiles",
+      "params": {
+        "files": [
+          {
+            "oldUri": "file:///rename/old.tex",
+            "newUri": "file:///rename/new.tex"
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/definition",
+      "params": {
+        "textDocument": {
+          "uri": "file:///rename/main.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 9
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/didRenameFiles",
+      "params": {
+        "files": [
+          {
+            "oldUri": "file:///rename/old.tex",
+            "newUri": "file:///rename/new.tex"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///rename/new.tex"
+        }
+      },
+      "request": true
+    }
+  ]
+}

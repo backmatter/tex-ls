@@ -1,0 +1,342 @@
+//! Byte-range text edits.
+//!
+//! [`Edit`] is the parser's one edit currency: a byte range in some old text plus
+//! the string that replaces it. Everything here is pure text manipulation with no
+//! parser content; [`mod@super::reparse`] re-exports it so `parser::Edit` is the single
+//! path the parser layer uses. Converting LSP `didChange` content changes into
+//! these lives host-side (`crate::lsp` in the root crate), which keeps this crate
+//! free of protocol dependencies and wasm-clean.
+//!
+//! Edits reaching the reparse are **untrusted**. A language server can hand over a
+//! chain staged against a buffer that has since moved, and slicing on a stale range
+//! is a panic in an analysis query rather than a wrong answer. So every consumer
+//! validates before it slices: [`try_apply_edits`] is the apply-and-verify guard,
+//! and reconstructing the current buffer from an old snapshot plus a chain is what
+//! proves the chain is the exact transform between them.
+
+use std::ops::Range;
+
+/// A single contiguous text edit: replace `range` (a byte range in the *old* text)
+/// with `insert`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Edit {
+    pub range: Range<usize>,
+    pub insert: String,
+}
+
+impl Edit {
+    /// The signed length change this edit applies to text after `range`.
+    ///
+    /// Diagnostic offsets at or after the edit shift by exactly this much, which is
+    /// what lets a tier keep the errors it did not regenerate.
+    pub fn delta(&self) -> isize {
+        self.insert.len() as isize - (self.range.end - self.range.start) as isize
+    }
+
+    /// Whether this edit fits `text`: in bounds, non-inverted, and both offsets on
+    /// char boundaries. Check before slicing — the edit is untrusted.
+    pub fn fits(&self, text: &str) -> bool {
+        self.range.start <= self.range.end
+            && self.range.end <= text.len()
+            && text.is_char_boundary(self.range.start)
+            && text.is_char_boundary(self.range.end)
+    }
+
+    /// Apply the edit to `old`, producing the new text.
+    ///
+    /// # Panics
+    ///
+    /// If the edit does not [fit](Self::fits) `old`.
+    pub fn apply(&self, old: &str) -> String {
+        let mut out =
+            String::with_capacity(old.len().saturating_sub(self.range.len()) + self.insert.len());
+        out.push_str(&old[..self.range.start]);
+        out.push_str(&self.insert);
+        out.push_str(&old[self.range.end..]);
+        out
+    }
+}
+
+/// Apply `edits` to `old` left-to-right, each expressed against the text its
+/// predecessors produced — the shape an LSP `didChange` batch arrives in.
+///
+/// # Panics
+///
+/// If any edit does not fit the text its predecessors produced. Use
+/// [`try_apply_edits`] for a chain of unproven provenance.
+pub fn apply_edits(old: &str, edits: &[Edit]) -> String {
+    try_apply_edits(old, edits).expect("apply_edits: edit chain does not fit the text")
+}
+
+/// [`apply_edits`] for an edit chain of unproven provenance: [`None`] when any edit
+/// does not fit the text its predecessors produced.
+///
+/// Folds in place, so peak memory is one text rather than one per edit.
+pub fn try_apply_edits(old: &str, edits: &[Edit]) -> Option<String> {
+    let mut text = old.to_string();
+    for e in edits {
+        if !e.fits(&text) {
+            return None;
+        }
+        text.replace_range(e.range.clone(), &e.insert);
+    }
+    Some(text)
+}
+
+/// Compose touching sequential edits without copying unrelated document text.
+/// Independent edits return `None` so the caller can preserve them separately.
+/// Each edit is checked against the text its predecessors produced, including
+/// UTF-8 boundaries. The caller must still verify the final document transform.
+pub fn coalesce_touching_edits(old: &str, edits: &[Edit]) -> Option<Edit> {
+    let (first, rest) = edits.split_first()?;
+    if !first.fits(old) {
+        return None;
+    }
+    let mut merged = first.clone();
+    for edit in rest {
+        let current_end = merged.range.start.checked_add(merged.insert.len())?;
+        if edit.range.start > edit.range.end
+            || edit.range.start > current_end
+            || edit.range.end < merged.range.start
+        {
+            return None;
+        }
+        let start = merged.range.start.min(edit.range.start);
+        let end = merged
+            .range
+            .end
+            .checked_add(edit.range.end.saturating_sub(current_end))?;
+        let prefix = old.get(start..merged.range.start)?;
+        let suffix = old.get(merged.range.end..end)?;
+        // Only newly touched original bytes join the replacement. In normal
+        // forward typing both slices are empty and String reuses its allocation.
+        if !prefix.is_empty() {
+            merged.insert.insert_str(0, prefix);
+        }
+        merged.insert.push_str(suffix);
+        let range = edit.range.start.checked_sub(start)?..edit.range.end.checked_sub(start)?;
+        merged.insert.get(range.clone())?;
+        merged.insert.replace_range(range, &edit.insert);
+        merged.range = start..end;
+    }
+    Some(merged)
+}
+
+/// Recover a single contiguous [`Edit`] from a pair of whole texts by stripping the
+/// common prefix and suffix.
+///
+/// This is the **fallback**, not the hot path. The language server knows the exact
+/// range it spliced and should supply it directly to avoid scanning both texts.
+/// This helper handles changes that carry no edits: a disk reload, a
+/// whole-buffer replacement, a chain that failed to verify.
+///
+/// Multiple disjoint edits collapse into one spanning edit. Still a correct
+/// transform, just coarser — and a coarse one spans everything between the changes,
+/// which is exactly the shape a cost guard declines.
+pub fn diff_edit(old: &str, new: &str) -> Edit {
+    let ob = old.as_bytes();
+    let nb = new.as_bytes();
+
+    let mut prefix = 0;
+    let max_prefix = ob.len().min(nb.len());
+    while prefix < max_prefix && ob[prefix] == nb[prefix] {
+        prefix += 1;
+    }
+    // Back off to a char boundary of *both* texts. They share these bytes, so one
+    // test would do; testing `old` alone is the convention and `new` agrees.
+    while prefix > 0 && !old.is_char_boundary(prefix) {
+        prefix -= 1;
+    }
+
+    let mut suffix = 0;
+    let max_suffix = (ob.len() - prefix).min(nb.len() - prefix);
+    while suffix < max_suffix && ob[ob.len() - 1 - suffix] == nb[nb.len() - 1 - suffix] {
+        suffix += 1;
+    }
+    // Here the two texts are at different offsets, so both need the test.
+    while suffix > 0
+        && (!old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix))
+    {
+        suffix -= 1;
+    }
+
+    Edit {
+        range: prefix..(old.len() - suffix),
+        insert: new[prefix..(new.len() - suffix)].to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn edit(range: Range<usize>, insert: &str) -> Edit {
+        Edit {
+            range,
+            insert: insert.to_string(),
+        }
+    }
+
+    #[test]
+    fn touching_composition_matches_sequential_unicode_edits() {
+        // Enumerate overlapping, adjacent, disjoint, growing and shrinking
+        // windows. The oracle performs whole-text edits independently.
+        for old in ["", "abc", "α😀b", "a\r\nb"] {
+            let boundaries: Vec<_> = (0..=old.len())
+                .filter(|&i| old.is_char_boundary(i))
+                .collect();
+            for &start in &boundaries {
+                for &end in boundaries.iter().filter(|&&end| end >= start) {
+                    for insert in ["", "x", "α😀"] {
+                        let first = edit(start..end, insert);
+                        let middle = first.apply(old);
+                        let positions: Vec<_> = (0..=middle.len())
+                            .filter(|&i| middle.is_char_boundary(i))
+                            .collect();
+                        for &a in &positions {
+                            for &b in positions.iter().filter(|&&b| b >= a) {
+                                for value in ["", "z", "😀"] {
+                                    let second = edit(a..b, value);
+                                    let expected = second.apply(&middle);
+                                    if let Some(merged) =
+                                        coalesce_touching_edits(old, &[first.clone(), second])
+                                    {
+                                        assert_eq!(merged.apply(old), expected);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn touching_composition_declines_invalid_or_independent_edits() {
+        for edits in [
+            vec![],
+            vec![edit(0..0, "α"), edit(1..1, "x")],
+            vec![edit(0..0, ""), edit(99..99, "x")],
+            vec![edit(1..1, "x")],
+        ] {
+            assert!(coalesce_touching_edits("", &edits).is_none());
+        }
+        let old = "x".repeat(10000);
+        assert!(
+            coalesce_touching_edits(&old, &[edit(0..1, "a"), edit(9999..10000, "b")]).is_none()
+        );
+    }
+
+    #[test]
+    fn touching_composition_has_no_batch_or_replacement_cutoff() {
+        let edits: Vec<_> = (0..10000).map(|i| edit(i..i, "x")).collect();
+        let merged = coalesce_touching_edits("", &edits).unwrap();
+        assert_eq!(merged.range, 0..0);
+        assert_eq!(merged.insert, "x".repeat(edits.len()));
+    }
+
+    fn assert_recovers(old: &str, new: &str) -> Edit {
+        let e = diff_edit(old, new);
+        assert!(e.fits(old), "{e:?} does not fit {old:?}");
+        assert_eq!(e.apply(old), new, "diff_edit({old:?}, {new:?}) = {e:?}");
+        e
+    }
+
+    #[test]
+    fn diff_edit_recovers_a_noop() {
+        assert_eq!(
+            assert_recovers("\\section{Hi}\n", "\\section{Hi}\n").insert,
+            ""
+        );
+    }
+
+    #[test]
+    fn diff_edit_recovers_an_insertion() {
+        assert_eq!(assert_recovers("ab\n", "axb\n"), edit(1..1, "x"));
+    }
+
+    #[test]
+    fn diff_edit_recovers_a_deletion() {
+        assert_eq!(assert_recovers("axb\n", "ab\n"), edit(1..2, ""));
+    }
+
+    #[test]
+    fn diff_edit_recovers_a_replacement() {
+        assert_eq!(
+            assert_recovers("\\alpha\n", "\\gamma\n"),
+            edit(1..5, "gamm")
+        );
+    }
+
+    #[test]
+    fn diff_edit_collapses_disjoint_edits_into_one_span() {
+        let e = assert_recovers("a x b y c\n", "a X b Y c\n");
+        assert_eq!(e, edit(2..7, "X b Y"));
+    }
+
+    #[test]
+    fn diff_edit_handles_whole_replacement_and_empty_texts() {
+        assert_recovers("\\begin{a}\n", "\\end{b}\n");
+        assert_recovers("", "\\section{x}");
+        assert_recovers("\\section{x}", "");
+        assert_recovers("", "");
+    }
+
+    #[test]
+    fn diff_edit_clamps_to_char_boundaries() {
+        let e = assert_recovers("αβ\n", "αγ\n");
+        assert!("αβ\n".is_char_boundary(e.range.start));
+        assert!("αβ\n".is_char_boundary(e.range.end));
+    }
+
+    #[test]
+    fn diff_edit_clamps_a_shared_suffix_that_splits_a_char() {
+        assert_recovers("xα\n", "yα\n");
+        assert_recovers("α\n", "αα\n");
+    }
+
+    #[test]
+    fn apply_edits_chains_left_to_right() {
+        let edits = [edit(0..0, "\\a"), edit(2..2, "{b}")];
+        assert_eq!(apply_edits("\n", &edits), "\\a{b}\n");
+    }
+
+    #[test]
+    fn try_apply_edits_rejects_an_out_of_bounds_range() {
+        assert_eq!(try_apply_edits("ab", &[edit(9..9, "x")]), None);
+    }
+
+    #[test]
+    #[allow(
+        clippy::reversed_empty_ranges,
+        reason = "the inverted range is the input under test"
+    )]
+    fn try_apply_edits_rejects_an_inverted_range() {
+        assert_eq!(try_apply_edits("ab", &[edit(2..1, "x")]), None);
+    }
+
+    #[test]
+    fn try_apply_edits_rejects_an_offset_inside_a_char() {
+        assert_eq!(try_apply_edits("α", &[edit(1..1, "x")]), None);
+    }
+
+    #[test]
+    fn try_apply_edits_validates_each_step_against_its_predecessor() {
+        assert_eq!(
+            try_apply_edits("abc", &[edit(0..3, ""), edit(1..1, "x")]),
+            None
+        );
+        assert_eq!(
+            try_apply_edits("abc", &[edit(3..3, "de"), edit(4..5, "X")]).as_deref(),
+            Some("abcdX"),
+        );
+    }
+
+    #[test]
+    fn delta_is_the_shift_applied_to_later_offsets() {
+        assert_eq!(edit(0..0, "xy").delta(), 2);
+        assert_eq!(edit(0..2, "").delta(), -2);
+        assert_eq!(edit(0..2, "ab").delta(), 0);
+    }
+}

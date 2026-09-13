@@ -1,0 +1,23 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `unused-entry`
+
+Hint when a bibliography entry is unused in every complete, rooted document that loads this file. Disabled by default for shared libraries. Wildcard citations count as use; incomplete or unrooted namespaces produce no hints.
+
+This rule is **disabled by default**; enable it with `select`.
+
+A complete document loads this resource but cites no entries:
+
+```bib
+@misc{unused, title = {Draft}}
+```
+
+```text
+help: unused-entry
+ --> references.bib:1:7
+  |
+1 | @misc{unused, title = {Draft}}
+  |       ^^^^^^ bibliography entry `unused` is unused in its complete document roots
+```

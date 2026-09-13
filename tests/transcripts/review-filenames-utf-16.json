@@ -1,0 +1,150 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {},
+        "completion": {
+          "completionItem": {
+            "insertReplaceSupport": true
+          }
+        }
+      },
+      "workspace": {
+        "fileOperations": {
+          "willRename": true,
+          "didRename": true
+        }
+      },
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": false
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\n\\includeonly{chapter}\n\\input chapter after\n\\include{chapter}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/chapter.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "Chapter"
+        }
+      }
+    },
+    {
+      "method": "workspace/willRenameFiles",
+      "params": {
+        "files": [
+          {
+            "oldUri": "file:///architecture-settings/chapter.tex",
+            "newUri": "file:///architecture-settings/new%20chapter.tex"
+          }
+        ]
+      },
+      "request": true,
+      "expected": {
+        "changes": {
+          "file:///architecture-settings/main.tex": [
+            {
+              "range": {
+                "start": {
+                  "line": 1,
+                  "character": 13
+                },
+                "end": {
+                  "line": 1,
+                  "character": 20
+                }
+              },
+              "newText": "new chapter"
+            },
+            {
+              "range": {
+                "start": {
+                  "line": 2,
+                  "character": 7
+                },
+                "end": {
+                  "line": 2,
+                  "character": 14
+                }
+              },
+              "newText": "{new chapter}"
+            },
+            {
+              "range": {
+                "start": {
+                  "line": 3,
+                  "character": 9
+                },
+                "end": {
+                  "line": 3,
+                  "character": 16
+                }
+              },
+              "newText": "new chapter"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "workspace/didRenameFiles",
+      "params": {
+        "files": [
+          {
+            "oldUri": "file:///architecture-settings/chapter.tex",
+            "newUri": "file:///architecture-settings/new%20chapter.tex"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "\\documentclass{article}\n\\includeonly{new chapter}\n\\input {new chapter} after\n\\include{new chapter}\n\\input ne"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        },
+        "position": {
+          "line": 4,
+          "character": 9
+        }
+      },
+      "request": true
+    }
+  ]
+}

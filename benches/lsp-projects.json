@@ -1,0 +1,267 @@
+[
+  {
+    "path": "thesis/Abstract/abstract.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/Abstract/abstract.tex",
+    "sha256": "344c7da5e4526ab83027358b544d449bde61b51b2686f8153a5fb5b0477d703e"
+  },
+  {
+    "path": "thesis/Acknowledgement/acknowledgement.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/Acknowledgement/acknowledgement.tex",
+    "sha256": "c78ed1f8cf7b84e60888ec962934ba9f9d907bd998b57ecc45bcf11253da583c"
+  },
+  {
+    "path": "thesis/Declaration/declaration.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/Declaration/declaration.tex",
+    "sha256": "2d94d8ba31cf8507f6a8545e3ecbc494c6bf0c50a17bf4910a7c4211a06111a8"
+  },
+  {
+    "path": "thesis/LICENSE",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/LICENSE",
+    "sha256": "cce55a108217a82aab3a8f15d3e6b4b5da3d6ae9ffd1989b18d71d8f1d47f05e"
+  },
+  {
+    "path": "thesis/PhDThesisPSnPDF.cls",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/PhDThesisPSnPDF.cls",
+    "sha256": "a6cc6d0be9a8b8124cde969cdd59c84678696765433af2eff111200ec56aadc6"
+  },
+  {
+    "path": "thesis/Preamble/preamble.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/Preamble/preamble.tex",
+    "sha256": "44b40e4c9983968d9b8d894e076fc3715b8ed011487ed9ce003ee7cafd169681"
+  },
+  {
+    "path": "thesis/README.md",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/README.md",
+    "sha256": "62606ebb84864c00a93b8b2204f224c526fe735cd53d9a7ee80317471f5126d1"
+  },
+  {
+    "path": "thesis/References/my-papers.bib",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/References/my-papers.bib",
+    "sha256": "5be194a1cd2ff647fe88954eb2dad1b73e7a5c2cbdd3be7ac4f40ef92ef975cb"
+  },
+  {
+    "path": "thesis/References/references.bib",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/References/references.bib",
+    "sha256": "42be94075ea570e94f35daeffbdabade6b8e213c48c08e953f34c6c42f54cfd3"
+  },
+  {
+    "path": "thesis/chapter-last-conclusion/conclusion.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter-last-conclusion/conclusion.tex",
+    "sha256": "efa66d8ba5f5d964ba8e59a5ae1cd8e3f55a442cf3eef1b95e447ba7a38b4c5a"
+  },
+  {
+    "path": "thesis/chapter01-intro/figures/tikz-DMTA.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter01-intro/figures/tikz-DMTA.tex",
+    "sha256": "d74fbaf4faa432f14fad78c6ea3b22558c0aa6d454b21bdc6aa0e67464084503"
+  },
+  {
+    "path": "thesis/chapter01-intro/intro.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter01-intro/intro.tex",
+    "sha256": "cbffc592cb598ebf4933ae210315cfb1c469a3ed430c918f7d0ea2c9323c7f79"
+  },
+  {
+    "path": "thesis/chapter02-background/background.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/background.tex",
+    "sha256": "d2c5cf0fd246e7aee2ae73391b10904c5d0ab0cd05d22e32f214806809438ff3"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/bayesopt.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/bayesopt.tex",
+    "sha256": "19437c0a54e2bf605fabfac702fb8a1fd3cd490bf5a7481c11e385a1b4beba24"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/models.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/models.tex",
+    "sha256": "05c0c67719e9ed4b517ea418c11e21deed7848ab932bff22762cc29c0944e0f8"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/molgen.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/molgen.tex",
+    "sha256": "3ee8f22dc29f38701f4ce092ed887cbf89982c9d3d4b46dc962ab07a78b6b0a7"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/mols.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/mols.tex",
+    "sha256": "ef3e7f6a8cb69ee81d2d27a7c7df1f31ead0ce8a058a6f71087312186b8a51ad"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/problems.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/problems.tex",
+    "sha256": "98c22be15ec5cda2441d9851dac8f1f3c8697c8df50102b1fe27501ba2370a57"
+  },
+  {
+    "path": "thesis/chapter02-background/sections/synthesis.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter02-background/sections/synthesis.tex",
+    "sha256": "8d0e3c45e6d9b0e617854cf83faaadc41a68b0a2115110382b14f2a9abcf7cfc"
+  },
+  {
+    "path": "thesis/chapter0x-ADKF/adkf.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-ADKF/adkf.tex",
+    "sha256": "8de145b97f762263f1b76abb1c6f46c1b237d185088edfece86f1850e3657138"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/latent-space-optimisation.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/latent-space-optimisation.tex",
+    "sha256": "bc4b67cdcc62a52578daaa1c6781b8e8326f68b498cc60c6985498bef6b2d787"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/sections/3-failure_modes.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/sections/3-failure_modes.tex",
+    "sha256": "f8101a1427d5c6dfe7f574a222831458b41b0e4957626e5b15538ad8709b01ab"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/sections/4-main.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/sections/4-main.tex",
+    "sha256": "ef9dd9c1b11fa8942035dc69d56bc38444b79672ec343a57ac166e5b65988c1a"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/sections/5-related_work.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/sections/5-related_work.tex",
+    "sha256": "1d9b393a86c015476c89310c34720775506aef59f189697d961dd89fc489fc9c"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/sections/6-experiments.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/sections/6-experiments.tex",
+    "sha256": "5022fe5bb63cae37aa5267c2417cfbe2193bb0dffd20635cc2907d0ba509d4a4"
+  },
+  {
+    "path": "thesis/chapter0x-LSO/sections/7-conclusion.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-LSO/sections/7-conclusion.tex",
+    "sha256": "ef126e8704d4487c9a7cb9f319298912bf99c17d3e28a8f6e8a7f3c0704d774b"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/appendix.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/appendix.tex",
+    "sha256": "f0c17a21f3f46957cdd3b91c6e0fd090f59a0d7b8f2393988ce9971ac72b48f6"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/new-figures/tabulate_regression_results_R2.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/new-figures/tabulate_regression_results_R2.tex",
+    "sha256": "f5f3bf2ecd5952e268e2d36cadd928048be0ee5f5a143d152bf10b0d3bb9bd28"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/new-figures/tabulate_regression_results_logp.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/new-figures/tabulate_regression_results_logp.tex",
+    "sha256": "6503d7f20d472e68afe9abcb837cc957c0c15ed550a7086926954c295d3aaa7d"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/tanimofo-random-features.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/tanimofo-random-features.tex",
+    "sha256": "411f4b843e72dcf15fbf1fe432c55984323e3127675ba192ff192cc5ea62e522"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/3-minmax.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/3-minmax.tex",
+    "sha256": "0cb13e983686714894717d5bc0710904ee7c00eb1c4fba36659db5c54103e1f6"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/4-tdp.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/4-tdp.tex",
+    "sha256": "5da2edc7ceffa47efca5b583115334084c92a9669b340e8b1e558b0be4ab2640"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/5-related-work.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/5-related-work.tex",
+    "sha256": "619f1b58c7b86f447d4679fe8ab241220b36f93dace3127333fd44c553aaf412"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/6-experiments.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/6-experiments.tex",
+    "sha256": "c120851c834da86f6c52da9a67050788ceb20fd18e56d5a7219620254d485cfc"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/7-conclusion.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/7-conclusion.tex",
+    "sha256": "ab4ce1a876ab856e27f20a73096054f7874250a5fc96a392da91576accd3aa92"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/apdx-experiments.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/apdx-experiments.tex",
+    "sha256": "df0d5868320f8e7f68d0ed95ad6bb5cf684e4989be6d7188da6299548161f588"
+  },
+  {
+    "path": "thesis/chapter0x-TRF/text/apdx-proofs.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-TRF/text/apdx-proofs.tex",
+    "sha256": "8f308aa6a401d5a2fc9e3a6abbb0c4cded8c3c3fa830d45f234058a965b7e1d8"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/appendix.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/appendix.tex",
+    "sha256": "b5a130414f2d2300a8fd04378537d1175ed90e5a03a1ba2a87bf0e838a3de71d"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/figures/schematics/graphs-vs-trees.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/figures/schematics/graphs-vs-trees.tex",
+    "sha256": "e60a183fff38b2772f879b48e450e5bae0213bcb13ad83d6fef8b27ee17d2db5"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/figures/schematics/or-graph.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/figures/schematics/or-graph.tex",
+    "sha256": "b63277828185fc186eafa0ca78a4e032cb5210649bc3fdadf0b95fcd66f0f076"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/figures/schematics/retrosynthesis-intro.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/figures/schematics/retrosynthesis-intro.tex",
+    "sha256": "40aab3d82931262e668eb8523f248e56add089f05f2f9ec7acb05cb3eb391f77"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/figures/schematics/styles.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/figures/schematics/styles.tex",
+    "sha256": "e6d76c97368e09f09a7ce85b5f4df5f24966d98d7005bb7fe7d99d4e315e490c"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/retro-fallback.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/retro-fallback.tex",
+    "sha256": "abcfc91b19a0f0e72e13c4ab86a354914cba7e40a7e20e7233de3c99758c0fbb"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/text/appendix-proofs.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/text/appendix-proofs.tex",
+    "sha256": "c1d3f9b34866367259fae055658b4810a8d6fca7a2f7dea643ee2f268b20deec"
+  },
+  {
+    "path": "thesis/chapter0x-rfb/text/appendix-retro-fallback-details.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/chapter0x-rfb/text/appendix-retro-fallback-details.tex",
+    "sha256": "76d2cb63ae008f59cec2805bbbda321476e98f9d5470c8beaaa610d8980a406c"
+  },
+  {
+    "path": "thesis/glyphtounicode.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/glyphtounicode.tex",
+    "sha256": "d5937ceaa3d724b55f57915da07e0eed313b826fc655a78c006fc94592018961"
+  },
+  {
+    "path": "thesis/nomenclature.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/nomenclature.tex",
+    "sha256": "5c98395effe343f48d53d68d2362e00b0eb6f7c07e0529c219119204a3fd4c53"
+  },
+  {
+    "path": "thesis/thesis-info.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/thesis-info.tex",
+    "sha256": "6ffeb020ec6d4711337dd799dbc8d8c39fac84eedba4bd3ea31750bf8162a3f1"
+  },
+  {
+    "path": "thesis/thesis.tex",
+    "url": "https://raw.githubusercontent.com/AustinT/phd-thesis/3807e7d7d1e9a3eb558db3e52b66bb8a832255aa/thesis.tex",
+    "sha256": "773a1a37fa4e51b4ca5c32d553bac95054fdfe7b1d886071282589936091d243"
+  },
+  {
+    "path": "bibliography/rendering-bibtex.bib",
+    "url": "https://raw.githubusercontent.com/wkjarosz/rendering-bib/e7dbf3daa8a79db826386566019d51d790dd290e/rendering-bibtex.bib",
+    "sha256": "7bb3fe70d717a2937cc7b2b1644a0f69e8444958b703b7051f20eb9cf7869112"
+  },
+  {
+    "path": "bibliography/strings-full.bib",
+    "url": "https://raw.githubusercontent.com/wkjarosz/rendering-bib/e7dbf3daa8a79db826386566019d51d790dd290e/strings-full.bib",
+    "sha256": "178df3c0ba00ee96be6b76951d74dffeca8db74dc23ce15b03a90b88a65ed0df"
+  },
+  {
+    "path": "bibliography/README.md",
+    "url": "https://raw.githubusercontent.com/wkjarosz/rendering-bib/e7dbf3daa8a79db826386566019d51d790dd290e/README.md",
+    "sha256": "bcb415db2f9beefa1be4cc61446d97457b70143f7c8080bbbaa9a9a228e03a5d"
+  },
+  {
+    "path": "paper/expl3-intro.tex",
+    "url": "https://raw.githubusercontent.com/latex3/latex3/3d1d347d8937863c0786988b14d307a6091ee397/articles/expl3-intro.tex",
+    "sha256": "46dbe6dbc2d32e4b1d765d5a245ce46275f1a336d6854170e2fff1bbbabea988"
+  }
+]

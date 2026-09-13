@@ -1,0 +1,20 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+# License policy covers shipped dependencies; test-only comparison crates are excluded.
+include-dev = false
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "Zlib", "MIT-0", "Unicode-3.0"]
+exceptions = [{ crate = "option-ext", allow = ["MPL-2.0"] }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/latex-lsp/texlab"]

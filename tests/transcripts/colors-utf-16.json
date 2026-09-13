@@ -1,0 +1,184 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "colorProvider": {},
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\ud83d\ude00 \\definecolor{shade}{ gray }% keep\n{ .5 }\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentColor",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex"
+        }
+      },
+      "expected": [
+        {
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 2
+            },
+            "end": {
+              "line": 1,
+              "character": 4
+            }
+          },
+          "color": {
+            "red": 0.5,
+            "green": 0.5,
+            "blue": 0.5,
+            "alpha": 1
+          }
+        }
+      ]
+    },
+    {
+      "method": "textDocument/colorPresentation",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 2
+          },
+          "end": {
+            "line": 1,
+            "character": 4
+          }
+        },
+        "color": {
+          "red": 0,
+          "green": 1,
+          "blue": 0,
+          "alpha": 1
+        }
+      },
+      "expected": [
+        {
+          "label": "rgb: 0,1,0",
+          "textEdit": {
+            "range": {
+              "start": {
+                "line": 1,
+                "character": 2
+              },
+              "end": {
+                "line": 1,
+                "character": 4
+              }
+            },
+            "newText": "0,1,0"
+          },
+          "additionalTextEdits": [
+            {
+              "range": {
+                "start": {
+                  "line": 0,
+                  "character": 24
+                },
+                "end": {
+                  "line": 0,
+                  "character": 28
+                }
+              },
+              "newText": "rgb"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "\ud83d\ude00 \\definecolor{shade}{ rgb }% keep\n{ 0,1,0 }\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/documentColor",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex"
+        }
+      },
+      "expected": [
+        {
+          "range": {
+            "start": {
+              "line": 1,
+              "character": 2
+            },
+            "end": {
+              "line": 1,
+              "character": 7
+            }
+          },
+          "color": {
+            "red": 0,
+            "green": 1,
+            "blue": 0,
+            "alpha": 1
+          }
+        }
+      ]
+    },
+    {
+      "method": "textDocument/colorPresentation",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///colors/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 2
+          },
+          "end": {
+            "line": 1,
+            "character": 4
+          }
+        },
+        "color": {
+          "red": 0,
+          "green": 1,
+          "blue": 0,
+          "alpha": 1
+        }
+      },
+      "expected": []
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "Text.\nSecond line.\n"
+        }
+      }
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 1
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 1,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.log",
+              {
+                "state": "present",
+                "value": {
+                  "identity": "1",
+                  "text": "./main.tex:2: Bad command\n"
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.log": "./main.tex:2: Bad command\n"
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/diagnostic",
+      "params": {
+        "previousResultIds": []
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 2
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 2,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.log",
+              {
+                "state": "present",
+                "value": {
+                  "identity": "2",
+                  "text": "(./main.tex\nLaTeX Warning: Caution on input line 1.\n"
+                }
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.log": "(./main.tex\nLaTeX Warning: Caution on input line 1.\n"
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/diagnostic",
+      "params": {
+        "previousResultIds": []
+      },
+      "request": true
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/main.tex",
+        "kind": "compiler"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 3
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 3,
+        "inputs": {
+          "kind": "compiler",
+          "artifacts": [
+            [
+              "/architecture-settings/main.log",
+              {
+                "state": "absent"
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "main.log": null
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/diagnostic",
+      "params": {
+        "previousResultIds": []
+      },
+      "request": true
+    }
+  ]
+}

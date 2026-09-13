@@ -1,0 +1,232 @@
+//! The lint driver: run every rule over one file, drop suppressed findings,
+//! stamp paths, and sort. The single entry point both `tex-ls lint` (CLI) and
+//! the language server call.
+
+use std::path::Path;
+
+use crate::declarations::ResolvedDeclarations;
+use crate::parser::{LexConfig, parse_with_declarations};
+use crate::project::{ResolvedCitations, ResolvedLabels, ResolvedPackageOptions};
+use crate::semantic::SemanticModel;
+use crate::syntax::SyntaxNode;
+
+use super::diagnostic::Diagnostic;
+use super::rules::{
+    RuleContext, RuleRegistry, StreamVisitor, fixable_registry,
+    is_unsuppressible_suppression_meta_rule, registry,
+};
+use super::suppression::SuppressionMap;
+
+/// Parse and lint a single file's `text` from scratch, returning its parse
+/// diagnostics plus rule findings. The self-contained analog of
+/// [`lint_document`] for callers that hold only text — notably the `lint --fix`
+/// fixpoint loop, which re-parses after each round. Cross-file rules run with no
+/// project view (`resolution: None`); none of them produce fixes, so the fix
+/// path loses nothing. `config` fixes the
+/// lexer's initial catcode regime so a `.sty`/`.cls` parses under the implicit
+/// `\makeatletter` ([`Package`](crate::parser::LatexFlavor::Package)) and a
+/// `.dtx` runs the docstrip mode; a bare
+/// [`LatexFlavor`](crate::parser::LatexFlavor) coerces in. `declared` is the
+/// project's declaration block (`AGENTS.md` decision #12), so a declared
+/// `\bea`/`\eea` pair is an environment here exactly as it is under `tex-ls
+/// format`; pass [`ResolvedDeclarations::default`] where no project config
+/// governs.
+pub fn check_document(
+    path: &Path,
+    text: &str,
+    config: impl Into<LexConfig>,
+    declared: &ResolvedDeclarations,
+) -> Vec<Diagnostic> {
+    let parsed = parse_with_declarations(text, config, declared);
+    let mut diagnostics: Vec<Diagnostic> = parsed
+        .errors
+        .iter()
+        .map(|err| Diagnostic::from_parse(path.to_path_buf(), err))
+        .collect();
+    let root = SyntaxNode::new_root(parsed.green);
+    let model = SemanticModel::build_with_declarations(&root, declared);
+    diagnostics.extend(lint_document(path, &root, &model, None, None, None));
+    diagnostics
+}
+
+/// Like [`check_document`] but running only the fix-emitting rules
+/// ([`fixable_registry`]). The `--fix` fixpoint loop re-lints after each round;
+/// report-only rules can produce no fix, so running them every round is wasted
+/// work. Their findings are surfaced once by the reporting pass that follows.
+pub fn check_document_fixable(
+    path: &Path,
+    text: &str,
+    config: impl Into<LexConfig>,
+    declared: &ResolvedDeclarations,
+) -> Vec<Diagnostic> {
+    let parsed = parse_with_declarations(text, config, declared);
+    let root = SyntaxNode::new_root(parsed.green);
+    let model = SemanticModel::build_with_declarations(&root, declared);
+    lint_with(fixable_registry(), path, &root, &model, None, None, None)
+}
+
+/// Run all built-in rules against `root`/`model`, returning the surviving
+/// diagnostics (suppressed ones removed, `path` stamped, sorted by position).
+///
+/// `root` and `model` must describe the same file as `path`. Callers supply
+/// them from wherever is cheapest: the CLI parses directly, the LSP reuses its
+/// salsa-cached tree and model. `resolution` is the cross-file label model and
+/// `citations` the cross-file bibliography model for the project `path` belongs
+/// to, and `packages` the package-option model (which options each analyzed
+/// `.sty` member declares), each `None` when there is no project view — the
+/// cross-file rules (`undefined-ref`, `undefined-citation`, the cross-file
+/// branch of `duplicate-label`, `unknown-option`) are then inert.
+pub fn lint_document(
+    path: &Path,
+    root: &SyntaxNode,
+    model: &SemanticModel,
+    resolution: Option<&ResolvedLabels>,
+    citations: Option<&ResolvedCitations>,
+    packages: Option<&ResolvedPackageOptions>,
+) -> Vec<Diagnostic> {
+    lint_with(
+        registry(),
+        path,
+        root,
+        model,
+        resolution,
+        citations,
+        packages,
+    )
+}
+
+/// The shared driver, generic over which [`RuleRegistry`] to run — the full set
+/// ([`registry`]) for reporting, or the fix-emitting subset ([`fixable_registry`])
+/// for the `--fix` loop. Borrowing a cached registry means the dispatch table is
+/// built once, not once per file (nor once per project file).
+fn lint_with(
+    reg: &RuleRegistry,
+    path: &Path,
+    root: &SyntaxNode,
+    model: &SemanticModel,
+    resolution: Option<&ResolvedLabels>,
+    citations: Option<&ResolvedCitations>,
+    packages: Option<&ResolvedPackageOptions>,
+) -> Vec<Diagnostic> {
+    let ctx = RuleContext::new(path, root, model, resolution, citations, packages);
+    let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+    // Per-file stateful visitors that ride the one shared walk instead of each
+    // re-traversing the tree (see `Rule::stream`). Cheap to construct (a handful).
+    let mut visitors: Vec<Box<dyn StreamVisitor>> =
+        reg.rules.iter().filter_map(|r| r.stream()).collect();
+
+    // Single shared traversal feeding every node-shape rule and every streaming
+    // visitor. Visits tokens too (`descendants_with_tokens`) so token-level rules
+    // can subscribe to e.g. `COMMENT` or `WORD`.
+    if reg.any_node_rules || !visitors.is_empty() {
+        for el in root.descendants_with_tokens() {
+            for &i in &reg.by_kind[el.kind() as usize] {
+                reg.rules[i].check(&el, &ctx, &mut diagnostics);
+            }
+            for v in &mut visitors {
+                v.visit(&el, &ctx, &mut diagnostics);
+            }
+        }
+    }
+    for v in &mut visitors {
+        v.finish(&ctx, &mut diagnostics);
+    }
+
+    // Whole-file pass for model-/resolution-driven rules.
+    for rule in &reg.rules {
+        rule.check_file(&ctx, &mut diagnostics);
+    }
+
+    let suppress = SuppressionMap::from_suppressions(&ctx.suppressions);
+    diagnostics.retain(|d| {
+        is_unsuppressible_suppression_meta_rule(d.rule)
+            || !suppress.is_suppressed(d.rule, d.start, d.end)
+    });
+
+    for d in &mut diagnostics {
+        d.path = path.to_path_buf();
+    }
+    diagnostics.sort_by_key(|d| (d.start, d.end, d.rule));
+    diagnostics
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse;
+
+    fn lint(src: &str) -> Vec<Diagnostic> {
+        let root = SyntaxNode::new_root(parse(src).green);
+        let model = SemanticModel::build(&root);
+        lint_document(Path::new("x.tex"), &root, &model, None, None, None)
+    }
+
+    fn rules_of(src: &str) -> Vec<&'static str> {
+        lint(src).iter().map(|d| d.rule).collect()
+    }
+
+    #[test]
+    fn collects_both_rule_families() {
+        // A duplicate label and a deprecated switch, sorted by position.
+        let rules = rules_of("\\label{a}\\label{a}\n{\\bf x}\n");
+        assert_eq!(rules, vec!["duplicate-label", "deprecated-command"]);
+    }
+
+    #[test]
+    fn node_directive_suppresses_following_command() {
+        let out = lint("% tex-ls-lint skip deprecated-command: legacy\n{\\bf x}\n");
+        assert!(out.is_empty(), "expected suppression, got: {out:?}");
+    }
+
+    #[test]
+    fn node_directive_only_targets_named_rule() {
+        // The directive names a different rule, so the `\bf` is still reported.
+        let out = lint("% tex-ls-lint skip duplicate-label: nope\n{\\bf x}\n");
+        assert_eq!(rules_of_diags(&out), vec!["deprecated-command"]);
+    }
+
+    #[test]
+    fn node_directive_does_not_leak_past_first_target() {
+        // Only the first block is suppressed; a later `\it` still fires.
+        let out = lint("% tex-ls-lint skip deprecated-command: legacy\n{\\bf x}\n\n{\\it y}\n");
+        assert_eq!(rules_of_diags(&out), vec!["deprecated-command"]);
+    }
+
+    #[test]
+    fn node_directive_suppresses_construct_with_arguments() {
+        // Regression: a comment immediately before a bare `\command` (no
+        // enclosing group) binds into a `DOC_COMMENT` that is the *leading
+        // child* of the `COMMAND` node, not a preceding sibling of it.
+        let out = lint(
+            "\\usepackage{amsmath}\n\
+             % tex-ls-lint skip duplicate-package: legacy, loaded twice on purpose\n\
+             \\usepackage{amsmath}\n",
+        );
+        assert!(out.is_empty(), "expected suppression, got: {out:?}");
+    }
+
+    #[test]
+    fn node_directive_suppresses_diagnostic_inside_argument() {
+        // Regression: same root cause as above, from the other direction -
+        // `dash-length` flags a token *inside* `\cline{2-7}`'s argument group,
+        // a range the old walk never reached at all (it stopped at the
+        // `\cline` control word).
+        let out =
+            lint("% tex-ls-lint skip dash-length: interval, not a numeric range\n\\cline{2-7}\n");
+        assert!(out.is_empty(), "expected suppression, got: {out:?}");
+    }
+
+    #[test]
+    fn file_directive_suppresses_all_occurrences() {
+        let out = lint("% tex-ls-lint skip-file deprecated-command: legacy\n{\\bf x}\n{\\it y}\n");
+        assert!(
+            out.is_empty(),
+            "expected file-wide suppression, got: {out:?}"
+        );
+    }
+
+    fn rules_of_diags(diags: &[Diagnostic]) -> Vec<&'static str> {
+        diags.iter().map(|d| d.rule).collect()
+    }
+}

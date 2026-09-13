@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `swallowed-space`
+
+Report spaces that TeX discards after argumentless logo commands such as `\LaTeX`, `\TeX`, and `\BibTeX`. For example, `\LaTeX is` prints "LaTeXis". The rule applies only in text before an alphanumeric word. The fix inserts `{}` after the command and requires unsafe opt-in because it changes typeset output.
+
+This rule is **enabled by default**.
+
+A logo swallows the following space, gluing it to the next word:
+
+```tex
+We used \LaTeX to typeset this.
+```
+
+```text
+warning: swallowed-space
+ --> example.tex:1:15
+  |
+1 | We used \LaTeX to typeset this.
+  |               ^ `\LaTeX` swallows the following space; add `{}` (`\LaTeX{}`) or `\ ` so it prints
+```

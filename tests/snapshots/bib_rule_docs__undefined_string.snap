@@ -1,0 +1,24 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `undefined-string`
+
+Report a string macro with no definition in the file. The twelve month macros `jan` through `dec` are predefined. Cross-file string resolution is not supported, so a definition in another bibliography may produce a false positive. No automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A typo'd macro name (`cpu` for `cup`):
+
+```bib
+@string{cup = {Cambridge University Press}}
+@book{turing50, title = {Draft}, publisher = cpu}
+```
+
+```text
+warning: undefined-string
+ --> references.bib:2:46
+  |
+2 | @book{turing50, title = {Draft}, publisher = cpu}
+  |                                              ^^^ `@string` macro `cpu` is used but never defined
+```

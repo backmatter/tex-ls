@@ -1,0 +1,37 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `times-variable`
+
+Report a lowercase `x` between two ASCII integers, such as `640x200`. The unsafe fix uses `\times` in math and `$\times$` in text. Ordinary words, spaced products, hexadecimal literals, and label/reference keys are excluded. Unsafe opt-in is required because the `x` could be an intended variable.
+
+This rule is **enabled by default**.
+
+A literal `x` as a multiplication sign in text (fixed to `$\times$`):
+
+```tex
+A 640x200 pixel image.
+```
+
+```text
+warning: times-variable
+ --> example.tex:1:6
+  |
+1 | A 640x200 pixel image.
+  |      ^ literal `x` as a multiplication sign between numbers; use `\times` for a cross
+```
+
+The same inside math mode (fixed to `\times`):
+
+```tex
+The grid is $640x200$ cells.
+```
+
+```text
+warning: times-variable
+ --> example.tex:1:17
+  |
+1 | The grid is $640x200$ cells.
+  |                 ^ literal `x` as a multiplication sign between numbers; use `\times` for a cross
+```

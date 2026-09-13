@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `deprecated-command`
+
+Report the obsolete font switches `\bf`, `\it`, `\rm`, `\sf`, `\tt`, `\sc`, and `\sl`. The supported `\em` switch and locally redefined names are excluded. The fix replaces the command with its LaTeX declaration, such as `\bfseries`, but requires unsafe opt-in because font reset and math behavior differ. Commands used as references in forms such as `\let` or `\ifx` receive no fix.
+
+This rule is **enabled by default**.
+
+An obsolete two-letter font switch:
+
+```tex
+{\bf important}
+```
+
+```text
+warning: deprecated-command
+ --> example.tex:1:2
+  |
+1 | {\bf important}
+  |  ^^^ `\bf` is deprecated; use `\bfseries`
+```

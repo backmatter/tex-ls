@@ -1,0 +1,134 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "codeAction": {
+          "codeActionLiteralSupport": {
+            "codeActionKind": {
+              "valueSet": [
+                "refactor.rewrite.environment"
+              ]
+            }
+          }
+        },
+        "signatureHelp": {
+          "signatureInformation": {
+            "parameterInformation": {
+              "labelOffsetSupport": true
+            },
+            "activeParameterSupport": true
+          }
+        }
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": false
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///editing-ux/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{center}\n😀 \\textbf{outer {inner}}\n\\end{center}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editing-ux/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 23
+        }
+      },
+      "expected": {
+        "signatures": [
+          {
+            "label": "\\textbf{#1}",
+            "documentation": "command · 1 required argument",
+            "parameters": [
+              {
+                "label": [
+                  7,
+                  11
+                ],
+                "documentation": "Text to emphasize"
+              }
+            ],
+            "activeParameter": 0
+          }
+        ],
+        "activeSignature": 0,
+        "activeParameter": 0
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editing-ux/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 0
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "refactor.rewrite.environment"
+          ]
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/codeAction",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editing-ux/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 0
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "refactor.rewrite.unknown"
+          ]
+        }
+      },
+      "expected": []
+    }
+  ]
+}

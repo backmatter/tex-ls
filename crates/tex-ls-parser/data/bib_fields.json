@@ -1,0 +1,434 @@
+{
+  "_comment": "Built-in BibTeX/BibLaTeX entry- and field-signature DB. Source of truth for bib::semantic::signature. Entry/field coverage is derived from BibLaTeX's canonical data model (blx-dm.def, v3.21 / TeX Live 2025): every entry type, every input field, the per-type field lists, and the mandatory-field constraints are taken verbatim from the \\DeclareDatamodel* declarations. Classic-BibTeX entry-type aliases (conference, mastersthesis, phdthesis, techreport) and input-field aliases (address, annote, archiveprefix, journal, key, school, primaryclass, pdf, year, month) are added on top; mastersthesis/phdthesis/techreport do not exist in the data model and keep classic-BibTeX required fields (e.g. school). Every other entry type's `required` list matches the data model's mandatory constraints verbatim. Entry `required` elements are a field name or an array of alternatives ('one of', from \\constraintfieldsor/xor). Field `category` is one of name|date|verbatim|literal (mapped from the data model datatype: name→name, date→date, verbatim/uri→verbatim, else→literal; default literal for unlisted fields). Names are matched case-insensitively. The mechanical facts (entry types, field categories, required constraints) are kept in sync with the installed biblatex by scripts/gen_bib_fields.py (python3 scripts/gen_bib_fields.py, with --write to regenerate); the optional-field ordering and the classic-BibTeX overlay are hand-curated and preserved across syncs.",
+
+  "entries": {
+    "artwork": {
+      "required": [],
+      "optional": []
+    },
+    "audio": {
+      "required": [],
+      "optional": []
+    },
+    "bibnote": {
+      "required": [],
+      "optional": ["note"]
+    },
+    "commentary": {
+      "required": [],
+      "optional": []
+    },
+    "customa": {
+      "required": [],
+      "optional": []
+    },
+    "customb": {
+      "required": [],
+      "optional": []
+    },
+    "customc": {
+      "required": [],
+      "optional": []
+    },
+    "customd": {
+      "required": [],
+      "optional": []
+    },
+    "custome": {
+      "required": [],
+      "optional": []
+    },
+    "customf": {
+      "required": [],
+      "optional": []
+    },
+    "inreference": {
+      "required": [["date", "year"], "author", "editor", "title", "booktitle"],
+      "optional": ["addendum", "afterword", "annotator", "booksubtitle", "booktitleaddon", "chapter", "commentator", "edition", "editora", "editorb", "editorc", "editortype", "editoratype", "editorbtype", "editorctype", "eid", "foreword", "introduction", "isbn", "language", "location", "mainsubtitle", "maintitle", "maintitleaddon", "note", "number", "origlanguage", "pages", "part", "publisher", "pubstate", "series", "subtitle", "titleaddon", "translator", "volume", "volumes"]
+    },
+    "image": {
+      "required": [],
+      "optional": []
+    },
+    "jurisdiction": {
+      "required": [],
+      "optional": []
+    },
+    "legal": {
+      "required": [],
+      "optional": []
+    },
+    "legislation": {
+      "required": [],
+      "optional": []
+    },
+    "letter": {
+      "required": [],
+      "optional": []
+    },
+    "movie": {
+      "required": [],
+      "optional": []
+    },
+    "music": {
+      "required": [],
+      "optional": []
+    },
+    "mvreference": {
+      "required": ["editor", "title"],
+      "optional": ["addendum", "afterword", "annotator", "author", "commentator", "edition", "editora", "editorb", "editorc", "editortype", "editoratype", "editorbtype", "editorctype", "foreword", "introduction", "isbn", "language", "location", "note", "number", "origlanguage", "publisher", "pubstate", "subtitle", "titleaddon", "translator", "volume", "volumes"]
+    },
+    "performance": {
+      "required": [],
+      "optional": []
+    },
+    "reference": {
+      "required": [["date", "year"], "editor", "title"],
+      "optional": ["addendum", "afterword", "annotator", "chapter", "commentator", "edition", "editora", "editorb", "editorc", "editortype", "editoratype", "editorbtype", "editorctype", "eid", "foreword", "introduction", "isbn", "language", "location", "mainsubtitle", "maintitle", "maintitleaddon", "note", "number", "origlanguage", "pages", "pagetotal", "part", "publisher", "pubstate", "series", "subtitle", "titleaddon", "translator", "volume", "volumes"]
+    },
+    "review": {
+      "required": [],
+      "optional": []
+    },
+    "software": {
+      "required": ["title"],
+      "optional": ["addendum", "author", "editor", "editortype", "howpublished", "language", "location", "note", "organization", "pubstate", "subtitle", "titleaddon", "type", "version"]
+    },
+    "standard": {
+      "required": [],
+      "optional": []
+    },
+    "suppbook": {
+      "required": [["date", "year"], "author", "title", "booktitle"],
+      "optional": ["addendum", "afterword", "annotator", "bookauthor", "booksubtitle", "booktitleaddon", "chapter", "commentator", "edition", "editor", "editora", "editorb", "editorc", "editortype", "editoratype", "editorbtype", "editorctype", "eid", "foreword", "introduction", "isbn", "language", "location", "mainsubtitle", "maintitle", "maintitleaddon", "note", "number", "origlanguage", "part", "publisher", "pages", "pubstate", "series", "subtitle", "titleaddon", "translator", "volume", "volumes"]
+    },
+    "suppcollection": {
+      "required": [["date", "year"], "author", "editor", "title", "booktitle"],
+      "optional": ["addendum", "afterword", "annotator", "booksubtitle", "booktitleaddon", "chapter", "commentator", "edition", "editora", "editorb", "editorc", "editortype", "editoratype", "editorbtype", "editorctype", "eid", "foreword", "introduction", "isbn", "language", "location", "mainsubtitle", "maintitle", "maintitleaddon", "note", "number", "origlanguage", "pages", "part", "publisher", "pubstate", "series", "subtitle", "titleaddon", "translator", "volume", "volumes"]
+    },
+    "suppperiodical": {
+      "required": [["date", "year"]],
+      "optional": []
+    },
+    "video": {
+      "required": [],
+      "optional": []
+    },
+    "article": {
+      "required": ["author", "title", "journaltitle", ["date", "year"]],
+      "optional": ["journal", "translator", "volume", "number", "pages", "issue", "month", "issn", "doi", "url", "note"]
+    },
+    "book": {
+      "required": ["author", "title", ["date", "year"]],
+      "optional": ["publisher", "location", "address", "volume", "series", "edition", "number", "pages", "isbn", "doi", "url", "note"]
+    },
+    "mvbook": {
+      "required": ["author", "title", ["date", "year"]],
+      "optional": ["publisher", "location", "volume", "series", "edition", "isbn", "doi", "url", "note"]
+    },
+    "inbook": {
+      "required": ["author", "title", "booktitle", ["date", "year"]],
+      "optional": ["editor", "publisher", "location", "volume", "series", "chapter", "pages", "doi", "url", "note"]
+    },
+    "bookinbook": {
+      "required": ["author", "title", "booktitle", ["date", "year"]],
+      "optional": ["editor", "publisher", "location", "volume", "series", "pages", "doi", "url", "note"]
+    },
+    "incollection": {
+      "required": ["author", "editor", "title", "booktitle", ["date", "year"]],
+      "optional": ["editor", "publisher", "location", "volume", "series", "chapter", "pages", "doi", "url", "note"]
+    },
+    "inproceedings": {
+      "required": ["author", "title", "booktitle", ["date", "year"]],
+      "optional": ["editor", "eventtitle", "publisher", "organization", "location", "address", "volume", "series", "pages", "doi", "url", "note"]
+    },
+    "conference": {
+      "required": ["author", "title", "booktitle", ["date", "year"]],
+      "optional": ["editor", "publisher", "organization", "location", "pages", "doi", "url", "note"]
+    },
+    "collection": {
+      "required": ["editor", "title", ["date", "year"]],
+      "optional": ["publisher", "location", "volume", "series", "edition", "isbn", "doi", "url", "note"]
+    },
+    "mvcollection": {
+      "required": ["editor", "title", ["date", "year"]],
+      "optional": ["publisher", "location", "volume", "series", "isbn", "doi", "url", "note"]
+    },
+    "proceedings": {
+      "required": ["title", ["date", "year"]],
+      "optional": ["editor", "eventtitle", "publisher", "organization", "location", "volume", "series", "isbn", "doi", "url", "note"]
+    },
+    "mvproceedings": {
+      "required": ["title"],
+      "optional": ["editor", "publisher", "organization", "location", "volume", "series", "doi", "url", "note"]
+    },
+    "manual": {
+      "required": ["title", ["date", "year"]],
+      "optional": ["author", "editor", "organization", "publisher", "location", "edition", "version", "isbn", "doi", "url", "note"]
+    },
+    "misc": {
+      "required": ["title", ["date", "year"]],
+      "optional": ["author", "editor", "howpublished", "organization", "publisher", "location", "month", "year", "date", "doi", "url", "note"]
+    },
+    "online": {
+      "required": ["title", ["date", "year"], ["url", "doi", "eprint"]],
+      "optional": ["author", "editor", "organization", "urldate", "doi", "note"]
+    },
+    "patent": {
+      "required": ["author", "title", "number", ["date", "year"]],
+      "optional": ["holder", "type", "location", "doi", "url", "note"]
+    },
+    "periodical": {
+      "required": ["editor", "title", ["date", "year"]],
+      "optional": ["editor", "subtitle", "issuetitle", "volume", "number", "issue", "month", "issn", "doi", "url", "note"]
+    },
+    "report": {
+      "required": ["author", "title", "type", "institution", ["date", "year"]],
+      "optional": ["number", "version", "location", "isrn", "doi", "url", "note"]
+    },
+    "thesis": {
+      "required": ["author", "title", "type", "institution", ["date", "year"]],
+      "optional": ["location", "pages", "doi", "url", "note"]
+    },
+    "mastersthesis": {
+      "required": ["author", "title", "school", ["date", "year"]],
+      "optional": ["type", "address", "month", "doi", "url", "note"]
+    },
+    "phdthesis": {
+      "required": ["author", "title", "school", ["date", "year"]],
+      "optional": ["type", "address", "month", "doi", "url", "note"]
+    },
+    "techreport": {
+      "required": ["author", "title", "institution", ["date", "year"]],
+      "optional": ["type", "number", "address", "month", "doi", "url", "note"]
+    },
+    "booklet": {
+      "required": [["author", "editor"], "title", ["date", "year"]],
+      "optional": ["author", "howpublished", "address", "location", "month", "year", "date", "doi", "url", "note"]
+    },
+    "unpublished": {
+      "required": ["author", "title", ["date", "year"]],
+      "optional": ["howpublished", "note", "month", "url"]
+    },
+    "dataset": {
+      "required": ["title"],
+      "optional": ["author", "editor", "publisher", "location", "version", "type", "doi", "url", "note"]
+    },
+    "set": {
+      "required": ["entryset", ["date", "year"]],
+      "optional": ["crossref"]
+    }
+  },
+
+  "_fields_comment": "The complete standard BibLaTeX data-field set (manual §2.2), plus classic-BibTeX aliases. This table is authoritative for `is this a known field?` (unknown-field accepts any field listed here, on any entry type, matching BibLaTeX, which recognizes standard fields regardless of entry type); the per-type optional lists above only refine required/missing-required checks. `category` drives formatter handling: name = `and`-separated name list, date = date value, verbatim = never reshape, literal = default (still must be listed to count as known).",
+
+  "fields": {
+    "author": { "category": "name" },
+    "bookauthor": { "category": "name" },
+    "editor": { "category": "name" },
+    "editora": { "category": "name" },
+    "editorb": { "category": "name" },
+    "editorc": { "category": "name" },
+    "translator": { "category": "name" },
+    "commentator": { "category": "name" },
+    "annotator": { "category": "name" },
+    "introduction": { "category": "name" },
+    "foreword": { "category": "name" },
+    "afterword": { "category": "name" },
+    "holder": { "category": "name" },
+    "shortauthor": { "category": "name" },
+    "shorteditor": { "category": "name" },
+    "namea": { "category": "name" },
+    "nameb": { "category": "name" },
+    "namec": { "category": "name" },
+    "sortname": { "category": "name" },
+
+    "date": { "category": "date" },
+    "eventdate": { "category": "date" },
+    "origdate": { "category": "date" },
+    "urldate": { "category": "date" },
+    "year": { "category": "date" },
+    "month": { "category": "date" },
+    "day": { "category": "date" },
+    "hour": { "category": "date" },
+    "minute": { "category": "date" },
+    "second": { "category": "date" },
+    "timezone": { "category": "date" },
+    "yeardivision": { "category": "date" },
+    "endyear": { "category": "date" },
+    "endmonth": { "category": "date" },
+    "endday": { "category": "date" },
+    "endhour": { "category": "date" },
+    "endminute": { "category": "date" },
+    "endsecond": { "category": "date" },
+    "endtimezone": { "category": "date" },
+    "endyeardivision": { "category": "date" },
+    "origyear": { "category": "date" },
+    "origmonth": { "category": "date" },
+    "origday": { "category": "date" },
+    "orighour": { "category": "date" },
+    "origminute": { "category": "date" },
+    "origsecond": { "category": "date" },
+    "origtimezone": { "category": "date" },
+    "origyeardivision": { "category": "date" },
+    "origendyear": { "category": "date" },
+    "origendmonth": { "category": "date" },
+    "origendday": { "category": "date" },
+    "origendhour": { "category": "date" },
+    "origendminute": { "category": "date" },
+    "origendsecond": { "category": "date" },
+    "origendtimezone": { "category": "date" },
+    "origendyeardivision": { "category": "date" },
+    "urlyear": { "category": "date" },
+    "urlmonth": { "category": "date" },
+    "urlday": { "category": "date" },
+    "urlhour": { "category": "date" },
+    "urlminute": { "category": "date" },
+    "urlsecond": { "category": "date" },
+    "urltimezone": { "category": "date" },
+    "urlendyear": { "category": "date" },
+    "urlendmonth": { "category": "date" },
+    "urlendday": { "category": "date" },
+    "urlendhour": { "category": "date" },
+    "urlendminute": { "category": "date" },
+    "urlendsecond": { "category": "date" },
+    "urlendtimezone": { "category": "date" },
+
+    "url": { "category": "verbatim" },
+    "doi": { "category": "verbatim" },
+    "eprint": { "category": "verbatim" },
+    "file": { "category": "verbatim" },
+    "pdf": { "category": "verbatim" },
+    "verba": { "category": "verbatim" },
+    "verbb": { "category": "verbatim" },
+    "verbc": { "category": "verbatim" },
+
+    "abstract": { "category": "literal" },
+    "addendum": { "category": "literal" },
+    "address": { "category": "literal" },
+    "annotation": { "category": "literal" },
+    "annote": { "category": "literal" },
+    "archiveprefix": { "category": "literal" },
+    "authortype": { "category": "literal" },
+    "booktitle": { "category": "literal" },
+    "booktitleaddon": { "category": "literal" },
+    "booksubtitle": { "category": "literal" },
+    "bookpagination": { "category": "literal" },
+    "chapter": { "category": "literal" },
+    "crossref": { "category": "literal" },
+    "edition": { "category": "literal" },
+    "editortype": { "category": "literal" },
+    "editoratype": { "category": "literal" },
+    "editorbtype": { "category": "literal" },
+    "editorctype": { "category": "literal" },
+    "eid": { "category": "literal" },
+    "entryset": { "category": "literal" },
+    "entrysubtype": { "category": "literal" },
+    "eprintclass": { "category": "literal" },
+    "eprinttype": { "category": "literal" },
+    "eventtitle": { "category": "literal" },
+    "eventtitleaddon": { "category": "literal" },
+    "execute": { "category": "literal" },
+    "gender": { "category": "literal" },
+    "howpublished": { "category": "literal" },
+    "ids": { "category": "literal" },
+    "indextitle": { "category": "literal" },
+    "indexsorttitle": { "category": "literal" },
+    "institution": { "category": "literal" },
+    "isan": { "category": "literal" },
+    "isbn": { "category": "literal" },
+    "ismn": { "category": "literal" },
+    "isrn": { "category": "literal" },
+    "issn": { "category": "literal" },
+    "issue": { "category": "literal" },
+    "issuesubtitle": { "category": "literal" },
+    "issuetitle": { "category": "literal" },
+    "issuetitleaddon": { "category": "literal" },
+    "iswc": { "category": "literal" },
+    "journal": { "category": "literal" },
+    "journaltitle": { "category": "literal" },
+    "journalsubtitle": { "category": "literal" },
+    "journaltitleaddon": { "category": "literal" },
+    "key": { "category": "literal" },
+    "keywords": { "category": "literal" },
+    "label": { "category": "literal" },
+    "langid": { "category": "literal" },
+    "langidopts": { "category": "literal" },
+    "language": { "category": "literal" },
+    "library": { "category": "literal" },
+    "lista": { "category": "literal" },
+    "listb": { "category": "literal" },
+    "listc": { "category": "literal" },
+    "listd": { "category": "literal" },
+    "liste": { "category": "literal" },
+    "listf": { "category": "literal" },
+    "location": { "category": "literal" },
+    "maintitle": { "category": "literal" },
+    "maintitleaddon": { "category": "literal" },
+    "mainsubtitle": { "category": "literal" },
+    "nameaddon": { "category": "literal" },
+    "nameatype": { "category": "literal" },
+    "namebtype": { "category": "literal" },
+    "namectype": { "category": "literal" },
+    "note": { "category": "literal" },
+    "number": { "category": "literal" },
+    "options": { "category": "literal" },
+    "organization": { "category": "literal" },
+    "origlanguage": { "category": "literal" },
+    "origlocation": { "category": "literal" },
+    "origpublisher": { "category": "literal" },
+    "origtitle": { "category": "literal" },
+    "pages": { "category": "literal" },
+    "pagetotal": { "category": "literal" },
+    "pagination": { "category": "literal" },
+    "part": { "category": "literal" },
+    "presort": { "category": "literal" },
+    "primaryclass": { "category": "literal" },
+    "publisher": { "category": "literal" },
+    "pubstate": { "category": "literal" },
+    "related": { "category": "literal" },
+    "relatedoptions": { "category": "literal" },
+    "relatedstring": { "category": "literal" },
+    "relatedtype": { "category": "literal" },
+    "reprinttitle": { "category": "literal" },
+    "school": { "category": "literal" },
+    "series": { "category": "literal" },
+    "shorthand": { "category": "literal" },
+    "shorthandintro": { "category": "literal" },
+    "shortjournal": { "category": "literal" },
+    "shortseries": { "category": "literal" },
+    "shorttitle": { "category": "literal" },
+    "sortkey": { "category": "literal" },
+    "sortshorthand": { "category": "literal" },
+    "sorttitle": { "category": "literal" },
+    "sortyear": { "category": "literal" },
+    "subtitle": { "category": "literal" },
+    "title": { "category": "literal" },
+    "titleaddon": { "category": "literal" },
+    "type": { "category": "literal" },
+    "usera": { "category": "literal" },
+    "userb": { "category": "literal" },
+    "userc": { "category": "literal" },
+    "userd": { "category": "literal" },
+    "usere": { "category": "literal" },
+    "userf": { "category": "literal" },
+    "venue": { "category": "literal" },
+    "version": { "category": "literal" },
+    "volume": { "category": "literal" },
+    "volumes": { "category": "literal" },
+    "xdata": { "category": "literal" },
+    "xref": { "category": "literal" }
+  },
+
+  "_aliases_comment": "Classic-BibTeX input-field aliases, mapping an alias to its canonical BibLaTeX field (biber resolves these on input). Hand-curated overlay (not in blx-dm.def), preserved across syncs. The linter's missing-required check canonicalizes both the entry's fields and the required list through this map, so a classic-BibTeX spelling (e.g. `journal`) satisfies a data-model requirement (`journaltitle`) and vice versa. Date-component aliases (year, month) are omitted: they are handled by the per-type date-or-year `required` alternations, not by field substitution.",
+  "aliases": {
+    "address": "location",
+    "annote": "annotation",
+    "archiveprefix": "eprinttype",
+    "journal": "journaltitle",
+    "key": "sortkey",
+    "school": "institution",
+    "primaryclass": "eprintclass",
+    "pdf": "file"
+  }
+}

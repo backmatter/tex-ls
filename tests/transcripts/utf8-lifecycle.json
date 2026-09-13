@@ -1,0 +1,167 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      }
+    },
+    "initializationOptions": {
+      "build": {
+        "onSave": false
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex",
+          "languageId": "latex",
+          "version": 0,
+          "text": "𝕏 \\label{key}\r\n\\ref{key}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 6
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex",
+          "version": 3
+        },
+        "contentChanges": [
+          {
+            "range": {
+              "start": {
+                "line": 0,
+                "character": 5
+              },
+              "end": {
+                "line": 0,
+                "character": 5
+              }
+            },
+            "text": "é "
+          },
+          {
+            "range": {
+              "start": {
+                "line": 0,
+                "character": 15
+              },
+              "end": {
+                "line": 0,
+                "character": 18
+              }
+            },
+            "text": "new"
+          },
+          {
+            "range": {
+              "start": {
+                "line": 1,
+                "character": 5
+              },
+              "end": {
+                "line": 1,
+                "character": 8
+              }
+            },
+            "text": "new"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 6
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/rename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 6
+        },
+        "newName": "renamed"
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex",
+          "languageId": "latex",
+          "version": 0,
+          "text": "\\section{Reset}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex",
+          "languageId": "latex",
+          "version": 0,
+          "text": "\\section{Restarted attachment}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-utf8/main.tex"
+        }
+      },
+      "request": true
+    }
+  ]
+}

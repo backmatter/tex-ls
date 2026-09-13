@@ -1,0 +1,51 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `duplicate-field`
+
+Report repeated field names within an entry, compared case-insensitively. Every occurrence after the first is reported. A safe fix removes a repeated value when it matches the retained value byte for byte. Different values receive no fix because the retained occurrence depends on the bibliography engine.
+
+This rule is **enabled by default**.
+
+Two `note` fields with identical values -- deleting the redundant copy is safe:
+
+```bib
+@misc{knuth84,
+  note = {Draft},
+  note = {Draft}
+}
+```
+
+```text
+warning: duplicate-field
+ --> references.bib:3:3
+  |
+3 |   note = {Draft}
+  |   ^^^^ duplicate field `note` on `misc` entry
+```
+
+After applying the fix:
+
+```bib
+@misc{knuth84,
+  note = {Draft}
+}
+```
+
+Differing values are report-only (which copy the engine keeps is style-dependent, so dropping either would change semantics):
+
+```bib
+@misc{knuth84,
+  note = {First draft},
+  note = {Second draft}
+}
+```
+
+```text
+warning: duplicate-field
+ --> references.bib:3:3
+  |
+3 |   note = {Second draft}
+  |   ^^^^ duplicate field `note` on `misc` entry
+```

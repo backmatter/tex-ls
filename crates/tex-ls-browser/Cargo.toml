@@ -1,0 +1,25 @@
+[package]
+name = "tex-ls-browser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Browser host for tex-ls language intelligence"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+allocation-metrics = []
+
+[dependencies]
+tex-ls-parser={ version = "0.1.0", path="../tex-ls-parser"}
+tex-ls-formatter={ version = "0.1.0", path="../tex-ls-formatter",features=["serde"]}
+tex-ls-protocol = { version = "0.1.0",  path = "../tex-ls-protocol" }
+tex-ls-analysis = { version = "0.1.0",  path = "../tex-ls-analysis" }
+serde = { workspace = true, features = ["derive"] }
+lsp-types = { workspace = true, features = ["fluent-uri"] }
+serde_json = { workspace = true }
+wasm-bindgen = { workspace = true }

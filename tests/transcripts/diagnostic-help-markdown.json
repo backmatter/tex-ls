@@ -1,0 +1,71 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {
+          "markupMessageSupport": true,
+          "codeDescriptionSupport": true
+        },
+        "codeAction": {
+          "codeActionLiteralSupport": {
+            "codeActionKind": {
+              "valueSet": [
+                "quickfix"
+              ]
+            }
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///diagnostic-help/refs.bib",
+          "languageId": "bibtex",
+          "version": 1,
+          "text": "@misc{key, title={\ud83d\ude00 Title}, note={}}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///diagnostic-help/refs.bib"
+        }
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "request": true,
+      "expectedNonEmpty": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///diagnostic-help/refs.bib"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 0
+          }
+        },
+        "context": {
+          "diagnostics": []
+        }
+      }
+    }
+  ]
+}

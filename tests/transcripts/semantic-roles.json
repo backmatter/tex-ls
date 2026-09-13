@@ -1,0 +1,292 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\DeclareAcronym{cpu}{short=CPU,long=processor}\n\\acrshort{cpu}\n\\begin{center}\nbody\n\\end{center}\n\\zlabel{one}\n\\label{two}\n\\crefrange{one}{two}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib",
+          "languageId": "bibtex",
+          "version": 1,
+          "text": "@string{brand = {tex-ls}}\n@string{title = brand # { guide}}\n@book{x,title=title,note={brand}}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        }
+      }
+    },
+    {
+      "method": "textDocument/references",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentHighlight",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        }
+      }
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        }
+      }
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        }
+      }
+    },
+    {
+      "method": "textDocument/rename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        },
+        "newName": "renamed"
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        }
+      }
+    },
+    {
+      "method": "textDocument/references",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentHighlight",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        }
+      }
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        }
+      }
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        }
+      }
+    },
+    {
+      "method": "textDocument/rename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 17
+        },
+        "newName": "renamed"
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      }
+    },
+    {
+      "method": "textDocument/references",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentHighlight",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      }
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      }
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      }
+    },
+    {
+      "method": "textDocument/rename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/refs.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        },
+        "newName": "renamed"
+      }
+    },
+    {
+      "method": "textDocument/linkedEditingRange",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///roles/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 9
+        }
+      }
+    }
+  ]
+}

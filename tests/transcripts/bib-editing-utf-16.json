@@ -1,0 +1,189 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "documentSymbol": {
+          "hierarchicalDocumentSymbolSupport": true
+        },
+        "hover": {
+          "contentFormat": [
+            "plaintext"
+          ]
+        },
+        "foldingRange": {
+          "lineFoldingOnly": true
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib",
+          "languageId": "bibtex",
+          "version": 1,
+          "text": "@string{pub = {Press}}\n@book{key,\n title={\ud83d\ude00 \\alpobsolete},\n author={Garc\\'ia, Jos\\'e},\n date={2024-2-9},\n publisher=pub,\n doi={10.1/example}\n}\n@comment{ Keep  bytes }\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/foldingRange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentLink",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "workspace/symbol",
+      "params": {
+        "query": ""
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/selectionRange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "positions": [
+          {
+            "line": 2,
+            "character": 15
+          }
+        ]
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/rangeFormatting",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "range": {
+          "start": {
+            "line": 2,
+            "character": 1
+          },
+          "end": {
+            "line": 2,
+            "character": 4
+          }
+        },
+        "options": {
+          "tabSize": 2,
+          "insertSpaces": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 1,
+          "character": 8
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 2,
+          "character": 3
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 5,
+          "character": 13
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 2,
+          "character": 15
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 5,
+          "character": 13
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/rename",
+      "params": {
+        "textDocument": {
+          "uri": "file:///bib-parity/edit.bib"
+        },
+        "position": {
+          "line": 5,
+          "character": 13
+        },
+        "newName": "press"
+      },
+      "request": true
+    }
+  ]
+}

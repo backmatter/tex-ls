@@ -1,0 +1,23 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `title-capitalization`
+
+Report unprotected acronyms and mid-word capitals in title fields. Bibliography styles may lowercase them unless braces protect the spelling, as in `{DNA}`. The rule detects consecutive capitals and names such as `iPhone`. It excludes ordinary title case, names such as `McDonald`, mixed-case words such as `LaTeX`, and already braced text. No fix is offered because the author must choose which spelling to preserve.
+
+This rule is **enabled by default**.
+
+An unprotected acronym a title-lowercasing style would render as `dna`:
+
+```bib
+@article{watson53, title = {Molecular structure of DNA}}
+```
+
+```text
+warning: title-capitalization
+ --> references.bib:1:52
+  |
+1 | @article{watson53, title = {Molecular structure of DNA}}
+  |                                                    ^^^ unprotected capitals `DNA` in `title`; wrap in braces (`{DNA}`) to keep case under title-lowercasing styles
+```

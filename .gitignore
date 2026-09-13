@@ -1,0 +1,35 @@
+# Build and measurement output
+/target/
+**/target/
+/benches/*_results.json
+/benches/*.svg
+perf.data*
+flamegraph.svg
+
+# Downloaded reference corpora and local research
+/corpora/
+/benches/documents/cv.tex
+/benches/documents/masters_dissertation.tex
+/benches/documents/project/
+/.scratch/
+/.rust-analyzer-ref/
+
+# Local interpreter/compiler output
+__pycache__/
+*.py[cod]
+*.rs.bk
+
+# TeX build output
+*.aux
+*.log
+*.toc
+*.out
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.bbl
+*.blg
+*.bcf
+*.run.xml
+/tests/typeset/*.pdf
+/test.*

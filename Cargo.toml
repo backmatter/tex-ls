@@ -1,0 +1,125 @@
+[workspace]
+members = [
+    "crates/tex-ls-analysis",
+    "crates/tex-ls-protocol",
+    "crates/tex-ls-parser",
+    "crates/tex-ls-formatter",
+    "crates/tex-ls-browser",
+]
+
+[workspace.dependencies]
+clap = "4.6.6"
+insta = "1.48.0"
+log = "0.4.34"
+lsp-types = { package = "gen-lsp-types", version = "0.11.0" }
+rayon = "1.12.0"
+rowan = "0.17.0"
+salsa = "0.28.2"
+schemars = "1.2.2"
+serde = "1.0.229"
+serde_json = "1.0.151"
+smol_str = "0.3.6"
+tempfile = "3.27.0"
+toml = "1.1.6"
+wasm-bindgen = "0.2.128"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98.1"
+license = "MIT"
+repository = "https://github.com/backmatter/tex-ls"
+authors = ["Backmatter contributors"]
+
+[package]
+publish = false
+name = "tex-ls"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A language server, formatter, and linter for LaTeX and BibTeX"
+license.workspace = true
+repository.workspace = true
+homepage = "https://github.com/backmatter/tex-ls"
+documentation = "https://github.com/backmatter/tex-ls/tree/main/docs"
+authors.workspace = true
+keywords = ["latex", "language-server", "formatter", "linter"]
+categories = [
+    "command-line-utilities",
+    "text-processing",
+    "parsing",
+    "parser-implementations",
+]
+
+# `benches/sites.rs` is a module the bench binaries share, not a bench of its own.
+# Cargo would otherwise auto-discover it as a target, so every bench is declared
+# explicitly below.
+autobenches = false
+
+[lib]
+name = "tex_ls"
+
+[[bin]]
+name = "tex-ls"
+path = "src/main.rs"
+
+[dependencies]
+env_logger = "0.11.11"
+tex-ls-analysis = { version = "0.1.0",  path = "crates/tex-ls-analysis", features = ["schema"] }
+tex-ls-protocol = { version = "0.1.0",  path = "crates/tex-ls-protocol" }
+tex-ls-formatter = { path = "crates/tex-ls-formatter", version = "0.1.0", features = ["schema"] }
+tex-ls-parser = { path = "crates/tex-ls-parser", version = "0.1.0", features = [
+    "schema",
+] }
+clap = { workspace = true, features = ["derive"] }
+crossbeam-channel = "0.5.17"
+dirs = "7.0.0"
+ignore = "0.4.33"
+log = { workspace = true }
+lsp-server = "0.10.0"
+lsp-types = { workspace = true, features = ["fluent-uri"] }
+rayon = { workspace = true }
+rowan = { workspace = true }
+salsa = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+similar = { version = "3.2.0", features = ["text"] }
+smol_str = { workspace = true }
+toml = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "formatting"
+harness = false
+
+[[bench]]
+name = "keystroke"
+harness = false
+
+[[bench]]
+name = "reparse"
+harness = false
+
+[[bench]]
+name = "lsp_memory"
+harness = false
+
+[profile.release]
+strip = "symbols"
+
+# Browser workers benefit from cross-crate optimization of the shared engine.
+[profile.browser]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+
+[dev-dependencies]
+tex-ls-browser = { version = "0.1.0",  path = "crates/tex-ls-browser" }
+insta = { workspace = true }
+jsonschema = { version = "0.56.0", default-features = false }
+similar-asserts = "2.0.0"
+
+[[example]]
+name = "session_profile"
+required-features = ["tex-ls-browser/allocation-metrics"]

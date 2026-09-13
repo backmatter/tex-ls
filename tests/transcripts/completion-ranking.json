@@ -1,0 +1,85 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "completion": {
+          "completionItem": {
+            "snippetSupport": true,
+            "preselectSupport": true
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ranking/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\section{Introduction}\\label{sec:intro}\n\\ref{sec:missing}\n\\label{sec:}\n\\begin{itemize}\n\\end{ite}\n\\al"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ranking/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 10
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ranking/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 11
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ranking/main.tex"
+        },
+        "position": {
+          "line": 4,
+          "character": 8
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/completion",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ranking/main.tex"
+        },
+        "position": {
+          "line": 5,
+          "character": 3
+        }
+      },
+      "request": true
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+---
+source: tests/rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `unreferenced-label`
+
+Report labels with no reference in the document. The rule requires a rooted project with every include resolved to an analyzed file. It is inactive for stdin or without cross-file label resolution. No fix is offered because the author may want to add a reference or remove the label.
+
+This rule is **enabled by default**.
+
+A label that no `\ref`-family command ever targets:
+
+```tex
+\section{Intro}\label{sec:intro}
+```
+
+```text
+warning: unreferenced-label
+ --> example.tex:1:16
+  |
+1 | \section{Intro}\label{sec:intro}
+  |                ^^^^^^^^^^^^^^^^^ label `sec:intro` is never referenced
+```

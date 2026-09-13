@@ -1,0 +1,24 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `unused-string`
+
+Report an `@string` macro that no field in the file references. Cross-file string resolution is not supported, so another bibliography may still use the macro. No automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A defined macro no field value references:
+
+```bib
+@string{cup = {Cambridge University Press}}
+@book{turing50, title = {Draft}, publisher = {Springer}}
+```
+
+```text
+warning: unused-string
+ --> references.bib:1:9
+  |
+1 | @string{cup = {Cambridge University Press}}
+  |         ^^^ `@string` macro `cup` is defined but never used
+```
