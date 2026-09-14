@@ -43,7 +43,11 @@ exports.run = async function run() {
 
   const symbols = await eventually('document symbols', async () => {
     const result = await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', document.uri);
-    return result?.length && result;
+    if (result?.length) return result;
+    // VS Code caches an empty outline if a startup request is cancelled.
+    // A real edit invalidates it and exercises document synchronization.
+    await apply(document, [vscode.TextEdit.insert(document.positionAt(document.getText().length), '\n')]);
+    return undefined;
   });
   assert.ok(JSON.stringify(symbols).includes('Introduction'));
   const position = new vscode.Position(3, document.lineAt(3).text.indexOf('sec:intro') + 3);
