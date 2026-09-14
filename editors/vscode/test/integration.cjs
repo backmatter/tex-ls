@@ -17,9 +17,10 @@ async function format(document) {
 }
 
 async function showSource(document, column) {
-  await vscode.window.showTextDocument(document, { viewColumn: column, preview: false });
-  await eventually('source editor becomes active', () =>
-    vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString());
+  await eventually('source editor becomes active', async () => {
+    await vscode.window.showTextDocument(document, { viewColumn: column, preview: false, preserveFocus: false });
+    return vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString();
+  });
 }
 
 async function apply(document, edits) {
@@ -35,6 +36,7 @@ exports.run = async function run() {
   const document = await vscode.workspace.openTextDocument(uri('first'));
   await vscode.window.showTextDocument(document);
   assert.equal(document.languageId, 'latex');
+  assert.ok(document.getText().includes('Introduction'), 'fixture source is loaded');
   const extension = vscode.extensions.getExtension('backmatter.tex-ls');
   assert.ok(extension, 'extension is installed');
   await extension.activate();

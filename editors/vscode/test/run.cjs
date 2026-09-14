@@ -5,7 +5,8 @@ const { runTests } = require('@vscode/test-electron');
 
 async function main() {
   delete process.env.ELECTRON_RUN_AS_NODE;
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'tex-ls-vscode-'));
+  // macOS exposes its temporary directory through a /var symlink.
+  const temp = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'tex-ls-vscode-')));
   try {
     for (const folder of ['first', 'second']) {
       await fs.mkdir(path.join(temp, folder));
@@ -22,6 +23,7 @@ async function main() {
     await fs.mkdir(path.join(userData, 'User'), { recursive: true });
     await fs.writeFile(path.join(userData, 'User', 'settings.json'), JSON.stringify({
       'tex-ls.texmf.enabled': false,
+      'tex-ls.trace.server': 'verbose',
       'tex-ls.server.path': process.env.TEX_LS_TEST_SERVER || '',
       'editor.semanticHighlighting.enabled': true,
       'security.workspace.trust.enabled': false,
