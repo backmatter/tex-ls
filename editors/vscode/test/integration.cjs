@@ -17,6 +17,10 @@ async function format(document) {
 }
 
 async function showSource(document, column) {
+  // Close the report before switching groups on unattended CI desktops.
+  const reports = vscode.window.tabGroups.all.flatMap((group) => group.tabs)
+    .filter((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.scheme === 'tex-ls-project');
+  if (reports.length) await vscode.window.tabGroups.close(reports);
   await eventually('source editor becomes active', async () => {
     await vscode.window.showTextDocument(document, { viewColumn: column, preview: false, preserveFocus: false });
     return vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString();
