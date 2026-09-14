@@ -22,12 +22,7 @@ workflow runs it with `--write --changelog` on the release PR after release-plz
 updates Cargo metadata. Review the final synchronized commit and wait for CI
 before squash-merging the release PR.
 
-Configure the release GitHub App's `RELEASE_APP_CLIENT_ID` Actions variable and
-`RELEASE_APP_PRIVATE_KEY` Actions secret for this repository. Install the app on
-tex-ls with contents and pull-request write permissions. Its token lets generated
-PR commits and tags trigger CI and binary builds.
-
-Merging the release PR creates a tag and draft GitHub release. The tag push starts
+Merging the release PR creates a tag and draft GitHub release. Release automation starts
 the binary workflow. Publish the draft only after all six platform builds pass
 and their assets and checksums are attached. For an existing tag and release:
 
