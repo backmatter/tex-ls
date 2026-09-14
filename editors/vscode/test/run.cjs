@@ -37,6 +37,9 @@ async function main() {
       extensionTestsEnv: { TEX_LS_TEST_WORKSPACE: temp },
       launchArgs: [workspace, '--user-data-dir', userData, '--extensions-dir', path.join(temp, 'extensions'),
         ...(process.platform === 'linux' ? ['--ozone-platform=x11'] : []),
+        // Keep the test window responsive when a CI desktop takes focus.
+        '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
         '--log', 'trace', '--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-gpu', '--no-sandbox'],
     });
   } catch (error) {
