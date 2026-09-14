@@ -16,11 +16,14 @@ pub(super) fn handle_client_response(
                 // Validate the entire response before replacing any scope.
                 let parsed: Result<Vec<_>, _> = values
                     .iter()
-                    .map(|value| {
+                    .zip(&scopes)
+                    .map(|(value, scope)| {
                         if value.is_null() {
                             Ok(EditorSettings::default())
                         } else {
-                            EditorSettings::from_client_value(value)
+                            EditorSettings::from_client_value(value).and_then(|settings| {
+                                settings.with_workspace_roots(std::slice::from_ref(scope))
+                            })
                         }
                     })
                     .collect();

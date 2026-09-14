@@ -169,7 +169,7 @@ fn resolve_settings_prefers_file_config_over_editor() {
         ..Default::default()
     });
     let resolved = state.resolve_settings(&file_uri_in(dir.path()));
-    assert!(resolved.config_present);
+    assert!(resolved.indent_width_configured);
     assert_eq!(resolved.style.line_width, 100);
     assert_eq!(resolved.style.indent_width, 8);
 }
@@ -183,7 +183,7 @@ fn resolve_settings_falls_back_to_editor_without_config() {
         ..Default::default()
     });
     let resolved = state.resolve_settings(&file_uri_in(dir.path()));
-    assert!(!resolved.config_present);
+    assert!(!resolved.indent_width_configured);
     assert_eq!(resolved.style.line_width, 40);
     // Unset editor knob keeps the built-in default.
     assert_eq!(
@@ -277,7 +277,7 @@ fn resolve_settings_without_config_excludes_nothing() {
 
     let mut state = state_with_editor(EditorSettings::default());
     let resolved = state.resolve_settings(&file_uri_in(dir.path()));
-    assert!(!resolved.config_present);
+    assert!(!resolved.indent_width_configured);
 
     let files =
         collect_lint_files(&[dir.path().to_path_buf()], &resolved.exclude).expect("collect");
@@ -374,7 +374,7 @@ fn resolve_settings_untitled_uses_editor_fallback_uncached() {
         ..Default::default()
     });
     let resolved = state.resolve_settings(&uri("untitled:Untitled-1"));
-    assert!(!resolved.config_present);
+    assert!(!resolved.indent_width_configured);
     assert_eq!(resolved.style.line_width, 55);
     // A non-file buffer never joins the anchor-dir cache.
     assert!(state.config_cache.is_empty());
@@ -510,4 +510,69 @@ fn server_acknowledgements_track_registration_and_refusal() {
         Response::new_err(RequestId::from(1), -32603, "refused".into()),
     );
     assert!(!state.watcher_acknowledged);
+}
+
+#[test]
+fn build_only_configuration_preserves_editor_formatting_and_diagnostic_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("tex-ls.toml");
+    std::fs::write(&config, "[build]\naux-dir = 'out'\n").unwrap();
+    let mut state = state_with_editor(EditorSettings {
+        line_width: Some(97),
+        indent_width: Some(7),
+        diagnostics: DiagnosticSettings { compiler: false },
+        ..Default::default()
+    });
+    let uri = file_uri_in(dir.path());
+    let resolved = state.resolve_settings(&uri);
+    assert_eq!(resolved.style.line_width, 97);
+    assert_eq!(resolved.style.indent_width, 7);
+    assert!(!resolved.indent_width_configured);
+    assert!(resolved.rules.external.sources.is_empty());
+    assert_eq!(resolved.build.aux_dir, Some("out".into()));
+    // Explicitly setting even the default value must override the editor.
+    std::fs::write(&config, "[format]\nline-width = 80\n").unwrap();
+    state.invalidate_settings();
+    let resolved = state.resolve_settings(&uri);
+    assert_eq!(resolved.style.line_width, 80);
+    assert_eq!(resolved.style.indent_width, 7);
+    assert!(!resolved.indent_width_configured);
+    std::fs::write(&config, "[format]\nindent-width = 2\n").unwrap();
+    state.invalidate_settings();
+    let resolved = state.resolve_settings(&uri);
+    assert_eq!(resolved.style.line_width, 97);
+    assert_eq!(resolved.style.indent_width, 2);
+    assert!(resolved.indent_width_configured);
+}
+
+#[test]
+fn relative_texmf_roots_are_scoped_and_ambiguous_roots_are_rejected() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let settings = EditorSettings::from_client_value(&serde_json::json!({
+        "texmf": {"roots": ["packages"], "explicitOnly": true}
+    }))
+    .unwrap();
+    let one = settings
+        .clone()
+        .with_workspace_roots(&[first.path().into()])
+        .unwrap();
+    let two = settings
+        .clone()
+        .with_workspace_roots(&[second.path().into()])
+        .unwrap();
+    assert_eq!(
+        one.texmf.config().roots,
+        vec![first.path().join("packages")]
+    );
+    assert_eq!(
+        two.texmf.config().roots,
+        vec![second.path().join("packages")]
+    );
+    assert!(settings.clone().with_workspace_roots(&[]).is_err());
+    assert!(
+        settings
+            .with_workspace_roots(&[first.path().into(), second.path().into()])
+            .is_err()
+    );
 }

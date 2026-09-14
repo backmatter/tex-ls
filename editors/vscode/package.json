@@ -2,7 +2,7 @@
   "name": "tex-ls",
   "displayName": "tex-ls",
   "description": "LaTeX and BibTeX completion, navigation, formatting, and linting.",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "publisher": "backmatter",
   "license": "MIT",
   "repository": {
@@ -184,7 +184,7 @@
         "tex-ls.texmf.enabled": {
           "type": "boolean",
           "default": true,
-          "scope": "machine",
+          "scope": "machine-overridable",
           "description": "Discover installed TeX packages. Changes restart the server."
         },
         "tex-ls.texmf.roots": {
@@ -193,13 +193,13 @@
             "type": "string"
           },
           "default": [],
-          "scope": "machine",
-          "description": "Additional absolute TEXMF directory paths. Changes restart the server."
+          "scope": "machine-overridable",
+          "description": "Additional TEXMF directories, ahead of automatic discovery. Relative paths resolve against the workspace folder supplying the setting. Contents refresh automatically."
         },
         "tex-ls.texmf.useKpsewhich": {
           "type": "boolean",
           "default": true,
-          "scope": "machine",
+          "scope": "machine-overridable",
           "description": "Use kpsewhich for installed-package discovery. Changes restart the server."
         },
         "tex-ls.outline": {
@@ -266,6 +266,18 @@
               "maximum": 256
             }
           }
+        },
+        "tex-ls.texmf.explicitOnly": {
+          "type": "boolean",
+          "default": false,
+          "scope": "machine-overridable",
+          "description": "Index only texmf.roots. Ignore kpsewhich, system fallback paths, and inherited TEXINPUTS. Useful for pinned or project-local toolchains."
+        },
+        "tex-ls.diagnostics.compiler": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Publish compiler-log diagnostics. Disable when another build integration supplies them; source linting and AUX information remain enabled."
         }
       }
     }

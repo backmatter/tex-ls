@@ -91,7 +91,7 @@ pub(super) fn acquire_files(
     #[cfg(not(test))]
     let index = installed.ready_index();
     if let Some(index) = index
-        && db.snapshot_for(project).expect("project").texmf() != index
+        && db.snapshot_for(project).expect("project").texmf() != index.as_ref()
     {
         let token = db
             .begin_external_refresh(project, ExternalInputKind::Installed)
@@ -100,7 +100,7 @@ pub(super) fn acquire_files(
             token,
             ExternalInputs::Installed(Observation::Present(InstalledMetadata {
                 toolchain: "native".into(),
-                index: index.clone(),
+                index: index.as_ref().clone(),
             })),
         )
         .expect("current acquisition");

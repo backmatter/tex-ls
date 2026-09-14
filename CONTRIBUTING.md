@@ -51,6 +51,12 @@ bash scripts/check_reparse_baselines.sh
 
 ## Changes
 
+Use Conventional Commit PR titles, for example `feat: support project-local
+builds` or `fix: refresh installed packages`. PRs are squash-merged, using the PR
+title as the commit subject. Release-plz prepares versions and changelogs from
+those commits; the server and bundled VS Code extension share one release version.
+See [distribution](docs/development/distribution.md) for the release procedure.
+
 Follow the [architecture](docs/development/architecture.md). Include a regression
 case for bug fixes and describe how the change was checked. Review snapshot diffs
 when updating them with `INSTA_UPDATE=always cargo test --workspace`.

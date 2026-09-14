@@ -283,8 +283,23 @@ impl Worker {
         let files_done = self.file_acquisition.rx.clone();
         let compiler_done = self.file_acquisition.compiler_rx.clone();
         let admission = crossbeam_channel::tick(std::time::Duration::from_millis(5));
+        let installation_poll = crossbeam_channel::tick(std::time::Duration::from_secs(1));
         loop {
             select! {
+                recv(installation_poll) -> _ => {
+                    let anchors: Vec<_> = self.discovery_anchors.iter()
+                        .map(|(project, (path, index))| (*project, path.clone(), index.clone())).collect();
+                    for (project, path, installed) in anchors {
+                        if let (Ok(snapshot), Some(index)) = (self.db.snapshot_for(project), installed.ready_index())
+                            && snapshot.texmf() != index.as_ref() {
+                                drop(snapshot);
+                                self.acquisition_keys.remove(&(project, path.clone()));
+                                self.acquire_files(project, &path, None, &installed);
+                                let _ = self.out_tx.send(Outbound::RelintAll);
+                        }
+                    }
+                }
+
                 recv(compiler_done) -> completed => {
                     if let Ok(completed) = completed {
                         self.compiler_acquisition.complete(&mut self.db, completed, &self.out_tx, &self.file_acquisition);
@@ -901,6 +916,57 @@ mod audit_scheduler_tests {
             files_inflight: Default::default(),
             deferred_files: Default::default(),
         }
+    }
+
+    #[test]
+    fn changing_installations_does_not_load_unused_packages() {
+        use tex_ls_analysis::external::{
+            ExternalInputKind, ExternalInputs, InstalledMetadata, Observation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.tex");
+        let unused = dir.path().join("unused.sty");
+        std::fs::write(&main, "Text.").unwrap();
+        std::fs::write(&unused, "% never referenced").unwrap();
+        let pool = task_pool::TaskPool::new("installation-switch", 1);
+        let (out_tx, _) = unbounded();
+        let (done_tx, _) = unbounded();
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(&main, "Text.", None);
+        let project = db.project_id();
+        let token = db
+            .begin_external_refresh(project, ExternalInputKind::Installed)
+            .unwrap();
+        db.apply_external_inputs(
+            token,
+            ExternalInputs::Installed(Observation::Present(InstalledMetadata {
+                toolchain: "old".into(),
+                index: tex_ls_analysis::project::texmf::TexmfIndex::from_files(HashMap::from([(
+                    "unused.sty".into(),
+                    unused,
+                )])),
+            })),
+        )
+        .unwrap();
+        let projects = ProjectRegistry::from_roots(&mut db, &[]);
+        let mut worker = test_worker(
+            db,
+            projects,
+            out_tx,
+            done_tx,
+            pool.spawner(),
+            Default::default(),
+        );
+        let disabled = crate::texmf::TexmfConfig {
+            enabled: false,
+            ..Default::default()
+        }
+        .into();
+        assert!(
+            !worker.acquire_files(project, &main, None, &disabled),
+            "switching installations must not enqueue unreferenced package sources"
+        );
+        assert_eq!(worker.snapshot_for(&main).project_members().len(), 1);
     }
 
     #[test]

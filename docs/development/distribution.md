@@ -6,7 +6,25 @@ linting, and LSP initialization/shutdown checks before it is archived. Linux use
 musl; Windows links the C runtime statically. macOS builds target macOS 11 or later.
 Archives include the MIT license and the unicode-math notices.
 
-Publishing a GitHub release starts the workflow. For an existing release:
+Use Conventional Commit PR titles and squash merges. Release-plz opens a release
+PR on `main`, computes the server version, and generates the changelog. The
+workflow copies that version and those release notes into the bundled VS Code
+extension. Do not increment release versions by hand. Use release-plz's default versioning
+policy.
+
+The server, VS Code extension, lockfiles, and `vVERSION` tag use one version.
+Older extension-only releases used independent versions; the first synchronized
+release is 0.1.2. Internal unpublished Rust crates
+keep their own implementation versions.
+
+Run `python3 scripts/sync_release_versions.py` to check consistency. The release
+workflow runs it with `--write --changelog` on the release PR after release-plz
+updates Cargo metadata. Review the final synchronized commit and wait for CI
+before squash-merging the release PR.
+
+Merging the release PR creates a tag and draft GitHub release. Release automation starts
+the binary workflow. Publish the draft only after all six platform builds pass
+and their assets and checksums are attached. For an existing tag and release:
 
 ```sh
 gh workflow run binaries.yml -f tag=v0.1.0
@@ -30,11 +48,10 @@ changes; changes to the language engine still use the checks in CONTRIBUTING.md.
 
 ## VS Code
 
-The extension lives in `editors/vscode`. Keep its `package.json` and lockfile
-version aligned with each other. Set `texLsServerVersion` in `package.json` to the
-bundled server version. Extension metadata updates can increment the extension
-version without releasing a new server. After each
-native executable passes its smoke tests, the binary workflow packages that
+The extension lives in `editors/vscode`. Release automation keeps `package.json`,
+its lockfile, and `texLsServerVersion` aligned with the server. Extension-only
+changes follow the same release process. After each native executable passes
+its smoke tests, the binary workflow packages that
 executable in a VSIX for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`,
 `win32-x64`, or `win32-arm64`. Packaging checks the server version against the
 `texLsServerVersion` field and includes the MIT license and unicode-math notices.
@@ -47,19 +64,12 @@ and real VS Code integration tests on Linux, macOS, and Windows. See the
 for local testing and packaging.
 
 The publisher is `backmatter` and the extension ID is `backmatter.tex-ls`.
-For each update, increment the extension version, update `CHANGELOG.md`, and
-package all six targets at that same extension version. The manifest icon must
+Package all six targets at the release-plz version. The manifest icon must
 be a PNG; the publisher profile logo is separate.
 
 For a tagged server release, commit the extension changes before creating the
 tag. Rerunning an old server tag uses the old tagged source and cannot include
 new extension changes. The upload step also refuses to overwrite existing assets.
-
-For an extension-only update, use the published server archives for the pinned
-server version. Verify their SHA256SUMS before extracting. Package on each native
-platform with `scripts/package.mjs`, or stage each verified binary with its license
-notices and use `vsce package --target TARGET` for that target. Foreign binaries
-cannot run through the native packaging script's version check.
 
 Install the Linux VSIX into an isolated VS Code profile and run the integration
 suite against its bundled server. Native CI checks the other operating systems;

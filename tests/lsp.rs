@@ -6122,3 +6122,165 @@ fn watched_bibliography_creation_deletion_and_recreation_update_completion() {
     assert_eq!(keys(5), ["second"]);
     shutdown(&client, thread);
 }
+
+#[test]
+fn ignored_compiler_log_refreshes_with_acknowledged_client_watchers() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(
+        dir.path().join("tex-ls.toml"),
+        "extend-exclude = [\"build\"]\n[build]\naux-dir = \"build\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(dir.path().join("build")).unwrap();
+    let path = dir.path().join("main.tex");
+    let uri = path_to_file_uri(&path);
+    let log = dir.path().join("build/main.log");
+    std::fs::write(&log, "! Initial failure.\nl.1 Text\n").unwrap();
+    let (client, server, _) = start_server_watching();
+    did_open(&client, &uri, 1, "Text\n");
+    let wait_for_compiler = |expected: Option<&str>| {
+        loop {
+            let report = recv_diagnostics(&client);
+            let messages: Vec<_> = report
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.source.as_deref() == Some("compiler"))
+                .collect();
+            if report.uri == uri
+                && match expected {
+                    Some(expected) => messages
+                        .iter()
+                        .any(|diagnostic| matches!(&diagnostic.message, lsp_types::Message::String(message) if message.starts_with(expected))),
+                    None => messages.is_empty(),
+                }
+            {
+                break;
+            }
+        }
+    };
+    wait_for_compiler(Some("Initial failure."));
+    std::fs::write(&log, "! Replacement failure.\nl.1 Text\n").unwrap();
+    wait_for_compiler(Some("Replacement failure."));
+    std::fs::remove_file(&log).unwrap();
+    wait_for_compiler(None);
+    shutdown(&client, server);
+}
+
+#[test]
+fn installed_package_index_refreshes_without_edits_or_client_events() {
+    let directory = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let root = tree.path().join("not-yet-materialized");
+    let path = directory.path().join("main.tex");
+    let uri = path_to_file_uri(&path);
+    let source = "\\usepackage{integrationfreshpackage}\n";
+    std::fs::write(&path, source).unwrap();
+    let (client, server) = start_server(Some(serde_json::json!({
+        "texmf": {"roots": [root], "explicitOnly": true}
+    })));
+    did_open(&client, &uri, 1, source);
+    let mut id = 10;
+    let mut links = || {
+        id += 1;
+        send_request(
+            &client,
+            id,
+            "textDocument/documentLink",
+            serde_json::json!({"textDocument":{"uri":uri}}),
+        );
+        recv_response(&client).response_result.unwrap()
+    };
+    assert!(links().as_array().unwrap().is_empty());
+    std::fs::create_dir_all(&root).unwrap();
+    let package = root.join("integrationfreshpackage.sty");
+    std::fs::write(&package, "").unwrap();
+    std::fs::write(root.join("ls-R"), "./:\nintegrationfreshpackage.sty\n").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let result = links();
+        if result
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|link| link["target"] == serde_json::json!(path_to_file_uri(&package)))
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "package never became resolvable: {result}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let result = links();
+        if result.as_array().unwrap().is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "removed package remains resolvable: {result}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    shutdown(&client, server);
+}
+
+#[test]
+fn compiler_diagnostic_setting_toggles_reports_without_disabling_aux() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("main.tex");
+    let uri = path_to_file_uri(&path);
+    let source = "\\section{Intro}\n\\label{sec:a}\nSee \\ref{sec:a}.\n";
+    std::fs::write(&path, source).unwrap();
+    std::fs::write(
+        path.with_extension("aux"),
+        "\\newlabel{sec:a}{{2}{1}{Intro}{section.2}{}}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        path.with_extension("log"),
+        "! Compiler failure.\nl.1 Text\n",
+    )
+    .unwrap();
+    let (client, server) = start_server(None);
+    did_open(&client, &uri, 1, source);
+    let wait = |enabled| loop {
+        let report = recv_diagnostics(&client);
+        if report.uri == uri
+            && report
+                .diagnostics
+                .iter()
+                .any(|item| item.source.as_deref() == Some("compiler"))
+                == enabled
+        {
+            break;
+        }
+    };
+    wait(true);
+    send_notification(
+        &client,
+        "workspace/didChangeConfiguration",
+        serde_json::json!({"settings":{
+            "texmf":{"enabled":false}, "diagnostics":{"compiler":false}
+        }}),
+    );
+    wait(false);
+    assert_eq!(
+        hover_markdown(&client, 10, &uri, Position::new(2, 10)).as_deref(),
+        Some("Section 2 (Intro)")
+    );
+    send_notification(
+        &client,
+        "workspace/didChangeConfiguration",
+        serde_json::json!({"settings":{
+            "texmf":{"enabled":false}, "diagnostics":{"compiler":true}
+        }}),
+    );
+    wait(true);
+    shutdown(&client, server);
+}

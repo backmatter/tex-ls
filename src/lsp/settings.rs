@@ -11,14 +11,23 @@ pub(super) struct EditorSettings {
     pub(super) line_width: Option<u32>,
     pub(super) indent_width: Option<u32>,
     /// Installed-tree discovery for LSP package resolution (see [`InstalledPackages`]).
-    /// Session-stable in practice: the
-    /// [`texmf::global_index`](crate::texmf::global_index) it drives is
-    /// first-config-wins.
     pub(super) texmf: InstalledPackages,
+    pub(super) diagnostics: DiagnosticSettings,
     /// The PDF viewer forward search drives (see [`ForwardSearchSettings`]).
     pub(super) forward_search: ForwardSearchSettings,
     pub(super) outline: tex_ls_protocol::presentation::OutlineOptions,
     pub(super) inlay_hints: tex_ls_protocol::presentation::HintOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub(super) struct DiagnosticSettings {
+    pub(super) compiler: bool,
+}
+impl Default for DiagnosticSettings {
+    fn default() -> Self {
+        Self { compiler: true }
+    }
 }
 
 /// The external PDF viewer `tex-ls.forwardSearch` launches.
@@ -79,6 +88,26 @@ impl EditorSettings {
         Ok(settings)
     }
 
+    /// Resolve relative TEXMF roots against the configuration's workspace scope.
+    pub(super) fn with_workspace_roots(mut self, roots: &[PathBuf]) -> Result<Self, String> {
+        let mut config = self.texmf.config().clone();
+        for path in &mut config.roots {
+            if path.is_relative() {
+                let [root] = roots else {
+                    return Err("Relative texmf.roots require one workspace folder or scoped workspace/configuration".into());
+                };
+                if !root.is_absolute() {
+                    return Err("Relative texmf.roots require an absolute workspace folder".into());
+                }
+                *path = root.join(&*path);
+            }
+        }
+        if &config != self.texmf.config() {
+            self.texmf = config.into();
+        }
+        Ok(self)
+    }
+
     /// Overlay these settings onto the formatter defaults.
     pub(super) fn to_format_style(&self) -> FormatStyle {
         let mut style = FormatStyle::default();
@@ -94,8 +123,7 @@ impl EditorSettings {
 
 /// A document's resolved configuration: the formatter [`FormatStyle`] (with `wrap`
 /// still a placeholder — the file kind decides it per request) plus the lint
-/// selection. Built from a discovered `tex-ls.toml` (file-wins) or, absent one,
-/// from the editor settings. Cached per anchor dir in [`GlobalState::config_cache`].
+/// selection. Explicit file widths override editor defaults individually. Cached per anchor dir in [`GlobalState::config_cache`].
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedSettings {
     /// Width knobs and `math_wrap` set; `wrap` is the [`WrapMode::default`]
@@ -104,9 +132,8 @@ pub(super) struct ResolvedSettings {
     pub(super) style: FormatStyle,
     /// Configured paragraph wrap, if any. `None` ⇒ the file-kind default applies.
     pub(super) wrap_override: Option<WrapMode>,
-    /// Whether a `tex-ls.toml` governed this resolution. When `true` the file
-    /// config wins outright and a request's `tab_size` is ignored.
-    pub(super) config_present: bool,
+    /// Whether the file explicitly sets indent-width, overriding request tab_size.
+    pub(super) indent_width_configured: bool,
     /// The `[lint]` `select`/`ignore` selection (the default-enabled rules when
     /// no file has resolved settings).
     pub(super) rules: RuleSelection,
@@ -206,7 +233,7 @@ impl CachedSettings {
 
 impl ResolvedSettings {
     /// Resolution from a discovered config (when `present`), else from the editor
-    /// settings, applying the file-wins rule. The `exclude` filter is left
+    /// settings, applying explicit file width overrides. The `exclude` filter is left
     /// exclude-nothing here; [`resolve_settings`] compiles and installs the real
     /// one (it holds the config's root directory).
     ///
@@ -218,11 +245,22 @@ impl ResolvedSettings {
     ) -> Self {
         if present {
             let format = config.formatter_settings();
+            let mut style = format.style;
+            if !config.explicit_line_width {
+                style.line_width = editor.to_format_style().line_width;
+            }
+            if !config.explicit_indent_width {
+                style.indent_width = editor.to_format_style().indent_width;
+            }
+            let mut rules = config.rules().clone();
+            if !editor.diagnostics.compiler {
+                rules.external.sources.retain(|source| source != "compiler");
+            }
             Self {
-                style: format.style,
+                style,
                 wrap_override: config.format.wrap,
-                config_present: true,
-                rules: config.rules().clone(),
+                indent_width_configured: config.explicit_indent_width,
+                rules,
                 exclude: ExcludeFilter::none(),
                 sentence_lang: format.language,
                 sentence_no_break: format.no_break.clone(),
@@ -237,11 +275,15 @@ impl ResolvedSettings {
     /// Editor-settings-only resolution: width knobs over the built-in defaults, no
     /// configured wrap, the default-enabled rule set, and no exclude filter.
     pub(super) fn from_editor(editor: &EditorSettings) -> Self {
+        let mut rules = RuleSelection::resolve(None, &[]).0;
+        if !editor.diagnostics.compiler {
+            rules.external.sources.retain(|source| source != "compiler");
+        }
         Self {
             style: editor.to_format_style(),
             wrap_override: None,
-            config_present: false,
-            rules: RuleSelection::resolve(None, &[]).0,
+            indent_width_configured: false,
+            rules,
             exclude: ExcludeFilter::none(),
             sentence_lang: SentenceLanguage::default(),
             sentence_no_break: Vec::new(),

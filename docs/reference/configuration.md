@@ -250,7 +250,8 @@ The directory containing `.aux`, `.log`, and `.fls` files. Relative paths use th
 root document's directory. When unset, tex-ls expects each document's artifacts
 beside its source. When set, only this directory supplies artifacts, including after
 deletion; stale sibling files do not override it. The native host watches configured
-artifacts outside the workspace as well.
+artifacts inside and outside the workspace even when the editor excludes their
+directory from watching. Missing artifacts are observed after the first build.
 
 ### `pdf-dir`
 

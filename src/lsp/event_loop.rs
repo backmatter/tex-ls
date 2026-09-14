@@ -42,7 +42,8 @@ pub(super) fn main_loop(
     let editor_settings = init_params
         .get("initializationOptions")
         .map(EditorSettings::from_client_value)
-        .unwrap_or_else(|| Ok(EditorSettings::default()));
+        .unwrap_or_else(|| Ok(EditorSettings::default()))
+        .and_then(|settings| settings.with_workspace_roots(&workspace_roots(&init_params)));
     let (editor_settings, config_messages) = match editor_settings {
         Ok(settings) => (settings, Vec::new()),
         Err(error) => (EditorSettings::default(), vec![error]),
@@ -121,17 +122,9 @@ pub(super) fn main_loop(
         } else {
             state.workspace_roots.clone()
         };
-        // Acknowledged workspace globs own paths inside the workspace only.
-        // Explicit external artifact candidates always remain native-owned.
-        let artifacts = state
-            .artifact_watches
-            .values()
-            .flatten()
-            .filter(|path| {
-                !state.watcher_acknowledged || !roots.iter().any(|root| path.starts_with(root))
-            })
-            .cloned()
-            .collect();
+        // Client acknowledgement does not guarantee events for editor-excluded
+        // build directories. Explicit artifact candidates always remain native-owned.
+        let artifacts = state.artifact_watches.values().flatten().cloned().collect();
         watcher.update(
             if state.watcher_acknowledged {
                 Vec::new()

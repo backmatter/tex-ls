@@ -1,7 +1,7 @@
 name: Release binaries
 on:
-  release:
-    types: [published]
+  push:
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: binaries-${{ inputs.tag || github.event.release.tag_name }}
+  group: binaries-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 jobs:
   build:
@@ -41,7 +41,7 @@ jobs:
             rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.os }}
     env:
-      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
       BUILD_TARGET: ${{ matrix.target }}
       RUSTFLAGS: ${{ matrix.rustflags || '' }}
       MACOSX_DEPLOYMENT_TARGET: '11.0'
@@ -56,6 +56,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
+      - name: Check release versions
+        working-directory: source
+        shell: bash
+        run: python3 scripts/sync_release_versions.py --tag "$RELEASE_TAG" --changelog
       - name: Install musl toolchain
         if: runner.os == 'Linux'
         run: |
@@ -100,7 +104,7 @@ jobs:
       contents: write
     env:
       GH_TOKEN: ${{ github.token }}
-      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

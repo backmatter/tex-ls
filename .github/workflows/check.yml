@@ -3,6 +3,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  pr-title:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a Conventional Commit title for squash merging
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          python3 - <<'PYTHON'
+          import os, re
+          title = os.environ["PR_TITLE"]
+          if not re.fullmatch(r"(?:feat|fix|docs|perf|revert|chore|ci|build|refactor|style|test)(?:\([^\r\n()]+\))?!?: [^\r\n]+", title):
+              raise SystemExit("Use a Conventional Commit PR title, for example: feat: support project-local builds")
+          PYTHON
+
   check:
     strategy:
       fail-fast: false
@@ -32,6 +48,8 @@ jobs:
       - run: cargo doc --workspace --all-features --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
+      - run: python3 scripts/sync_release_versions.py
+      - run: python3 scripts/test_release_versions.py
       - run: python3 scripts/check_architecture.py
       - run: python3 scripts/test_installers.py
         if: runner.os != 'Windows'

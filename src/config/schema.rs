@@ -249,12 +249,17 @@ pub struct ValidatedConfig {
     declarations: ResolvedDeclarations,
     rules: RuleSelection,
     resolved_format: tex_ls_formatter::settings::ResolvedFormatSettings,
+    pub explicit_line_width: bool,
+    pub explicit_indent_width: bool,
 }
 impl Default for ValidatedConfig {
     fn default() -> Self {
-        Config::default()
+        let mut config = Config::default()
             .into_validated(None)
-            .expect("valid defaults")
+            .expect("valid defaults");
+        config.explicit_line_width = false;
+        config.explicit_indent_width = false;
+        config
     }
 }
 impl std::ops::Deref for ValidatedConfig {
@@ -289,7 +294,17 @@ impl Config {
                 message: err.message().to_string(),
             }
         })?;
-        config.into_validated(Some(path))
+        let fields: toml::Value = toml::from_str(text).expect("already parsed TOML");
+        let mut validated = config.into_validated(Some(path))?;
+        validated.explicit_line_width = fields
+            .get("format")
+            .and_then(|v| v.get("line-width"))
+            .is_some();
+        validated.explicit_indent_width = fields
+            .get("format")
+            .and_then(|v| v.get("indent-width"))
+            .is_some();
+        Ok(validated)
     }
 
     pub fn into_validated(self, path: Option<&Path>) -> Result<ValidatedConfig, ConfigError> {
@@ -299,6 +314,8 @@ impl Config {
             declarations,
             rules,
             resolved_format,
+            explicit_line_width: true,
+            explicit_indent_width: true,
         })
     }
 

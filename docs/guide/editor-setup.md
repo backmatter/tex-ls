@@ -56,8 +56,9 @@ edits. Other editors can use their generic LSP integration with the same command
 
 Supply `initializationOptions` or `workspace/didChangeConfiguration` as a bare
 object or under a `tex-ls` key. `lineWidth` and `indentWidth` are formatter
-fallbacks: discovered `tex-ls.toml` takes precedence, and otherwise the formatting
-request's tab size overrides `indentWidth`. See the
+fallbacks: explicitly configured `[format] line-width` and `indent-width` take
+precedence individually. Otherwise the formatting request's tab size overrides
+`indentWidth`. A build-only config preserves editor formatting preferences. See the
 [configuration reference](../reference/configuration.md) for project settings.
 
 ### TEXMF discovery
@@ -70,9 +71,38 @@ and completion. They do not affect CLI formatting or linting.
 ```
 
 - `enabled`: scan installed trees; default `true`. Disabled resolution stays local.
-- `roots`: extra roots searched before discovered ones; default `[]`.
+- `roots`: extra roots searched before discovered ones; default `[]`. Relative paths
+  resolve against the workspace folder supplying the configuration. Initialization
+  options with relative roots require exactly one workspace folder; multi-folder
+  clients should supply scoped `workspace/configuration` responses or absolute roots.
 - `useKpsewhich`: discover roots using `kpsewhich`; default `true`. When false,
-  discovery uses default-path heuristics.
+  discovery falls back to default-path heuristics if no configured roots exist.
+- `explicitOnly`: default `false`. When `true`, only `roots` are indexed: no
+  `kpsewhich`, heuristic system roots, or inherited `TEXINPUTS`. Missing roots stay
+  empty until they are materialized. This setting takes precedence over `useKpsewhich`.
+
+Active installations are checked in the background approximately every five seconds.
+Filename database (`ls-R`) changes, root creation/deletion, and nested directory
+changes in trees without databases refresh the index without a server restart.
+Requests use the last complete index during refresh. Automatic root discovery runs
+once per settings value; change settings or restart after relocating a system
+installation. Package names from the bundled CTAN catalog can still appear in
+completion; they are suggestions, not evidence that a package is installed.
+
+### Build diagnostics
+
+Set `diagnostics.compiler` to `false` in initialization options or editor settings
+when another build integration publishes compiler errors. This suppresses compiler
+log diagnostics only: native source linting, AUX numbers, and recorder information
+remain available. Changes apply during the session, including clearing old reports.
+Project `[lint.external]` filters still apply when compiler diagnostics are enabled.
+
+```json
+{
+  "texmf": { "roots": [".local/texmf"], "explicitOnly": true },
+  "diagnostics": { "compiler": false }
+}
+```
 
 ## Forward and inverse search
 

@@ -49,6 +49,14 @@ If you see duplicate suggestions or error messages, another LaTeX extension may
 be providing the same features. Disable its overlapping features, or disable
 that extension for this workspace.
 
+For a project-local or pinned toolchain, set `tex-ls.texmf.roots` in workspace
+settings and enable `tex-ls.texmf.explicitOnly`. Relative roots use the workspace
+folder; automatic refresh picks up installed or removed packages. These TEXMF
+settings can be overridden per workspace folder, including in remote workspaces.
+If your build extension already reports compiler errors, set
+`tex-ls.diagnostics.compiler` to `false`; source linting and label numbers remain
+available. A `[build]`-only `tex-ls.toml` does not override editor formatting widths.
+
 If something is not working, [report the problem](https://github.com/backmatter/tex-ls/issues).
 Include your operating system, what you expected, and what happened.
 A short example that shows the problem helps.

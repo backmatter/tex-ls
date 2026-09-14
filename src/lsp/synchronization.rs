@@ -179,7 +179,9 @@ pub(super) fn on_notification(
             if let Ok(params) = not.extract::<DidChangeConfigurationParams>(
                 DidChangeConfigurationNotification::METHOD.as_str(),
             ) {
-                match EditorSettings::from_client_value(&params.settings) {
+                match EditorSettings::from_client_value(&params.settings)
+                    .and_then(|settings| settings.with_workspace_roots(&state.workspace_roots))
+                {
                     Ok(settings) => state.editor_settings = settings,
                     Err(error) => {
                         state.config_messages.push(error);
@@ -187,8 +189,7 @@ pub(super) fn on_notification(
                     }
                 }
                 // Drop cached resolutions so the new fallback is picked up on the
-                // next request. A discovered `tex-ls.toml` still wins, so docs in a
-                // configured workspace are unaffected.
+                // next request, including file configurations that omit width fields.
                 state.invalidate_settings();
                 relint_all_open(connection, state, job_tx);
             }

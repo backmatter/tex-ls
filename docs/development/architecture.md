@@ -67,7 +67,11 @@ Native IO runs separately from analysis, following literal references with cycle
 guards. Dirty dependencies and watcher events trigger acquisition; prose edits do
 not reread dependencies. Artifact polling compares content fingerprints because
 size and mtime can miss rebuilds. TEXMF discovery runs independently with bounded
-process deadlines. TEXINPUTS accepts literal native directory paths, including
+process deadlines. Each settings value shares immutable installation indexes.
+Background checks refresh database/directory fingerprints approximately every five
+seconds while requests retain the previous complete index. Explicit-only discovery
+ignores automatic roots and TEXINPUTS; relative roots resolve at the scoped native
+configuration boundary. TEXINPUTS accepts literal native directory paths, including
 Windows short names containing `~`; a trailing `//` enables recursive lookup. Browser applications supply inputs through the
 [embedding API](embedding.md).
 
@@ -94,6 +98,10 @@ The worker keeps scheduling and ownership in `src/lsp/worker.rs`, with private
 modules for acquisition and feature dispatch. Fallback watching honors source
 ignore rules and checks explicit compiler candidates, including missing paths
 and acquired AUX chains; it does not recursively traverse ignored build trees.
+Explicit compiler candidates remain native-owned after client watcher acknowledgement
+because client exclusions can suppress events. Editor compiler-diagnostic policy
+filters reports without disabling compiler acquisition. File formatting widths
+override editor widths individually only when explicitly present.
 Exclude matching resolves canonical and native path spellings against the
 configuration root, including deleted paths through an existing ancestor. Paths
 outside that root do not inherit its exclusions. Artifact scope updates are coalesced and use the polling cadence; only a root
@@ -122,7 +130,7 @@ document. Neither command adds language analysis to the client.
 Platform-specific VSIX files bundle the corresponding native release executable.
 The extension runs in the workspace host for Remote SSH, WSL, and containers.
 The extension requires a trusted workspace. Compiler management, builds, and
-PDF preview belong to texe.
+PDF preview belong to external build integrations.
 
 ## The formatter and linter
 
