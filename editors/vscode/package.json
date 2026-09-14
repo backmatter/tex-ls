@@ -2,7 +2,7 @@
   "name": "tex-ls",
   "displayName": "tex-ls",
   "description": "LaTeX and BibTeX completion, navigation, formatting, and linting.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "backmatter",
   "license": "MIT",
   "repository": {
@@ -282,7 +282,7 @@
       }
     }
   },
-  "texLsServerVersion": "0.1.1",
+  "texLsServerVersion": "0.1.2",
   "icon": "images/icon.png",
   "homepage": "https://github.com/backmatter/tex-ls",
   "bugs": {
