@@ -2390,28 +2390,3 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[patch.unused]]
-name = "tex-ls-analysis"
-version = "0.1.0"
-source = "git+https://github.com/backmatter/tex-ls?rev=fcc49d57848351e3a3f2fd52a0899e14f6a232ea#fcc49d57848351e3a3f2fd52a0899e14f6a232ea"
-
-[[patch.unused]]
-name = "tex-ls-browser"
-version = "0.1.0"
-source = "git+https://github.com/backmatter/tex-ls?rev=fcc49d57848351e3a3f2fd52a0899e14f6a232ea#fcc49d57848351e3a3f2fd52a0899e14f6a232ea"
-
-[[patch.unused]]
-name = "tex-ls-formatter"
-version = "0.1.0"
-source = "git+https://github.com/backmatter/tex-ls?rev=fcc49d57848351e3a3f2fd52a0899e14f6a232ea#fcc49d57848351e3a3f2fd52a0899e14f6a232ea"
-
-[[patch.unused]]
-name = "tex-ls-parser"
-version = "0.1.0"
-source = "git+https://github.com/backmatter/tex-ls?rev=fcc49d57848351e3a3f2fd52a0899e14f6a232ea#fcc49d57848351e3a3f2fd52a0899e14f6a232ea"
-
-[[patch.unused]]
-name = "tex-ls-protocol"
-version = "0.1.0"
-source = "git+https://github.com/backmatter/tex-ls?rev=fcc49d57848351e3a3f2fd52a0899e14f6a232ea#fcc49d57848351e3a3f2fd52a0899e14f6a232ea"

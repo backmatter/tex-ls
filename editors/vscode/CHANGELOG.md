@@ -1,12 +1,11 @@
 # Changelog
 
-## 0.1.1
+## [0.1.1](https://github.com/backmatter/tex-ls/compare/v0.1.0...v0.1.1) - 2026-09-14
 
-- Rewrite the setup guide for people using tex-ls to write documents.
-- Move developer instructions out of the Marketplace page.
-
-- Add the Backmatter icon and instructions for installing from the Marketplace.
-- Prepare downloads for Linux, macOS, and Windows on Intel/AMD and ARM64 computers.
+### Added
+- Support project-local build integrations ([#2](https://github.com/backmatter/tex-ls/pull/2))
+- Add minimal VS Code extension and Marketplace guides
+- Release tex-ls 0.1.0
 
 ## 0.1.0
 
