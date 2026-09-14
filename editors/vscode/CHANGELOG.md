@@ -1,12 +1,19 @@
 # Changelog
 
-## 0.1.1
+## [0.1.2](https://github.com/backmatter/tex-ls/compare/v0.1.0...v0.1.2) - 2026-09-14
 
-- Rewrite the setup guide for people using tex-ls to write documents.
-- Move developer instructions out of the Marketplace page.
+- Support project-local TeX packages without requiring a system TeX installation.
+- Refresh completions when packages are installed or removed.
+- Track build outputs in editor-excluded directories.
+- Allow build tools to provide compiler diagnostics without duplicates.
+- Preserve editor formatting settings in build-only projects.
 
-- Add the Backmatter icon and instructions for installing from the Marketplace.
-- Prepare downloads for Linux, macOS, and Windows on Intel/AMD and ARM64 computers.
+## [0.1.1](https://github.com/backmatter/tex-ls/compare/v0.1.0...v0.1.1) - 2026-09-14
+
+### Added
+- Support project-local build integrations ([#2](https://github.com/backmatter/tex-ls/pull/2))
+- Add minimal VS Code extension and Marketplace guides
+- Release tex-ls 0.1.0
 
 ## 0.1.0
 
