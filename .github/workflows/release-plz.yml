@@ -1,0 +1,111 @@
+name: Release automation
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release:
+    name: Create tag and draft release
+    if: github.repository == 'backmatter/tex-ls'
+    runs-on: ubuntu-24.04
+    outputs:
+      released: ${{ steps.release.outputs.releases_created }}
+    steps:
+      - name: Create release-app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: read
+
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Check synchronized versions
+        run: python3 scripts/sync_release_versions.py
+
+      - name: Release merged release PR
+        id: release
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          command: release
+          version: 0.3.167
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  release-pr:
+    name: Prepare release PR
+    needs: release
+    if: github.repository == 'backmatter/tex-ls' && needs.release.outputs.released != 'true'
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: release-plz-pr-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - name: Create release-app token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Open or update release PR
+        id: release-pr
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+        with:
+          command: release-pr
+          version: 0.3.167
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Check out release PR
+        if: steps.release-pr.outputs.pr != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(steps.release-pr.outputs.pr).head_branch }}
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      - name: Synchronize bundled extension
+        if: steps.release-pr.outputs.pr != ''
+        env:
+          RELEASE_APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          python3 scripts/sync_release_versions.py --write --changelog
+          git add editors/vscode/package.json editors/vscode/package-lock.json editors/vscode/CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git config user.name "$RELEASE_APP_SLUG[bot]"
+            git config user.email "$RELEASE_APP_SLUG[bot]@users.noreply.github.com"
+            git commit -m "chore: synchronize extension with server release"
+            git push
+          fi
+
+      - name: Mark synchronized release PR ready for review
+        if: steps.release-pr.outputs.pr != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RELEASE_PR_NUMBER: ${{ fromJSON(steps.release-pr.outputs.pr).number }}
+        run: |
+          if [[ "$(gh pr view "$RELEASE_PR_NUMBER" --json isDraft --jq .isDraft)" == true ]]; then
+            gh pr ready "$RELEASE_PR_NUMBER"
+          fi

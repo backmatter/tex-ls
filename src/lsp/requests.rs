@@ -34,9 +34,8 @@ pub(super) fn on_formatting(
     }
     let resolved = state.resolve_settings(&uri);
     let mut style = resolved.style;
-    // A discovered `tex-ls.toml` wins outright; only when none
-    // governs does the request's `tab_size` override the indent width.
-    if !resolved.config_present && params.options.tab_size > 0 {
+    // Only an explicit file indent-width overrides the request tab size.
+    if !resolved.indent_width_configured && params.options.tab_size > 0 {
         style.indent_width = params.options.tab_size as usize;
     }
     let path = uri_to_path(&uri);
@@ -100,7 +99,7 @@ pub(super) fn on_range_formatting(
     }
     let resolved = state.resolve_settings(&uri);
     let mut style = resolved.style;
-    if !resolved.config_present && params.options.tab_size > 0 {
+    if !resolved.indent_width_configured && params.options.tab_size > 0 {
         style.indent_width = params.options.tab_size as usize;
     }
     let path = uri_to_path(&uri);
@@ -154,7 +153,7 @@ pub(super) fn on_type_formatting(
     }
     let resolved = state.resolve_settings(&uri);
     let mut style = resolved.style;
-    if !resolved.config_present && params.options.tab_size > 0 {
+    if !resolved.indent_width_configured && params.options.tab_size > 0 {
         style.indent_width = params.options.tab_size as usize;
     }
     let path = uri_to_path(&uri);

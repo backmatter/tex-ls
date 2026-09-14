@@ -22,14 +22,15 @@
 //!
 //! The built index is cached to the OS cache dir keyed by a distro fingerprint (root
 //! paths + `ls-R`/root mtimes) and rebuilt when that changes, so the walk runs at most
-//! once per install. Each settings value owns an `Arc<OnceLock<_>>`; cloned jobs
-//! share that value, while changed configuration creates a fresh index.
+//! once per unchanged installation. Each settings value owns shared refresh state;
+//! cloned jobs share complete immutable indexes while background checks run.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +56,8 @@ pub struct TexmfConfig {
     /// Whether to shell out to `kpsewhich -var-value=…` to discover the tree roots.
     /// When `false`, discovery falls back to default-path heuristics only.
     pub use_kpsewhich: bool,
+    /// Index only configured roots; ignore kpsewhich, fallback paths and TEXINPUTS.
+    pub explicit_only: bool,
 }
 
 impl Default for TexmfConfig {
@@ -63,6 +66,7 @@ impl Default for TexmfConfig {
             enabled: true,
             roots: Vec::new(),
             use_kpsewhich: true,
+            explicit_only: false,
         }
     }
 }
@@ -80,17 +84,24 @@ const TEXMF_VARS: &[&str] = &["TEXMFHOME", "TEXMFLOCAL", "TEXMFDIST", "TEXMFMAIN
 #[serde(from = "TexmfConfig")]
 pub struct InstalledPackages {
     config: TexmfConfig,
-    index: std::sync::Arc<OnceLock<TexmfIndex>>,
-    started: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    issues: std::sync::Arc<OnceLock<Vec<String>>>,
+    state: Arc<Mutex<IndexState>>,
+}
+#[derive(Debug, Default)]
+struct IndexState {
+    index: Option<Arc<TexmfIndex>>,
+    checking: bool,
+    checked: Option<Instant>,
+    issues: Vec<String>,
+    generation: u64,
+    roots: Option<Vec<PathBuf>>,
+    fingerprint: Option<String>,
+    discovery_issues: Vec<String>,
 }
 impl From<TexmfConfig> for InstalledPackages {
     fn from(config: TexmfConfig) -> Self {
         Self {
             config,
-            index: Default::default(),
-            started: Default::default(),
-            issues: Default::default(),
+            state: Default::default(),
         }
     }
 }
@@ -109,58 +120,158 @@ impl InstalledPackages {
     pub fn config(&self) -> &TexmfConfig {
         &self.config
     }
-    /// Start optional installation discovery once, serving local results meanwhile.
-    pub fn ready_index(&self) -> Option<&TexmfIndex> {
+    /// Serve the last complete index while a background refresh checks the tree.
+    /// Missing roots and trees without filename databases are checked too.
+    pub fn ready_index(&self) -> Option<Arc<TexmfIndex>> {
+        let mut state = self.state.lock().expect("installation state");
         if !self.config.enabled {
-            return Some(self.index());
+            return Some(
+                state
+                    .index
+                    .get_or_insert_with(|| Arc::new(TexmfIndex::default()))
+                    .clone(),
+            );
         }
-        if !self.started.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        if !state.checking
+            && state
+                .checked
+                .is_none_or(|time| time.elapsed() >= Duration::from_secs(5))
+        {
+            state.checking = true;
             let this = self.clone();
-            std::thread::spawn(move || {
-                this.index();
-            });
+            std::thread::spawn(move || this.refresh());
         }
-        self.index.get()
+        state.index.clone()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.state.lock().expect("installation state").generation
     }
 
     pub fn issues(&self) -> Vec<String> {
-        self.issues.get().cloned().unwrap_or_default()
+        self.state
+            .lock()
+            .expect("installation state")
+            .issues
+            .clone()
     }
 
-    pub fn index(&self) -> &TexmfIndex {
-        self.index.get_or_init(|| {
-            if self.config.enabled {
-                let mut issues = Vec::new();
-                let installed = load_or_build(&self.config, &mut issues);
-                let _ = self.issues.set(issues);
-                let mut files = std::env::var_os("TEXINPUTS")
-                    .map(|value| texinput_files(&value))
-                    .unwrap_or_default();
-                for (name, path) in installed.by_name {
-                    files.entry(name).or_insert(path);
+    fn refresh(&self) {
+        let (roots, mut issues) = {
+            let state = self.state.lock().expect("installation state");
+            (state.roots.clone(), state.discovery_issues.clone())
+        };
+        let roots = roots.unwrap_or_else(|| {
+            let discovered = discover_roots(&self.config, &mut issues);
+            // Retain missing explicit roots so first materialization is observable.
+            let mut roots = self.config.roots.clone();
+            for root in discovered {
+                if !roots.contains(&root) {
+                    roots.push(root);
                 }
-                TexmfIndex::from_files(files)
-            } else {
-                TexmfIndex::default()
             }
-        })
+            if roots.is_empty() && !self.config.explicit_only {
+                roots = heuristic_roots();
+            }
+            let mut state = self.state.lock().expect("installation state");
+            state.roots = Some(roots.clone());
+            state.discovery_issues = issues
+                .iter()
+                .filter(|issue| !issue.starts_with("Cannot read TEXMF root "))
+                .cloned()
+                .collect();
+            roots
+        });
+        issues.retain(|issue| !issue.starts_with("Cannot read TEXMF root "));
+        for root in &self.config.roots {
+            if !root.is_dir() {
+                issues.push(format!(
+                    "Cannot read TEXMF root {}; check texmf.roots",
+                    root.display()
+                ));
+            }
+        }
+        let fingerprint = fingerprint(&roots);
+        // TEXINPUTS is intentionally rescanned in automatic mode; it can name
+        // additional directories outside the discovered installation.
+        if self.config.explicit_only {
+            let mut state = self.state.lock().expect("installation state");
+            if state.fingerprint.as_ref() == Some(&fingerprint) {
+                state.checked = Some(Instant::now());
+                state.checking = false;
+                return;
+            }
+        }
+        let (installed, cache_miss) = load_or_build(&roots, &fingerprint);
+        let installed_cache = cache_miss.then(|| installed.by_name.clone());
+        let mut files = if self.config.explicit_only {
+            HashMap::new()
+        } else {
+            std::env::var_os("TEXINPUTS")
+                .map(|value| texinput_files(&value))
+                .unwrap_or_default()
+        };
+        for (name, path) in installed.by_name {
+            files.entry(name).or_insert(path);
+        }
+        let index = TexmfIndex::from_files(files);
+        if fingerprint != self::fingerprint(&roots) {
+            // A build or clean raced enumeration. Neither publish nor cache a
+            // mixed generation under an obsolete fingerprint; retry next poll.
+            let mut state = self.state.lock().expect("installation state");
+            state.fingerprint = None;
+            state.checked = None;
+            state.checking = false;
+            return;
+        }
+        // Cache only the installed part, excluding process-local TEXINPUTS.
+        if let Some(cache) = &installed_cache {
+            save_cache(&fingerprint, cache);
+        }
+        let mut state = self.state.lock().expect("installation state");
+        if state.index.as_deref() != Some(&index) {
+            state.index = Some(Arc::new(index));
+            state.generation += 1;
+        }
+        state.fingerprint = Some(fingerprint);
+        state.issues = issues;
+        state.checked = Some(Instant::now());
+        state.checking = false;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn index(&self) -> Arc<TexmfIndex> {
+        if !self.config.enabled {
+            return self.ready_index().expect("disabled index");
+        }
+        if self
+            .state
+            .lock()
+            .expect("installation state")
+            .index
+            .is_none()
+        {
+            self.refresh();
+        }
+        self.state
+            .lock()
+            .expect("installation state")
+            .index
+            .clone()
+            .unwrap()
     }
 }
 
 /// Discover roots, then return the cached index when the distro fingerprint matches,
 /// else build fresh and cache it. An empty root set yields an empty (uncached) index.
-fn load_or_build(config: &TexmfConfig, issues: &mut Vec<String>) -> TexmfIndex {
-    let roots = discover_roots(config, issues);
+fn load_or_build(roots: &[PathBuf], fingerprint: &str) -> (TexmfIndex, bool) {
     if roots.is_empty() {
-        return TexmfIndex::default();
+        return (TexmfIndex::default(), false);
     }
-    let fingerprint = fingerprint(&roots);
-    if let Some(files) = load_cache(&fingerprint) {
-        return TexmfIndex::from_files(files);
+    if let Some(files) = load_cache(fingerprint) {
+        return (TexmfIndex::from_files(files), false);
     }
-    let index = build_from_roots(&roots);
-    save_cache(&fingerprint, &index.by_name);
-    index
+    (build_from_roots(roots), true)
 }
 
 /// Plain TEXINPUTS elements search one directory; a trailing `//` explicitly
@@ -213,7 +324,7 @@ fn discover_roots(config: &TexmfConfig, issues: &mut Vec<String>) -> Vec<PathBuf
         }
         push(&mut roots, extra.clone());
     }
-    if config.use_kpsewhich {
+    if config.use_kpsewhich && !config.explicit_only {
         let issue_count = issues.len();
         if let Some(texmf) = kpsewhich_var("TEXMF", issues) {
             match bounded_output(
@@ -244,7 +355,7 @@ fn discover_roots(config: &TexmfConfig, issues: &mut Vec<String>) -> Vec<PathBuf
             }
         }
     }
-    if roots.is_empty() {
+    if roots.is_empty() && !config.explicit_only {
         for dir in heuristic_roots() {
             push(&mut roots, dir);
         }
@@ -661,6 +772,43 @@ mod ownership_tests {
     }
 
     #[test]
+    fn explicit_roots_refresh_after_creation_addition_removal_and_clean() {
+        for database in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("missing");
+            let installed = InstalledPackages::from(TexmfConfig {
+                roots: vec![root.clone()],
+                explicit_only: true,
+                ..Default::default()
+            });
+            assert!(discover_roots(installed.config(), &mut Vec::new()).is_empty());
+            assert!(installed.index().by_name.is_empty());
+            std::fs::create_dir_all(root.join("tex/latex/pkg")).unwrap();
+            let package = root.join("tex/latex/pkg/fresh.sty");
+            std::fs::write(&package, "").unwrap();
+            if database {
+                std::fs::write(root.join("ls-R"), "./tex/latex/pkg:\nfresh.sty\n").unwrap();
+            }
+            installed.refresh();
+            assert_eq!(
+                installed.index().resolve("fresh", &["sty"]),
+                Some(package.as_path())
+            );
+            let old = installed.index();
+            std::fs::remove_file(&package).unwrap();
+            if database {
+                std::fs::write(root.join("ls-R"), "./tex/latex/pkg:\n").unwrap();
+            }
+            installed.refresh();
+            assert!(installed.index().resolve("fresh", &["sty"]).is_none());
+            assert!(old.resolve("fresh", &["sty"]).is_some());
+            std::fs::remove_dir_all(&root).unwrap();
+            installed.refresh();
+            assert!(installed.index().by_name.is_empty());
+        }
+    }
+
+    #[test]
     fn installations_are_owned_by_settings_and_shared_with_read_jobs() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
@@ -671,6 +819,7 @@ mod ownership_tests {
                 enabled: true,
                 roots: vec![path.to_owned()],
                 use_kpsewhich: false,
+                explicit_only: true,
             })
         };
         let one = create(first.path());
@@ -678,7 +827,7 @@ mod ownership_tests {
         assert!(one.index().resolve("sessionone", &["sty"]).is_some());
         assert!(two.index().resolve("sessiontwo", &["sty"]).is_some());
         assert!(two.index().resolve("sessionone", &["sty"]).is_none());
-        assert!(std::ptr::eq(one.index(), one.clone().index()));
+        assert!(Arc::ptr_eq(&one.index(), &one.clone().index()));
     }
 }
 

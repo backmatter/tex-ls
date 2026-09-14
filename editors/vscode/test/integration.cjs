@@ -5,8 +5,21 @@ const vscode = require('vscode');
 async function eventually(description, check) {
   const deadline = Date.now() + 20000;
   while (Date.now() < deadline) {
-    const result = await check();
-    if (result) return result;
+    let timeout;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(check),
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => reject(new Error(`Timed out: ${description}`)), deadline - Date.now());
+        }),
+      ]);
+      if (result) return result;
+    } catch (error) {
+      // Startup/configuration refresh can cancel an otherwise valid request.
+      if (error.name !== 'Canceled' && error.code !== -32800 && error.code !== -32801) throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   assert.fail(`Timed out: ${description}`);
@@ -138,6 +151,36 @@ exports.run = async function run() {
   await vscode.workspace.fs.writeFile(uri('second', 'tex-ls.toml'), Buffer.from('[format]\nline-width = 100\n'));
   await eventually('project configuration overrides editor settings', async () => !(await format(documents[1]))?.length);
 
+  // The same package name must resolve to each folder's own relative TEXMF root.
+  // The trees are editor-excluded, so installation changes need native refresh.
+  const packageDocuments = [];
+  for (const folder of ['first', 'second']) {
+    const file = uri(folder, 'packages.tex');
+    await vscode.workspace.fs.writeFile(file, Buffer.from('\\usepackage{integrationlocal}\n\\usepackage{integrationadded}\n'));
+    packageDocuments.push(await vscode.workspace.openTextDocument(file));
+  }
+  const packageLinks = (doc) => vscode.commands.executeCommand('vscode.executeLinkProvider', doc.uri);
+  for (let i = 0; i < packageDocuments.length; i++) {
+    const expected = uri(i === 0 ? 'first' : 'second', '.local/texmf/integrationlocal.sty').toString();
+    await eventually('folder-scoped package resolution', async () => {
+      const links = await packageLinks(packageDocuments[i]);
+      return links?.some((link) => link.target?.toString() === expected);
+    });
+  }
+  const added = uri('first', '.local/texmf/integrationadded.sty');
+  const hasAdded = async (doc) => {
+    const links = await packageLinks(doc);
+    return Array.isArray(links) ? links.some((link) => link.target?.toString() === added.toString()) : undefined;
+  };
+  assert.equal(await hasAdded(packageDocuments[0]), false);
+  await vscode.workspace.fs.writeFile(added, Buffer.from('% installed during the session\n'));
+  await vscode.workspace.fs.writeFile(uri('first', '.local/texmf/ls-R'), Buffer.from('./:\nintegrationlocal.sty\nintegrationadded.sty\n'));
+  await eventually('package installation refreshes without editor events', () => hasAdded(packageDocuments[0]));
+  assert.equal(await hasAdded(packageDocuments[1]), false, 'another workspace must not inherit installed packages');
+  await vscode.workspace.fs.delete(added);
+  await vscode.workspace.fs.writeFile(uri('first', '.local/texmf/ls-R'), Buffer.from('./:\nintegrationlocal.sty\n'));
+  await eventually('package removal clears navigation', async () => (await hasAdded(packageDocuments[0])) === false);
+
   const broken = await vscode.workspace.openTextDocument({ language: 'latex', content: '\\begin{itemize}\n\\end{enumerate}\n' });
   await vscode.window.showTextDocument(broken);
   await eventually('untitled diagnostics', () => vscode.languages.getDiagnostics(broken.uri).length > 0);
@@ -153,5 +196,5 @@ exports.run = async function run() {
 
   await Promise.all([1, 2, 3].map(() => vscode.commands.executeCommand('tex-ls.restartServer')));
   await eventually('providers recover after restart', async () => (await format(bibliography))?.length > 0);
-  console.log('VS Code integration passed: activation, symbols, UTF-16 definition/rename, safe fix-all and undo, read-only project inspection, completion, formatting, scoped settings, config watching, diagnostics, BibTeX, queued restarts.');
+  console.log('VS Code integration passed: activation, symbols, UTF-16 definition/rename, safe fix-all and undo, read-only project inspection, completion, formatting, scoped settings, build-only formatting, isolated relative TEXMF roots, excluded package refresh, config watching, diagnostics, BibTeX, queued restarts.');
 };

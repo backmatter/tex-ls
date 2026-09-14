@@ -64,7 +64,7 @@ impl Worker {
             format!(
                 "{references:?}{context:?}{:?}{}",
                 installed.config(),
-                installed.ready_index().is_some()
+                installed.generation()
             )
         };
         if self.acquisition_keys.get(&(project, path.to_owned())) == Some(&key)
@@ -88,9 +88,28 @@ impl Worker {
         };
         if let Some(index) = installed.ready_index() {
             let snapshot = self.snapshot_for(path);
-            let changed = snapshot.texmf() != index;
+            let changed = snapshot.texmf() != index.as_ref();
+            let obsolete: Vec<_> = snapshot
+                .texmf()
+                .by_name
+                .iter()
+                .filter(|(name, old)| {
+                    index.by_name.get(*name) != Some(*old) && snapshot.lookup_file(old).is_some()
+                })
+                .map(|(_, path)| path.clone())
+                .collect();
             drop(snapshot);
             if changed {
+                // Previously loaded installed sources also need re-observation;
+                // replacing the name index alone leaves stale backing files alive.
+                self.extra_sources
+                    .entry(project)
+                    .or_default()
+                    .extend(obsolete.iter().cloned());
+                self.extra_locations
+                    .entry(project)
+                    .or_default()
+                    .extend(obsolete);
                 let token = self
                     .db
                     .begin_external_refresh(project, ExternalInputKind::Installed)
@@ -100,7 +119,7 @@ impl Worker {
                         token,
                         ExternalInputs::Installed(Observation::Present(InstalledMetadata {
                             toolchain: "native".into(),
-                            index: index.clone(),
+                            index: index.as_ref().clone(),
                         })),
                     )
                     .expect("current installation");

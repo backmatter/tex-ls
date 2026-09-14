@@ -13,7 +13,9 @@ export function serverSettings(config: Configuration) {
       enabled: config.get<boolean>('texmf.enabled'),
       roots: config.get<string[]>('texmf.roots'),
       useKpsewhich: config.get<boolean>('texmf.useKpsewhich'),
+      explicitOnly: config.get<boolean>('texmf.explicitOnly'),
     },
+    diagnostics: { compiler: config.get<boolean>('diagnostics.compiler') },
     outline: config.get<object>('outline'),
     inlayHints: config.get<object>('inlayHints'),
   };

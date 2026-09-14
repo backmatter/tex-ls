@@ -13,7 +13,15 @@ async function main() {
       await fs.mkdir(path.join(temp, folder, '.vscode'));
       await fs.writeFile(path.join(temp, folder, '.vscode', 'settings.json'), JSON.stringify({
         'tex-ls.lineWidth': folder === 'first' ? 40 : 100,
+        'tex-ls.texmf.enabled': true,
+        'tex-ls.texmf.roots': ['.local/texmf'],
+        'tex-ls.texmf.explicitOnly': true,
+        'files.watcherExclude': { '**/.local/**': true },
       }));
+      await fs.mkdir(path.join(temp, folder, '.local', 'texmf'), { recursive: true });
+      await fs.writeFile(path.join(temp, folder, '.local', 'texmf', 'integrationlocal.sty'), `% ${folder} installation\n`);
+      await fs.writeFile(path.join(temp, folder, '.local', 'texmf', 'ls-R'), './:\nintegrationlocal.sty\n');
+      await fs.writeFile(path.join(temp, folder, 'tex-ls.toml'), '[build]\naux-dir = ".local/build"\n');
       await fs.writeFile(path.join(temp, folder, 'main.tex'),
         '\\documentclass{article}\n\\begin{document}\n\\section{Introduction}\\label{sec:intro}\nSee 🌻 \\ref{sec:intro}.\n\\end{document}\n');
     }

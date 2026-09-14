@@ -22,7 +22,7 @@ test('configuration preserves nested server settings and excludes client setting
   const settings = JSON.parse(JSON.stringify(serverSettings({ get: (key) => values[key] })));
   assert.deepEqual(settings, {
     lineWidth: 72, texmf: { enabled: false, roots: ['/packages'] },
-    outline: { labels: false },
+    diagnostics: {}, outline: { labels: false },
   });
 });
 
@@ -83,4 +83,18 @@ test('BibTeX grammar handles nested values and resumes after comments', async ()
     if (line.startsWith('year')) assert.ok(result.tokens.some((token) => token.scopes.includes('constant.numeric.bibtex')));
   }
   assert.ok(grammar.tokenizeLine('outside entry', state).tokens[0].scopes.includes('comment.line.bibtex'));
+});
+
+test('project toolchain isolation and diagnostic policy reach the server', () => {
+  const values = { 'texmf.roots': ['.local/texmf'], 'texmf.explicitOnly': true,
+    'diagnostics.compiler': false };
+  const settings = serverSettings({ get: (key) => values[key] });
+  assert.deepEqual(settings.texmf.roots, ['.local/texmf']);
+  assert.equal(settings.texmf.explicitOnly, true);
+  assert.equal(settings.diagnostics.compiler, false);
+  const manifest = require('../package.json');
+  for (const key of ['enabled', 'roots', 'useKpsewhich', 'explicitOnly']) {
+    assert.equal(manifest.contributes.configuration.properties[`tex-ls.texmf.${key}`].scope, 'machine-overridable');
+  }
+  assert.equal(manifest.contributes.configuration.properties['tex-ls.server.path'].scope, 'machine');
 });

@@ -19,6 +19,13 @@ const root = resolve(extension, '../..');
 const binary = resolve(values.binary);
 const output = resolve(values.output || join(root, 'dist'));
 const manifest = JSON.parse(readFileSync(join(extension, 'package.json'), 'utf8'));
+if (manifest.version !== manifest.texLsServerVersion) {
+  throw new Error('Extension and bundled server versions must match.');
+}
+const lock = JSON.parse(readFileSync(join(extension, 'package-lock.json'), 'utf8'));
+if (lock.version !== manifest.version || lock.packages[''].version !== manifest.version) {
+  throw new Error('Extension manifest and lockfile versions must match.');
+}
 const actual = execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim();
 if (actual !== `tex-ls ${manifest.texLsServerVersion}`) {
   throw new Error(`Expected bundled server ${manifest.texLsServerVersion}, got ${actual}`);
