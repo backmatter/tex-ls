@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/backmatter/tex-ls/compare/v0.1.0...v0.1.1) - 2026-09-14
+
+### Added
+- Support project-local build integrations ([#2](https://github.com/backmatter/tex-ls/pull/2))
+- Add minimal VS Code extension and Marketplace guides
+- Release tex-ls 0.1.0
+
 ## 0.1.0
 
 First release of tex-ls, a LaTeX and BibTeX language server, formatter, and
