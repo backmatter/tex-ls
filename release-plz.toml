@@ -2,9 +2,6 @@
 allow_dirty = false
 changelog_update = false
 dependencies_update = false
-# Feature releases increment minor even before 1.0. This also moves past the
-# historical extension-only 0.1.1 version when adopting synchronized releases.
-features_always_increment_minor = true
 git_only = false
 git_release_enable = false
 git_tag_enable = false

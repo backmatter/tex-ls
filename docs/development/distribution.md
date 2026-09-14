@@ -9,12 +9,12 @@ Archives include the MIT license and the unicode-math notices.
 Use Conventional Commit PR titles and squash merges. Release-plz opens a release
 PR on `main`, computes the server version, and generates the changelog. The
 workflow copies that version and those release notes into the bundled VS Code
-extension. Do not increment release versions by hand. Feature commits increment
-the minor version even before 1.0; fixes increment the patch version.
+extension. Do not increment release versions by hand. Use release-plz's default versioning
+policy.
 
 The server, VS Code extension, lockfiles, and `vVERSION` tag use one version.
 Older extension-only releases used independent versions; the first synchronized
-feature release moves beyond those versions. Internal unpublished Rust crates
+release is 0.1.2. Internal unpublished Rust crates
 keep their own implementation versions.
 
 Run `python3 scripts/sync_release_versions.py` to check consistency. The release
