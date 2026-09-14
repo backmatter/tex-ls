@@ -53,3 +53,49 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.128
       - run: bash scripts/check_host_parity.sh
+
+  vscode:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        vscode-version: [stable]
+        include:
+          - os: ubuntu-latest
+            vscode-version: 1.91.1
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --bin tex-ls
+      - run: npm ci
+        working-directory: editors/vscode
+      - run: npm test
+        working-directory: editors/vscode
+      - name: Test in VS Code
+        working-directory: editors/vscode
+        shell: bash
+        env:
+          VSCODE_TEST_VERSION: ${{ matrix.vscode-version }}
+        run: |
+          export TEX_LS_TEST_SERVER="$GITHUB_WORKSPACE/target/debug/tex-ls"
+          if [[ "$RUNNER_OS" == Windows ]]; then TEX_LS_TEST_SERVER="$TEX_LS_TEST_SERVER.exe"; fi
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            xvfb-run -a npm run test:integration
+          else
+            npm run test:integration
+          fi
+      - name: Check VSIX packaging
+        if: matrix.vscode-version == 'stable'
+        working-directory: editors/vscode
+        shell: bash
+        run: |
+          binary="../../target/debug/tex-ls"
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          vscode_target=$(node -p 'process.platform + "-" + process.arch')
+          node scripts/package.mjs --binary "$binary" --target "$vscode_target"

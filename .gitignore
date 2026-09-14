@@ -33,3 +33,11 @@ __pycache__/
 *.run.xml
 /tests/typeset/*.pdf
 /test.*
+
+# VS Code extension output
+/editors/vscode/node_modules/
+/editors/vscode/dist/
+/editors/vscode/server/
+/editors/vscode/.vscode-test/
+/editors/vscode/*.vsix
+/dist/

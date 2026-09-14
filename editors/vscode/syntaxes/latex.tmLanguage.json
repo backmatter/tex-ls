@@ -1,0 +1,30 @@
+{
+  "name": "LaTeX",
+  "scopeName": "text.tex.latex",
+  "patterns": [
+    { "include": "#comment" },
+    { "name": "string.quoted.other.verbatim.latex", "begin": "\\\\verb\\*?([^a-zA-Z\\s])", "end": "\\1|$" },
+    {
+      "name": "string.other.verbatim.latex",
+      "begin": "\\\\begin\\{(verbatim\\*?|Verbatim|lstlisting|minted)\\}",
+      "end": "\\\\end\\{\\1\\}"
+    },
+    { "name": "meta.math.block.latex", "begin": "\\$\\$", "end": "\\$\\$", "patterns": [{ "include": "#common" }] },
+    { "name": "meta.math.inline.latex", "begin": "\\$", "end": "\\$", "patterns": [{ "include": "#common" }] },
+    { "name": "meta.math.block.latex", "begin": "\\\\\\[", "end": "\\\\\\]", "patterns": [{ "include": "#common" }] },
+    { "name": "meta.math.inline.latex", "begin": "\\\\\\(", "end": "\\\\\\)", "patterns": [{ "include": "#common" }] },
+    { "include": "#common" }
+  ],
+  "repository": {
+    "comment": { "name": "comment.line.percentage.latex", "begin": "%", "end": "$" },
+    "common": {
+      "patterns": [
+        { "include": "#comment" },
+        { "name": "keyword.control.latex", "match": "\\\\(?:[a-zA-Z@:_]+\\*?|.)" },
+        { "name": "variable.parameter.latex", "match": "#+[1-9]" },
+        { "name": "punctuation.definition.group.latex", "match": "[{}\\[\\]]" },
+        { "name": "keyword.operator.math.latex", "match": "[_^&~]" }
+      ]
+    }
+  }
+}

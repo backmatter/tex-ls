@@ -21,17 +21,23 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-musl
+            vscode-target: linux-x64
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+            vscode-target: linux-arm64
           - os: macos-15-intel
             target: x86_64-apple-darwin
+            vscode-target: darwin-x64
           - os: macos-15
             target: aarch64-apple-darwin
+            vscode-target: darwin-arm64
           - os: windows-2025
             target: x86_64-pc-windows-msvc
+            vscode-target: win32-x64
             rustflags: -C target-feature=+crt-static
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
+            vscode-target: win32-arm64
             rustflags: -C target-feature=+crt-static
     runs-on: ${{ matrix.os }}
     env:
@@ -66,6 +72,22 @@ jobs:
       - name: Test and package
         shell: bash
         run: python3 scripts/package_release.py --source source --target "$BUILD_TARGET" --tag "$RELEASE_TAG"
+      - uses: actions/setup-node@v7
+        if: hashFiles('source/editors/vscode/package-lock.json') != ''
+        with:
+          node-version: '24'
+      - name: Package VS Code extension
+        if: hashFiles('source/editors/vscode/package-lock.json') != ''
+        working-directory: source/editors/vscode
+        shell: bash
+        env:
+          VSCODE_TARGET: ${{ matrix.vscode-target }}
+        run: |
+          npm ci
+          npm test
+          binary="../../target/$BUILD_TARGET/release/tex-ls"
+          if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
+          node scripts/package.mjs --binary "$binary" --target "$VSCODE_TARGET" --output ../../../dist
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}

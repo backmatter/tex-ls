@@ -1,0 +1,279 @@
+{
+  "name": "tex-ls",
+  "displayName": "tex-ls",
+  "description": "LaTeX and BibTeX completion, navigation, formatting, and linting.",
+  "version": "0.1.1",
+  "publisher": "backmatter",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/backmatter/tex-ls.git",
+    "directory": "editors/vscode"
+  },
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Formatters",
+    "Linters"
+  ],
+  "keywords": [
+    "latex",
+    "tex",
+    "bibtex",
+    "lsp"
+  ],
+  "main": "./dist/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "tex-ls requires a trusted workspace to read project files and run installed-package discovery."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "tex-ls requires access to a native filesystem."
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "vscode:prepublish": "npm run compile",
+    "test": "npm run compile && node --test test/unit.test.cjs",
+    "test:integration": "npm run compile && node test/run.cjs"
+  },
+  "dependencies": {
+    "vscode-languageclient": "10.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "1.91.0",
+    "@vscode/test-electron": "3.1.0",
+    "@vscode/vsce": "3.9.2",
+    "typescript": "^5.9.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.0"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "latex",
+        "aliases": [
+          "LaTeX",
+          "latex"
+        ],
+        "extensions": [
+          ".tex",
+          ".ltx",
+          ".sty",
+          ".cls",
+          ".dtx",
+          ".def",
+          ".lco"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "bibtex",
+        "aliases": [
+          "BibTeX",
+          "bibtex"
+        ],
+        "extensions": [
+          ".bib",
+          ".bibtex"
+        ],
+        "configuration": "./bibtex-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "latex",
+        "scopeName": "text.tex.latex",
+        "path": "./syntaxes/latex.tmLanguage.json"
+      },
+      {
+        "language": "bibtex",
+        "scopeName": "text.bibtex",
+        "path": "./syntaxes/bibtex.tmLanguage.json"
+      }
+    ],
+    "configurationDefaults": {
+      "[latex]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
+      },
+      "[bibtex]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
+      }
+    },
+    "commands": [
+      {
+        "command": "tex-ls.fixAll",
+        "title": "Fix All Safe Issues",
+        "category": "tex-ls",
+        "enablement": "editorLangId == latex || editorLangId == bibtex"
+      },
+      {
+        "command": "tex-ls.showProject",
+        "title": "Inspect Project",
+        "category": "tex-ls",
+        "enablement": "resourceScheme == file && (editorLangId == latex || editorLangId == bibtex)"
+      },
+      {
+        "command": "tex-ls.restartServer",
+        "title": "Restart Language Server",
+        "category": "tex-ls"
+      },
+      {
+        "command": "tex-ls.showOutput",
+        "title": "Show Language Server Output",
+        "category": "tex-ls"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "tex-ls.fixAll",
+          "when": "editorLangId == latex || editorLangId == bibtex"
+        },
+        {
+          "command": "tex-ls.showProject",
+          "when": "resourceScheme == file && (editorLangId == latex || editorLangId == bibtex)"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "tex-ls",
+      "properties": {
+        "tex-ls.server.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path or executable name for tex-ls. Empty uses the bundled server. Arguments are not accepted. Changes restart the server."
+        },
+        "tex-ls.trace.server": {
+          "type": "string",
+          "enum": [
+            "messages",
+            "verbose"
+          ],
+          "default": "messages",
+          "scope": "window",
+          "description": "Protocol detail when the tex-ls output channel log level is Trace. Use Developer: Set Log Level to enable tracing."
+        },
+        "tex-ls.lineWidth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 80,
+          "scope": "resource",
+          "description": "Fallback line width when no tex-ls.toml is found."
+        },
+        "tex-ls.indentWidth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 2,
+          "scope": "resource",
+          "description": "Fallback indentation width. Project configuration and formatting request tab size take precedence."
+        },
+        "tex-ls.texmf.enabled": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Discover installed TeX packages. Changes restart the server."
+        },
+        "tex-ls.texmf.roots": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "machine",
+          "description": "Additional absolute TEXMF directory paths. Changes restart the server."
+        },
+        "tex-ls.texmf.useKpsewhich": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "description": "Use kpsewhich for installed-package discovery. Changes restart the server."
+        },
+        "tex-ls.outline": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": false,
+          "description": "Choose which document symbols appear in the outline.",
+          "properties": {
+            "sections": {
+              "type": "boolean"
+            },
+            "frames": {
+              "type": "boolean"
+            },
+            "floats": {
+              "type": "boolean"
+            },
+            "theorems": {
+              "type": "boolean"
+            },
+            "labels": {
+              "type": "boolean"
+            },
+            "macros": {
+              "type": "boolean"
+            },
+            "environments": {
+              "type": "boolean"
+            },
+            "labelledEquations": {
+              "type": "boolean"
+            },
+            "unlabelledEquations": {
+              "type": "boolean"
+            },
+            "items": {
+              "type": "boolean"
+            },
+            "environmentNames": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "tex-ls.inlayHints": {
+          "type": "object",
+          "default": {},
+          "scope": "resource",
+          "additionalProperties": false,
+          "description": "Show definition and reference information from the last build.",
+          "properties": {
+            "definitions": {
+              "type": "boolean"
+            },
+            "references": {
+              "type": "boolean"
+            },
+            "maxLength": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256
+            }
+          }
+        }
+      }
+    }
+  },
+  "texLsServerVersion": "0.1.0",
+  "icon": "images/icon.png",
+  "homepage": "https://github.com/backmatter/tex-ls",
+  "bugs": {
+    "url": "https://github.com/backmatter/tex-ls/issues"
+  }
+}

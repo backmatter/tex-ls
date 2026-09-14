@@ -51,6 +51,10 @@ Extract the archive and put `tex-ls` or `tex-ls.exe` on your `PATH`.
 
 ## In your editor
 
+For VS Code, install [tex-ls from the Marketplace](https://marketplace.visualstudio.com/items?itemName=backmatter.tex-ls).
+It includes the language server. See the [VS Code guide](editors/vscode/README.md)
+for platform availability, installation, and settings.
+
 Configure your editor's LSP client to run `tex-ls lsp`. The
 [editor setup guide](docs/guide/editor-setup.md) includes Neovim configuration,
 PDF forward and inverse search, and troubleshooting.

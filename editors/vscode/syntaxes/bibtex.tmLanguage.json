@@ -1,0 +1,29 @@
+{
+  "name": "BibTeX",
+  "scopeName": "text.bibtex",
+  "patterns": [
+    {
+      "name": "comment.block.bibtex", "begin": "(?i)(@comment)\\s*\\{", "end": "\\}",
+      "patterns": [{ "include": "#commentBraces" }]
+    },
+    {
+      "begin": "(@[a-zA-Z]+)\\s*([({])", "end": "[)}]",
+      "beginCaptures": { "1": { "name": "keyword.control.entry.bibtex" }, "2": { "name": "punctuation.definition.entry.bibtex" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.entry.bibtex" } },
+      "patterns": [
+        { "name": "entity.other.attribute-name.bibtex", "match": "[a-zA-Z][a-zA-Z0-9_-]*(?=\\s*=)" },
+        { "include": "#braces" },
+        { "name": "string.quoted.double.bibtex", "begin": "\"", "end": "\"", "patterns": [{ "include": "#braces" }, { "include": "#escape" }] },
+        { "name": "constant.numeric.bibtex", "match": "\\b[0-9]+\\b" },
+        { "name": "keyword.operator.bibtex", "match": "[=#,]" },
+        { "name": "entity.name.label.bibtex", "match": "[^\\s,={}()\"#]+" }
+      ]
+    },
+    { "name": "comment.line.bibtex", "match": "[^@]+" }
+  ],
+  "repository": {
+    "escape": { "name": "constant.character.escape.bibtex", "match": "\\\\(?:[a-zA-Z]+|.)" },
+    "braces": { "name": "string.quoted.other.bibtex", "begin": "\\{", "end": "\\}", "patterns": [{ "include": "#braces" }, { "include": "#escape" }] },
+    "commentBraces": { "begin": "\\{", "end": "\\}", "patterns": [{ "include": "#commentBraces" }] }
+  }
+}

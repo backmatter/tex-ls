@@ -105,6 +105,25 @@ changes received while a refresh is outstanding. Browser dispatch is synchronous
 the application owns scheduling, refresh, cancellation between calls, and atomic
 validation/application of result preconditions.
 
+## VS Code client
+
+`editors/vscode` is a thin TypeScript client using `vscode-languageclient`. One
+native server handles the window's workspace folders and untitled documents.
+The client forwards editor settings at initialization, on configuration changes,
+and through scoped `workspace/configuration` requests. The standard LSP client
+handles document synchronization, dynamic file watchers, diagnostics, and providers.
+Formatting middleware rejects results after the document changes or closes, or
+the request is cancelled. Restart and shutdown operations are serialized.
+Fix All Safe Issues invokes VS Code's code-action command filtered to
+`source.fixAll.tex-ls`; the server owns fix selection and VS Code applies the edits.
+Inspect Project presents `tex-ls.inspectProject` in a read-only virtual JSON
+document. Neither command adds language analysis to the client.
+
+Platform-specific VSIX files bundle the corresponding native release executable.
+The extension runs in the workspace host for Remote SSH, WSL, and containers.
+The extension requires a trusted workspace. Compiler management, builds, and
+PDF preview belong to texe.
+
 ## The formatter and linter
 
 Formatting lowers syntax with effective signatures and changes trivia only. It must

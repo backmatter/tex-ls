@@ -1,7 +1,20 @@
 # Editor setup
 
-Configure your LSP client to run `tex-ls lsp` over stdio for LaTeX and BibTeX.
-Untitled buffers support local completion; save them to enable filesystem context.
+## VS Code
+
+In VS Code, open **Extensions**, search for **tex-ls** by **Backmatter**, and
+click **Install**. Open your document's folder and a `.tex` or `.bib` file.
+Allow workspace trust for your own projects so tex-ls can start.
+
+The [extension guide](../../editors/vscode/README.md) explains suggestions,
+fixes, and formatting. You do not need to install tex-ls separately.
+Creating and viewing PDFs needs a separate tool.
+
+## Other editors
+
+The sections below cover manual setup and advanced editor integration.
+Configure your editor's LSP client to run `tex-ls lsp` over stdio for LaTeX
+and BibTeX. Save new files to enable navigation between project files.
 
 ## Neovim
 
