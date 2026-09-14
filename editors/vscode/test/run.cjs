@@ -37,8 +37,17 @@ async function main() {
       extensionTestsEnv: { TEX_LS_TEST_WORKSPACE: temp },
       launchArgs: [workspace, '--user-data-dir', userData, '--extensions-dir', path.join(temp, 'extensions'),
         ...(process.platform === 'linux' ? ['--ozone-platform=x11'] : []),
-        '--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-gpu', '--no-sandbox'],
+        '--log', 'trace', '--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-gpu', '--no-sandbox'],
     });
+  } catch (error) {
+    const logs = path.join(temp, 'user', 'logs');
+    for (const name of await fs.readdir(logs, { recursive: true }).catch(() => [])) {
+      if (/tex-ls.*\.log$|exthost\.log$/.test(name)) {
+        const contents = await fs.readFile(path.join(logs, name), 'utf8');
+        console.error(`VS Code test log: ${name}\n${contents.slice(-30000)}`);
+      }
+    }
+    throw error;
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
