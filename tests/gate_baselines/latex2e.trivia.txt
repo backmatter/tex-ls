@@ -11,3 +11,6 @@
 ./required/latex-lab/latex-lab-new-or-2.dtx	format-error	format-error
 ./required/tools/array.dtx	format-error	format-error
 ./texmf/tex/latex/l3kernel/expl3-code.tex	format-error	format-error
+./texmf/tex/latex/tagpdf/verbatim-af-latex-lab-testphase.ltx	format-error	format-error
+./texmf/tex/latex/tagpdf/verbatim-alt-latex-lab-testphase.ltx	format-error	format-error
+./texmf/tex/latex/tagpdf/verbatim-mo-latex-lab-testphase.ltx	format-error	format-error

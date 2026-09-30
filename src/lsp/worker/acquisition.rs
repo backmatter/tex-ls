@@ -34,8 +34,9 @@ impl Worker {
                 .map(|member| {
                     (
                         &member.path,
+                        snapshot.file_text(member.file).contains('\\'),
                         snapshot
-                            .file_references(member.file)
+                            .file_discovery_references(member.file)
                             .iter()
                             .map(|r| &r.candidates)
                             .collect::<Vec<_>>(),

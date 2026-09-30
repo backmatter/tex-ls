@@ -169,10 +169,20 @@ impl Worker {
                 if self.parent_keys.get(&(project, path.clone())) != Some(&parent_key) {
                     self.parent_keys.insert((project, path.clone()), parent_key);
                     if let Some(root) = &build.root {
-                        self.extra_sources
-                            .entry(project)
-                            .or_default()
-                            .insert(root.clone());
+                        let missing = {
+                            let snapshot = self.snapshot_for(&path);
+                            snapshot.lookup_file(root).is_none()
+                                && snapshot
+                                    .file_alias(root)
+                                    .and_then(|actual| snapshot.lookup_file(actual))
+                                    .is_none()
+                        };
+                        if missing {
+                            self.extra_sources
+                                .entry(project)
+                                .or_default()
+                                .insert(root.clone());
+                        }
                     }
                     self.acquisition_keys.remove(&(project, path.clone()));
                 }
@@ -368,6 +378,7 @@ impl Worker {
                 kind,
                 build: _,
                 options,
+                hierarchical,
             } => {
                 // Symbol reads, like formatting, run on the read pool against a
                 // snapshot (id-bound responses, not coalesced).
@@ -386,7 +397,16 @@ impl Worker {
                     {
                         return;
                     }
-                    run_symbols(&snapshot, id, &path, enc, kind, &options, &out_tx)
+                    run_symbols(
+                        &snapshot,
+                        id,
+                        &path,
+                        enc,
+                        kind,
+                        &options,
+                        hierarchical,
+                        &out_tx,
+                    )
                 });
             }
             WorkerJob::WorkspaceSymbols {
@@ -796,7 +816,7 @@ impl Worker {
                         self.db
                             .snapshot_for(project)
                             .expect("registered project")
-                            .tracked_files()
+                            .workspace_diagnostic_files()
                             .into_iter()
                             .map(|(path, _)| path)
                     })
@@ -826,7 +846,7 @@ impl Worker {
                         self.db
                             .snapshot_for(project)
                             .expect("registered project")
-                            .tracked_files()
+                            .workspace_diagnostic_files()
                     })
                     .map(|(path, _)| path)
                     .filter(|path| path_to_uri(path).is_some())
@@ -874,6 +894,14 @@ impl Worker {
                             enc,
                             |path| settings[path].0.rule_selection(),
                             |path| settings[path].1,
+                            |path| {
+                                !settings[path]
+                                    .0
+                                    .exclude
+                                    .clone()
+                                    .with_force_exclude(true)
+                                    .force_excludes(path)
+                            },
                             |batch| {
                                 if !requests.lock().expect("request ledger").contains(&id) {
                                     return false;

@@ -18,6 +18,31 @@ const FIXABLE: &str = "Wait ... what\n";
 const CLEAN: &str = "Nothing to see here.\n";
 const OPT_IN_DASH: &str = "A global--local search.\n";
 
+#[test]
+fn unknown_commands_respect_root_package_loads() {
+    let dir = repo_dir();
+    for (path, source) in [
+        (
+            "one.tex",
+            "\\documentclass{article}\n\\input{preamble}\n\\ce{H2O}\n",
+        ),
+        ("two.tex", "\\documentclass{article}\n\\ce{H2O}\n"),
+        ("preamble.tex", "\\usepackage{mhchem}\n"),
+    ] {
+        std::fs::write(dir.path().join(path), source).unwrap();
+    }
+    let output = lint(
+        dir.path(),
+        &["--output=json", "--select", "unknown-command", "."],
+        None,
+    );
+    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let findings = findings.as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert!(findings[0]["path"].as_str().unwrap().ends_with("two.tex"));
+    assert!(findings[0]["message"].as_str().unwrap().contains("\\ce"));
+}
+
 fn repo_dir() -> TempDir {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir(dir.path().join(".git")).unwrap();
@@ -119,6 +144,45 @@ fn json_reads_stdin_with_stdin_filepath() {
     let value: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
     // The stdin buffer is always reported as `<stdin>`, never the named path.
     assert_eq!(value[0]["path"], "<stdin>");
+}
+
+#[test]
+fn stdin_file_kind_controls_unknown_command_checks() {
+    let dir = repo_dir();
+    for filename in [
+        "doc.tex",
+        "doc.ltx",
+        "package.sty",
+        "class.cls",
+        "package.code.tex",
+        "source.dtx",
+        "install.ins",
+        "style.bbx",
+    ] {
+        let output = lint(
+            dir.path(),
+            &[
+                "--output=json",
+                "--select",
+                "unknown-command",
+                "--stdin-filepath",
+                filename,
+            ],
+            Some("\\projectinternalmacro\n"),
+        );
+        let findings: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("stdout is JSON");
+        let findings = findings.as_array().expect("array");
+        if matches!(filename, "doc.tex" | "doc.ltx") {
+            assert_eq!(findings.len(), 1, "{filename}: {findings:?}");
+            assert_eq!(findings[0]["rule"], "unknown-command");
+            assert_eq!(findings[0]["path"], "<stdin>");
+            assert!(!output.status.success());
+        } else {
+            assert!(findings.is_empty(), "{filename}: {findings:?}");
+            assert!(output.status.success());
+        }
+    }
 }
 
 #[test]

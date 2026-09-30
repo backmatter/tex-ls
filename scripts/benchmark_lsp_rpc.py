@@ -67,12 +67,24 @@ class Client:
     def status(self):
         return self.request("workspace/executeCommand", {"command": "tex-ls.inspectAcquisition", "arguments": []})
 
-    def ready(self):
+    def ready(self, quiet_seconds=0):
         deadline = time.monotonic() + 30
+        quiet_since = None
+        last_status = None
         while time.monotonic() < deadline:
             status = self.status()
-            if status["pendingFileAcquisitions"] == 0 and status["pendingCompilerAcquisitions"] == 0 and not status["installationLoading"]:
-                return status
+            idle = (status["pendingReads"] == 0
+                    and status["pendingFileAcquisitions"] == 0
+                    and status["pendingCompilerAcquisitions"] == 0
+                    and not status["installationLoading"])
+            if idle:
+                if status != last_status or quiet_since is None:
+                    quiet_since = time.monotonic()
+                if time.monotonic() - quiet_since >= quiet_seconds:
+                    return status
+            else:
+                quiet_since = None
+            last_status = status
             time.sleep(0.01)
         raise TimeoutError("Acquisition did not settle")
 
@@ -87,44 +99,59 @@ class Client:
             self.process.wait()
 
 
-def measure(binary, count, idle_seconds=3):
+def measure(binary, count, idle_seconds=3, texmf=False):
     with tempfile.TemporaryDirectory(prefix="tex-ls-rpc-") as temporary:
         root = pathlib.Path(temporary)
         includes = []
         for index in range(count - 1):
             name = f"chapter{index:04}"
-            (root / f"{name}.tex").write_text("Prose in a chapter.\n" * 32)
+            declaration = "% Benchmark command documentation.\n\\newcommand{\\benchmarkcommand}[1]{#1}\n" if index == 0 else ""
+            (root / f"{name}.tex").write_text(declaration + "Prose in a chapter.\n" * 32)
             includes.append(f"\\input{{{name}}}\n")
-        text = "\\documentclass{article}\n" + "".join(includes) + "\\sect"
+        declaration = "% Benchmark command documentation.\n\\newcommand{\\benchmarkcommand}[1]{#1}\n" if count == 1 else ""
+        text = "\\documentclass{article}\n" + declaration + "".join(includes) + "\\benchmarkcommand{Probe}\n\\sect"
         path = root / "main.tex"
         path.write_text(text)
         client = Client(binary)
         try:
-            client.request("initialize", {"rootUri": root.as_uri(), "capabilities": {"textDocument": {"diagnostic": {}}}, "initializationOptions": {"texmf": {"enabled": False}}})
+            client.request("initialize", {"rootUri": root.as_uri(), "capabilities": {"textDocument": {"diagnostic": {}}}, "initializationOptions": {"texmf": {"enabled": texmf}}})
             client.send("initialized", {})
             started = time.perf_counter()
             client.send("textDocument/didOpen", {"textDocument": {"uri": path.as_uri(), "languageId": "latex", "version": 1, "text": text}})
             params = {"textDocument": {"uri": path.as_uri()}, "position": {"line": text.count("\n"), "character": 5}}
             result = client.request("textDocument/completion", params)
             cold = (time.perf_counter() - started) * 1000
-            assert any(item["label"] == "section" for item in result["items"])
-            initial = client.ready()
+            assert any(item["label"] == "section" for item in result["items"]), result
+            initial = client.ready(quiet_seconds=0.25)
             before = initial["sourceReadAttempts"]
             compiler_before = initial["compilerProbeAttempts"]
             warm = []
+            hover_samples = []
+            definition_samples = []
             for version in range(2, 7):
                 changed = f"Prose edit {version}.\n" + text
                 client.send("textDocument/didChange", {"textDocument": {"uri": path.as_uri(), "version": version}, "contentChanges": [{"text": changed}]})
                 started = time.perf_counter()
                 result = client.request("textDocument/completion", {**params, "position": {"line": changed.count("\n"), "character": 5}})
                 warm.append((time.perf_counter() - started) * 1000)
-                assert any(item["label"] == "section" for item in result["items"])
+                assert any(item["label"] == "section" for item in result["items"]), result
+                at = changed.rindex(r"\benchmarkcommand") + 2
+                feature_params = {"textDocument": {"uri": path.as_uri()}, "position": position(changed, at)}
+                started = time.perf_counter()
+                hover = client.request("textDocument/hover", feature_params)
+                hover_samples.append((time.perf_counter() - started) * 1000)
+                assert hover is not None and "Benchmark command documentation." in json.dumps(hover), hover
+                started = time.perf_counter()
+                definitions = client.request("textDocument/definition", feature_params)
+                definition_samples.append((time.perf_counter() - started) * 1000)
+                expected_path = path if count == 1 else root / "chapter0000.tex"
+                assert len(definitions) == 1 and definitions[0]["uri"] == expected_path.as_uri(), definitions
             settled = client.ready()
             reads = settled["sourceReadAttempts"] - before
             compiler_probes = settled["compilerProbeAttempts"] - compiler_before
             assert compiler_probes == 0, f"Prose edits caused {compiler_probes} compiler artifact probes"
             assert reads == 0, f"Prose edits caused {reads} dependency reads"
-            return {"idle_process_activity": idle_activity(client, idle_seconds), "files": count, "cold_ms": round(cold, 3), "warm_p50_ms": round(statistics.median(warm), 3), "warm_max_ms": round(max(warm), 3), "cold_source_reads": before, "warm_source_reads": reads, "cold_compiler_probes": compiler_before, "warm_compiler_probes": compiler_probes}
+            return {"idle_process_activity": idle_activity(client, idle_seconds), "texmf": texmf, "files": count, "cold_ms": round(cold, 3), "warm_p50_ms": round(statistics.median(warm), 3), "warm_max_ms": round(max(warm), 3), "hover_p50_ms": round(statistics.median(hover_samples), 3), "hover_max_ms": round(max(hover_samples), 3), "definition_p50_ms": round(statistics.median(definition_samples), 3), "definition_max_ms": round(max(definition_samples), 3), "cold_source_reads": before, "warm_source_reads": reads, "cold_compiler_probes": compiler_before, "warm_compiler_probes": compiler_probes}
         finally:
             client.close()
 
@@ -168,7 +195,7 @@ def memory(client):
     return {name: int(value) for name, value in values.items()}
 
 
-def measure_project(binary, path, idle_seconds=3):
+def measure_project(binary, path, idle_seconds=3, texmf=False):
     path = pathlib.Path(path).resolve()
     text = path.read_text(encoding="utf-8")
     is_bib = path.suffix == ".bib"
@@ -195,7 +222,7 @@ def measure_project(binary, path, idle_seconds=3):
         result = client.request(method, params)
         return result, round((time.perf_counter() - start) * 1000, 3)
     try:
-        client.request("initialize", {"rootUri": path.parent.as_uri(), "capabilities": {"textDocument": {"diagnostic": {}}}, "initializationOptions": {"texmf": {"enabled": False}}})
+        client.request("initialize", {"rootUri": path.parent.as_uri(), "capabilities": {"textDocument": {"diagnostic": {}}}, "initializationOptions": {"texmf": {"enabled": texmf}}})
         client.send("initialized", {})
         started = time.perf_counter()
         client.send("textDocument/didOpen", {"textDocument": {**document, "languageId": "bibtex" if is_bib else "latex", "version": 1, "text": text}})
@@ -211,7 +238,17 @@ def measure_project(binary, path, idle_seconds=3):
         previous = [{"uri": item["uri"], "value": item["resultId"]} for item in workspace["items"]]
         unchanged_workspace, workspace_unchanged_ms = timed("workspace/diagnostic", {"previousResultIds": previous})
         assert all(item["kind"] == "unchanged" for item in unchanged_workspace["items"])
-        baseline = client.ready()
+        # Feature requests can acquire inputs on first use, including the
+        # installed format source for definition. Warm them before counting IO
+        # caused by the subsequent prose edits.
+        if not is_bib:
+            features = {"textDocument": document, "position": position(text, probe_at - 1)}
+            client.request("textDocument/completion", {"textDocument": document, "position": position(text, probe_at)})
+            client.request("textDocument/hover", features)
+            client.request("textDocument/definition", features)
+        # Background acquisition can enqueue another compiler batch after an
+        # instant with no pending jobs. Count edit IO only after a quiet window.
+        baseline = client.ready(quiet_seconds=0.25)
         initial_memory = memory(client)
         samples = []
         previous_id = report["resultId"]
@@ -225,16 +262,20 @@ def measure_project(binary, path, idle_seconds=3):
             completion = client.request("textDocument/completion", {"textDocument":document,"position":position(text, probe_at)})
             edit_completion_ms = (time.perf_counter() - started) * 1000
             assert any(item["label"].lower() == expected for item in completion["items"]), (path, expected)
+            features = {"textDocument": document, "position": position(text, probe_at - 1)}
+            hover, hover_ms = timed("textDocument/hover", features)
+            assert hover is not None, (path, features)
+            definitions, definition_ms = timed("textDocument/definition", features)
             report, edited_diagnostic_ms = timed("textDocument/diagnostic", {"textDocument":document,"previousResultId":previous_id})
             assert report["kind"] == "full", "editing source must invalidate diagnostics"
             previous_id = report["resultId"]
-            samples.append({"edit_completion_ms":round(edit_completion_ms, 3), "diagnostic_ms":edited_diagnostic_ms})
+            samples.append({"edit_completion_ms":round(edit_completion_ms, 3), "hover_ms":hover_ms, "definition_ms":definition_ms, "definition_count":len(definitions or []), "diagnostic_ms":edited_diagnostic_ms})
         settled = client.ready()
         reads = settled["sourceReadAttempts"] - baseline["sourceReadAttempts"]
         probes = settled["compilerProbeAttempts"] - baseline["compilerProbeAttempts"]
         assert reads == 0, f"Body edits caused {reads} dependency reads"
         assert probes == 0, f"Body edits caused {probes} compiler probes"
-        return {"idle_process_activity":idle_activity(client, idle_seconds), "project":str(path), "sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
+        return {"idle_process_activity":idle_activity(client, idle_seconds), "texmf":texmf, "project":str(path), "sha256":hashlib.sha256(path.read_bytes()).hexdigest(),
                 "source_bytes":path.stat().st_size,"structure_items":len(symbols),
                 "cold_structure_ms":round(first_structure,3),"cold_ready_ms":round(ready_ms,3),
                 "document_diagnostic_ms":diagnostic_ms,"unchanged_document_ms":unchanged_ms,
@@ -252,13 +293,14 @@ if __name__ == "__main__":
     parser.add_argument("binary", nargs="?", default="target/release/tex-ls")
     parser.add_argument("--project", action="append", help="Real root .tex or .bib; repeat for multiple workloads")
     parser.add_argument("--idle-seconds", type=float, default=3, help="Idle observation per workload; 0 disables it")
+    parser.add_argument("--texmf", action="store_true", help="Include the local TeX installation in acquisition and feature measurements")
     args = parser.parse_args()
     if args.idle_seconds < 0:
         parser.error("--idle-seconds must be nonnegative")
     binary = str(pathlib.Path(args.binary).resolve())
     if args.project:
         for project in args.project:
-            print(json.dumps(measure_project(binary, project, args.idle_seconds)), flush=True)
+            print(json.dumps(measure_project(binary, project, args.idle_seconds, args.texmf)), flush=True)
     else:
         for size in [1, 100, 1000]:
-            print(json.dumps(measure(binary, size, args.idle_seconds)), flush=True)
+            print(json.dumps(measure(binary, size, args.idle_seconds, args.texmf)), flush=True)

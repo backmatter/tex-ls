@@ -1,6 +1,6 @@
 latex3	corpus	files=320	bytes=9310287
 latex3	word-typing	spliced=3075/4180	token=3075	verbatim=0	math=0	region=0	files=307
-latex3	word-deleting	spliced=3009/4180	token=3005	verbatim=4	math=0	region=0	files=307
+latex3	word-deleting	spliced=3004/4180	token=3000	verbatim=4	math=0	region=0	files=307
 latex3	protected-typing	spliced=435/2440	token=0	verbatim=435	math=0	region=0	files=169
 latex3	math-word-typing	spliced=405/520	token=405	verbatim=0	math=0	region=0	files=41
 latex3	math-shape-typing	spliced=15/440	token=0	verbatim=0	math=15	region=0	files=36

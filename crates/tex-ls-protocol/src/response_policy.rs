@@ -573,6 +573,12 @@ fn flatten_symbols(
     out: &mut Vec<Value>,
 ) {
     for mut item in items {
+        // Some providers construct the negotiated flat form directly to avoid
+        // allocating a large hierarchical JSON tree first.
+        if item.get("location").is_some() {
+            out.push(item);
+            continue;
+        }
         let children = item.get_mut("children").map(Value::take);
         let name = item["name"].take();
         let parent = name.clone();

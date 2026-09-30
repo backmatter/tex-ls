@@ -563,6 +563,46 @@ impl Worker {
             }
             self.acquisition_keys.remove(&(project, path.clone()));
         }
+        if let WorkerJob::GotoDefinition { path, position, .. } = &job {
+            let project = self.project_for(path);
+            let snapshot = self.snapshot_for(path);
+            if let Some(file) = snapshot.lookup_file(path)
+                && file_kind_for(path).is_latex()
+            {
+                let offset = snapshot
+                    .file_line_index(file, self.encoding)
+                    .offset_at(position.line, position.character);
+                let target = tex_ls_analysis::hover::signature_target_at(
+                    &snapshot.parsed_tree(file),
+                    offset,
+                );
+                if let Some(target) = target
+                    && matches!(target.kind, tex_ls_analysis::hover::TargetKind::Command)
+                    && tex_ls_parser::semantic::signature::builtin()
+                        .command(&target.name)
+                        .is_some()
+                {
+                    for source in snapshot.format_source_paths() {
+                        if snapshot.lookup_file(&source).is_none()
+                            && snapshot
+                                .file_alias(&source)
+                                .and_then(|actual| snapshot.lookup_file(actual))
+                                .is_none()
+                            && !matches!(
+                                snapshot.location_observation(&source).kind,
+                                tex_ls_analysis::external::Observation::Absent
+                                    | tex_ls_analysis::external::Observation::Error(_)
+                            )
+                        {
+                            self.extra_sources
+                                .entry(project)
+                                .or_default()
+                                .insert(source);
+                        }
+                    }
+                }
+            }
+        }
         let waiting = match &job {
             WorkerJob::Completion {
                 uri,

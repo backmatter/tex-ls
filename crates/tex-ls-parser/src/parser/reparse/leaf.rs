@@ -53,8 +53,8 @@ pub(super) struct Context {
 ///   attachment declined outright — a shape gate demoting a `[`, a `\documentclass`
 ///   stranded at the end of a group. The lexer's forward scans read raw text and do
 ///   not care what the tree made of it.
-/// - **By immediate adjacency**, for the reads that only ever fire on the token
-///   right after another: a parameter digit after a `#`.
+/// - **By adjacency**, for a parameter digit after a `#` or an optional `=` after
+///   a `\let` definee. The latter skips trivia across line endings.
 ///
 /// The line scan runs back from `relex_from`, the first token of the span the tier
 /// actually relexes, rather than from the leaf. For the token tier the two are the
@@ -95,6 +95,21 @@ pub(super) fn context_admits(leaf: &SyntaxToken, relex_from: &SyntaxToken) -> Op
         prev = token.prev_token();
     }
 
+    // `\let`'s optional `=` changes which token is copied. Its definee can be
+    // a control word or symbol, and both gaps may contain line endings.
+    if leaf.kind() == SyntaxKind::WORD
+        && let Some(definee) = previous_nontrivia(leaf)
+        && matches!(
+            definee.kind(),
+            SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+        )
+        && let Some(head) = previous_nontrivia(&definee)
+        && head.kind() == SyntaxKind::CONTROL_WORD
+        && head.text() == "\\let"
+    {
+        return None;
+    }
+
     // `#1`: the expl3 plan reads whether the token after a `#` is a parameter
     // digit. That read fires nowhere else, so adjacency is the whole guard.
     if leaf
@@ -105,6 +120,17 @@ pub(super) fn context_admits(leaf: &SyntaxToken, relex_from: &SyntaxToken) -> Op
     }
 
     Some(Context { in_math })
+}
+
+fn previous_nontrivia(token: &SyntaxToken) -> Option<SyntaxToken> {
+    let mut previous = token.prev_token();
+    while let Some(candidate) = previous {
+        if !crate::parser::grammar::is_grammar_trivia(candidate.kind()) {
+            return Some(candidate);
+        }
+        previous = candidate.prev_token();
+    }
+    None
 }
 
 /// Whether a control word is an expl3 name — the heads whose argspec suffix directs
@@ -188,7 +214,7 @@ fn word_reads_are_inert(old: &str, new: &str, ctx: Context) -> bool {
         return false;
     }
 
-    // `at_star_variant_marker`: a lone `*` folds into the invocation before it.
+    // Starred invocations and definition commands consume a lone `*`.
     if old == "*" || new == "*" {
         return false;
     }
@@ -296,6 +322,11 @@ mod tests {
     use Verdict::*;
 
     const TEXT_READS: &[(&str, Verdict)] = &[
+        ("self.text(),", ControlSequence),
+        (
+            r#".is_some_and(|token| token.kind == SyntaxKind::WORD && token.text == "*")"#,
+            Guarded("the `*` ban in word_reads_are_inert; definition ancestors also decline"),
+        ),
         (
             "&& P::MATH_ANCHOR.anchors(t.text.as_str()) =>",
             ControlSequence,
@@ -317,7 +348,12 @@ mod tests {
         (".map(|t| t.text.as_str())", Accessor),
         (".text", ControlSequence),
         (r".then(|| t.text.strip_prefix('\\'))", ControlSequence),
-        ("0 => definition_name_slots(&t.text),", ControlSequence),
+        ("def_name_slots = operand_slots(&t.text);", ControlSequence),
+        (r#"let_assignment = t.text == "\\let";"#, ControlSequence),
+        (
+            r#"&& t.text == "=""#,
+            Context("the optional assignment token after a `\\let` definee, across trivia"),
+        ),
         (
             r#"Some(SyntaxKind::CONTROL_SYMBOL) => matches!(self.text(), "\\]" | "\\)"),"#,
             ControlSequence,

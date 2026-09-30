@@ -29,6 +29,30 @@ fn score(query: &str, field: &str) -> Option<usize> {
     Some(100 + gaps)
 }
 
+pub(crate) struct MatchQuery {
+    query: String,
+    tokens: Vec<String>,
+}
+
+impl MatchQuery {
+    pub(crate) fn new(query: &str) -> Self {
+        let query = query.to_lowercase();
+        let tokens = query.split_whitespace().map(str::to_owned).collect();
+        Self { query, tokens }
+    }
+
+    pub(crate) fn score_item(&self, item: &CompletionItem) -> Option<usize> {
+        self.score_text(item.filter_text.as_deref().unwrap_or(&item.label))
+    }
+
+    pub(crate) fn score_text(&self, text: &str) -> Option<usize> {
+        let search = text.to_lowercase();
+        self.tokens.iter().try_fold(0usize, |total, token| {
+            score(token, &search).map(|score| total + score)
+        })
+    }
+}
+
 pub fn rank(
     items: Vec<CompletionItem>,
     query: &str,
@@ -36,23 +60,21 @@ pub fn rank(
     limit: usize,
     recompute: bool,
 ) -> CompletionList {
-    let query = query.to_lowercase();
-    let tokens: Vec<_> = query.split_whitespace().collect();
+    let matcher = MatchQuery::new(query);
     let mut ranked: Vec<_> = items
         .into_iter()
         .filter_map(|item| {
             let label = item.label.to_lowercase();
-            let search = item
-                .filter_text
-                .as_deref()
-                .unwrap_or(&item.label)
-                .to_lowercase();
-            let score = tokens.iter().try_fold(0usize, |total, token| {
-                score(token, &search).map(|score| total + score)
-            })?;
+            let score = matcher.score_item(&item)?;
             let priority = relevance.get(&item.label).copied().unwrap_or(1);
             Some((
-                (label != query, priority, score, label, item.label.clone()),
+                (
+                    label != matcher.query,
+                    priority,
+                    score,
+                    label,
+                    item.label.clone(),
+                ),
                 item,
             ))
         })

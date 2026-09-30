@@ -50,14 +50,7 @@ pub(super) struct TriviaScan {
 
 impl Parser<'_> {
     pub(super) fn is_trivia(k: SyntaxKind) -> bool {
-        matches!(
-            k,
-            SyntaxKind::WHITESPACE
-                | SyntaxKind::NEWLINE
-                | SyntaxKind::COMMENT
-                | SyntaxKind::DOC_MARGIN
-                | SyntaxKind::GUARD
-        )
+        super::is_grammar_trivia(k)
     }
 
     pub(super) fn skip_trivia(&mut self) {

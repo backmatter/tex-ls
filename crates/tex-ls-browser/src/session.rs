@@ -714,9 +714,20 @@ impl Session {
                 self.encoding,
             )),
             "textDocument/documentSymbol" => encode(if kind == FileKind::Bib {
-                compute_bib_symbols(&snapshot, path, self.encoding)
+                compute_bib_symbol_response(
+                    &snapshot,
+                    path,
+                    self.encoding,
+                    self.policy
+                        .supports("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport"),
+                )
             } else {
-                compute_symbols(&snapshot, path, self.encoding, &settings.outline)
+                lsp_types::DocumentSymbolResponse::DocumentSymbolList(compute_symbols(
+                    &snapshot,
+                    path,
+                    self.encoding,
+                    &settings.outline,
+                ))
             }),
             "textDocument/codeAction" => {
                 let request: CodeActionParams = decode(params)?;

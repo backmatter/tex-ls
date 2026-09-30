@@ -29,17 +29,34 @@ pub fn signature_target_at(root: &SyntaxNode, offset: usize) -> Option<SigTarget
     };
 
     for token in [left, right].into_iter().flatten() {
-        if token.kind() == SyntaxKind::CONTROL_WORD
-            && let Some(parent) = token.parent()
-            && parent.kind() == SyntaxKind::COMMAND
+        if matches!(
+            token.kind(),
+            SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+        ) && token.text_range().contains(at)
         {
             return Some(SigTarget {
                 kind: TargetKind::Command,
-                name: token.text().trim_start_matches('\\').to_string(),
+                name: token
+                    .text()
+                    .strip_prefix('\\')
+                    .unwrap_or(token.text())
+                    .to_string(),
                 range: token.text_range(),
             });
         }
-        if let Some(target) = environment_target(&token) {
+        if token.kind() == SyntaxKind::VERB && token.text().starts_with("\\verb") {
+            let range = TextRange::at(token.text_range().start(), TextSize::new(5));
+            if range.contains(at) {
+                return Some(SigTarget {
+                    kind: TargetKind::Command,
+                    name: "verb".into(),
+                    range,
+                });
+            }
+        }
+        if let Some(target) = environment_target(&token)
+            && target.range.contains(at)
+        {
             return Some(target);
         }
     }

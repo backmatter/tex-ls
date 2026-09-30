@@ -51,6 +51,7 @@ pub mod times_variable;
 pub mod unclosed_math_delimiter;
 pub mod undefined_citation;
 pub mod undefined_ref;
+pub mod unknown_command;
 pub mod unknown_option;
 pub mod unreferenced_label;
 pub mod verbatim_trailing_text;
@@ -97,6 +98,8 @@ pub use verbatim_trailing_text::VerbatimTrailingText;
 /// diagnostics with an empty path.
 pub struct RuleContext<'a> {
     pub path: &'a Path,
+    /// Source classification, which can differ from the reporting path for stdin.
+    pub file_kind: crate::source::FileKind,
     pub root: &'a SyntaxNode,
     pub model: &'a SemanticModel,
     /// Cross-file label resolution for the project `path` belongs to, or `None`
@@ -154,6 +157,7 @@ impl<'a> RuleContext<'a> {
     ) -> Self {
         Self {
             path,
+            file_kind: crate::source::file_kind_or_tex(path),
             root,
             model,
             resolution,
@@ -782,6 +786,7 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(MissingNonbreakingSpace),
         Box::new(ObsoleteEnvironment),
         Box::new(PrimitiveCommand),
+        Box::new(unknown_command::UnknownCommand),
         Box::new(DollarDisplayMath),
         Box::new(Ellipsis),
         Box::new(ExtraAlignmentTab),
@@ -874,6 +879,7 @@ pub const ALL_RULE_IDS: &[&str] = &[
     "missing-nonbreaking-space",
     "obsolete-environment",
     "primitive-command",
+    "unknown-command",
     "dollar-display-math",
     "ellipsis",
     "extra-alignment-tab",

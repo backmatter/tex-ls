@@ -1,5 +1,6 @@
 //! Symbol conversion from an analysis snapshot.
 use super::*;
+use tex_ls_analysis::bib::outline::BibSymbolKind;
 
 /// Convert the source outline and supplied last-build numbers to LSP symbols.
 pub fn compute_symbols(
@@ -34,6 +35,77 @@ pub fn compute_bib_symbols(
     .iter()
     .map(|item| bib_to_document_symbol(item, &idx))
     .collect()
+}
+
+/// Build the negotiated bibliography outline before allocating its JSON form.
+/// Flat clients do not need hierarchical ranges or an intermediate LSP tree.
+pub fn compute_bib_symbol_response(
+    snapshot: &Analysis,
+    path: &Path,
+    encoding: PositionEncoding,
+    hierarchical: bool,
+) -> lsp_types::DocumentSymbolResponse {
+    if hierarchical {
+        return lsp_types::DocumentSymbolResponse::DocumentSymbolList(compute_bib_symbols(
+            snapshot, path, encoding,
+        ));
+    }
+    let mut symbols = Vec::new();
+    if let Some(file) = snapshot.lookup_file(path)
+        && let Some(uri) =
+            path_to_uri(path).or_else(|| path.to_str().and_then(|uri| uri.parse().ok()))
+    {
+        let idx = snapshot.file_line_index(file, encoding);
+        for item in bib_outline(
+            snapshot.bib_semantic_model(file),
+            &snapshot.parsed_bib_tree(file),
+        ) {
+            let container = item.name.clone();
+            symbols.push(flat_bib_symbol(
+                item.name,
+                item.kind,
+                item.selection_range,
+                None,
+                &uri,
+                &idx,
+            ));
+            for child in item.children {
+                symbols.push(flat_bib_symbol(
+                    child.name,
+                    child.kind,
+                    child.selection_range,
+                    Some(container.clone()),
+                    &uri,
+                    &idx,
+                ));
+            }
+        }
+    }
+    lsp_types::DocumentSymbolResponse::SymbolInformationList(symbols)
+}
+
+#[allow(deprecated)]
+fn flat_bib_symbol(
+    name: String,
+    kind: BibSymbolKind,
+    range: TextRange,
+    container_name: Option<String>,
+    uri: &Uri,
+    idx: &LineIndex,
+) -> lsp_types::SymbolInformation {
+    lsp_types::SymbolInformation {
+        base_symbol_information: lsp_types::BaseSymbolInformation {
+            name,
+            kind: bib_symbol_kind(kind),
+            tags: None,
+            container_name,
+        },
+        deprecated: None,
+        location: Location {
+            uri: uri.clone(),
+            range: lsp_range(idx, range),
+        },
+    }
 }
 
 /// Bound result storage and perform position/URI construction only after ranking.
@@ -149,7 +221,7 @@ pub fn compute_projects_workspace_symbols(
             };
             let container = path.file_stem().unwrap_or_default().to_string_lossy();
             if member.kind == FileKind::Bib {
-                for item in bib_outline(
+                for item in tex_ls_analysis::bib::outline::top_level_outline(
                     snapshot.bib_semantic_model(member.file),
                     &snapshot.parsed_bib_tree(member.file),
                 ) {
@@ -298,9 +370,8 @@ pub fn normalize_toc_title(title: &str) -> String {
     title.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
-/// Convert a flat [`BibOutlineItem`] into an LSP [`DocumentSymbol`]. Bib entries
-/// have no nesting, so there are never children; the cite key is the name and the
-/// entry type the detail.
+/// Convert a bibliography entry and its field children into an LSP symbol.
+/// The cite key is the entry name and the entry type supplies its detail.
 #[allow(deprecated)] // `DocumentSymbol::deprecated` is a required struct field.
 pub fn bib_to_document_symbol(item: &BibOutlineItem, idx: &LineIndex) -> DocumentSymbol {
     let range = item.range;

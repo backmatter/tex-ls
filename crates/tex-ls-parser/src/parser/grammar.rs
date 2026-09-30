@@ -41,6 +41,17 @@ use trivia::{BLANK_LINE_NEWLINES, CommentMode};
 /// Kept at this path for parser and formatter callers.
 pub use facts::is_def_prefix_command;
 
+pub(crate) fn is_grammar_trivia(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::WHITESPACE
+            | SyntaxKind::NEWLINE
+            | SyntaxKind::COMMENT
+            | SyntaxKind::DOC_MARGIN
+            | SyntaxKind::GUARD
+    )
+}
+
 /// Re-exported for [`crate::parser::reparse`]'s token tier, whose guard has to
 /// name the same predicate the walk does rather than drift into a copy of it.
 pub(crate) use facts::is_definition_body_command as reads_definition_body;
@@ -546,6 +557,9 @@ struct Parser<'t> {
     /// [`Self::attach_arguments`] in [`Self::command`], so it covers the whole
     /// definition subtree (nested groups included) and nothing after it.
     in_def_body: bool,
+    /// Primitive replacement-group tokens may contain orphan math closers.
+    /// Keep this separate from environment pairing and alias recovery.
+    in_primitive_body: bool,
     /// Environment names whose `\begin` the brace-group gate demoted to a plain
     /// command ([`Self::environment_escapes_group`]). Their `\end` is then an
     /// orphan by construction — the gate removed its partner, not the author — so
@@ -622,6 +636,9 @@ struct Parser<'t> {
     /// Pre-scanned once because a false opener can otherwise pair with a later
     /// definition's delimiter and swallow both bodies (issue #129).
     def_parameter_dollars: std::collections::HashSet<usize>,
+    /// Replacement groups after a primitive definition's name and parameters.
+    /// Their tokens are stored code even when the name is an unbraced control word.
+    def_body_groups: std::collections::HashSet<usize>,
     /// Token indices of *environment-alias openers* — bare control words whose
     /// definition body is exactly `\begin{X}` — mapped to the target environment
     /// `X` (issue #109). Pre-scanned in [`Self::new`] for the same reason as
@@ -780,6 +797,7 @@ impl<'t> Parser<'t> {
             errors: Vec::new(),
             math_dollar: Vec::new(),
             in_def_body: false,
+            in_primitive_body: false,
             demoted_envs: std::collections::HashSet::new(),
             open_envs: Vec::new(),
             group_opens: Vec::new(),
@@ -790,6 +808,7 @@ impl<'t> Parser<'t> {
             doc_margin_lines: pre.doc_margin_lines,
             conditional_openers: pre.conditional_openers,
             def_parameter_dollars: pre.def_parameter_dollars,
+            def_body_groups: pre.def_body_groups,
             last_alias_closer: pre
                 .alias_closers
                 .keys()
@@ -1514,7 +1533,7 @@ impl<'t> Parser<'t> {
                         // issue #60) — an ordinary token, no diagnostic. In
                         // prose it still diagnoses, catching a `\[…\]` typo'd
                         // across a paragraph break on its closer.
-                        if !self.in_macro_code(self.pos) {
+                        if !self.in_macro_code(self.pos) && !self.in_primitive_body {
                             self.error(format!("unmatched `{sym}`"));
                         }
                         self.bump();
@@ -1573,6 +1592,16 @@ impl<'t> Parser<'t> {
     /// mirroring the `\left`/`\right` special case.
     fn command(&mut self) {
         let bare_input = self.text() == "\\input";
+        let accepts_definition_star = matches!(
+            self.text(),
+            "\\newcommand"
+                | "\\renewcommand"
+                | "\\providecommand"
+                | "\\DeclareRobustCommand"
+                | "\\newrobustcmd"
+                | "\\renewrobustcmd"
+                | "\\providerobustcmd"
+        );
         let builtin_args = builtin_command_args(self.text());
         let bracket = if is_big_delimiter_command(self.text()) {
             BracketPolicy::Forbid
@@ -1599,6 +1628,18 @@ impl<'t> Parser<'t> {
             .and_then(|slots| self.scan_expl3_unit(&slots));
         self.open(SyntaxKind::COMMAND);
         self.bump(); // the control word
+        if accepts_definition_star {
+            let scan = self.scan_trivia(self.pos, CommentMode::Skip);
+            if !scan.saw_blank_line
+                && self
+                    .tokens
+                    .get(scan.next)
+                    .is_some_and(|token| token.kind == SyntaxKind::WORD && token.text == "*")
+            {
+                self.skip_trivia();
+                self.bump();
+            }
+        }
         // A command definer may take its name as the next unbraced control
         // sequence. Consume a control-symbol name here as a plain token so it
         // is never misparsed as live syntax (`\def\[{…}` and
@@ -1846,6 +1887,14 @@ impl<'t> Parser<'t> {
 
     fn argument_group(&mut self, domain: ArgumentDomain) {
         debug_assert_eq!(self.kind(), Some(SyntaxKind::L_BRACE));
+        let saved_primitive = self.in_primitive_body;
+        let primitive_body = self.def_body_groups.contains(&self.pos);
+        self.in_primitive_body = saved_primitive || primitive_body;
+        let domain = if primitive_body {
+            ArgumentDomain::Unknown
+        } else {
+            domain
+        };
         let opener = self.token_span(self.pos);
         self.open(SyntaxKind::GROUP);
         self.bump(); // {
@@ -1867,6 +1916,7 @@ impl<'t> Parser<'t> {
             }
         }
         self.group_opens.pop();
+        self.in_primitive_body = saved_primitive;
         self.close();
     }
 

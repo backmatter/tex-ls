@@ -39,3 +39,23 @@ The sweep uses `.tex`, `.sty`, `.cls`, `.dtx`, and `.ins` files with their norma
 parse modes. The math tier declines `.dtx` because its fragment lacks docstrip
 line/column context. Token and protected tiers require matching docstrip state.
 The drivers do not target the region tier's multi-token paragraph edits.
+
+## Definition-context baselines
+
+Recognizing command-copy definitions and `\newif` adds 15 full-parse fallbacks
+through the existing definition-context guards. Per-edit comparisons against the
+previous parser account for all four changed rows:
+
+- `latex3/word-deleting` loses five token splices inside a `\RenewCommandCopy`
+  command node in `texmf/tex/latex/base/latexrelease.sty`.
+- `pgf/hazard-single` loses four. One edits the word after `\newif` on the same
+  line in `pgfsys-common-pdf-via-dvi.def`. Three edit leading comments attached to
+  `\newif` command nodes in `pgflibraryluamath.code.tex`, `pgfmathutil.code.tex`,
+  and `pgfsys-tex4ht.def`.
+- `latexindent/hazard-single` loses five, and `hazard-chain` loses one. These edit
+  leading comments attached to `\newif` command nodes in
+  `test-cases/commands/testcls.cls` and `test-cases/ifelsefi/conditional.tex`.
+
+These contexts now require a full parse because the leaf guards do not prove that
+definition operands and their surrounding trivia are inert. The equivalence
+assertions and splice-rate floors are unchanged.

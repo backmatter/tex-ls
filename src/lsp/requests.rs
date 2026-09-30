@@ -177,6 +177,7 @@ pub(super) fn on_document_symbol(
     state: &mut GlobalState,
     job_tx: &Sender<WorkerJob>,
     req: Request,
+    policy: &tex_ls_protocol::ResponsePolicy,
 ) {
     let id = req.id.clone();
     let params = match req.extract::<DocumentSymbolParams>(DocumentSymbolRequest::METHOD.as_str()) {
@@ -211,6 +212,8 @@ pub(super) fn on_document_symbol(
         kind,
         build,
         options: state.client_settings(&uri).outline.clone(),
+        hierarchical: policy
+            .supports("/textDocument/documentSymbol/hierarchicalDocumentSymbolSupport"),
     });
 }
 

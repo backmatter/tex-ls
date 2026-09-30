@@ -130,6 +130,23 @@ use tex_ls_analysis::bib::render::inline as citation_inline_detail;
 /// (tracked-document scope, else built-in/CWL only).
 fn command_detail(snapshot: &Analysis, file: &Path, name: &str) -> Option<(String, String)> {
     let scope = scope_for(snapshot, file);
+    if let Some(source) = snapshot.lookup_file(file)
+        && snapshot.editor_symbols(source).commands.contains(name)
+        && scope.command(name).is_none()
+    {
+        return Some((
+            format!("\\{name}"),
+            crate::command_docs::card(snapshot, file, name, false)?,
+        ));
+    }
+    if crate::command_docs::entry(name, false).is_some_and(|doc| doc.primitive)
+        && scope.command(name).is_none()
+    {
+        return Some((
+            format!("\\{name}"),
+            crate::command_docs::card(snapshot, file, name, false)?,
+        ));
+    }
     let (sig, provenance) = super::hover::lookup_command(&scope, name)?;
     let mut detail = format!("\\{name}");
     for arg in sig.args.iter() {
@@ -140,19 +157,29 @@ fn command_detail(snapshot: &Analysis, file: &Path, name: &str) -> Option<(Strin
     {
         detail = format!("{glyph}  {detail}");
     }
-    Some((detail, super::hover::render_command(name, sig, &provenance)))
+    Some((
+        detail,
+        crate::command_docs::card(snapshot, file, name, false)?,
+    ))
 }
 
 /// `(detail, documentation)` for an environment, like [`command_detail`] but with a
 /// `\begin{name}…` prototype.
 fn environment_detail(snapshot: &Analysis, file: &Path, name: &str) -> Option<(String, String)> {
     let scope = scope_for(snapshot, file);
-    let (sig, provenance) = super::hover::lookup_environment(&scope, name)?;
-    let detail = format!("\\begin{{{name}}}{}", arg_slots(&sig.args));
-    Some((
-        detail,
-        super::hover::render_environment(name, sig, &provenance),
-    ))
+    let documentation = crate::command_docs::card(snapshot, file, name, true)?;
+    let args = if scope.environment(name).is_none()
+        && snapshot
+            .lookup_file(file)
+            .is_some_and(|source| snapshot.editor_symbols(source).environments.contains(name))
+    {
+        String::new()
+    } else {
+        super::hover::lookup_environment(&scope, name)
+            .map(|(sig, _)| arg_slots(&sig.args))
+            .unwrap_or_default()
+    };
+    Some((format!("\\begin{{{name}}}{args}"), documentation))
 }
 
 /// The merged signature scope for `file` when it is a tracked document, else an
@@ -163,7 +190,7 @@ fn scope_for(snapshot: &Analysis, file: &Path) -> SignatureDb {
         return SignatureDb::default();
     }
     match snapshot.lookup_file(file) {
-        Some(source) => snapshot.scope_signatures(source).clone(),
+        Some(source) => snapshot.editor_signatures(source).clone(),
         None => SignatureDb::default(),
     }
 }

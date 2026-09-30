@@ -59,10 +59,19 @@ pub struct BibRuleContext<'a> {
     pub project: Option<&'a super::project::ProjectFacts>,
     pub path: &'a Path,
     pub root: &'a SyntaxNode,
+    /// Exact source of `root`, borrowed once for every value-scanning rule.
+    pub(crate) source: &'a str,
     pub model: &'a Model,
     /// The built-in field/entry signature database ([`crate::bib::semantic::builtin`]).
     pub db: &'a BibFieldDb,
     pub(crate) suppressions: &'a super::suppression::BibSuppressionMap,
+}
+
+impl BibRuleContext<'_> {
+    pub(crate) fn node_text(&self, node: &SyntaxNode) -> &str {
+        let range = node.text_range() - self.root.text_range().start();
+        &self.source[usize::from(range.start())..usize::from(range.end())]
+    }
 }
 
 /// A BibTeX lint rule shared across LSP read workers.

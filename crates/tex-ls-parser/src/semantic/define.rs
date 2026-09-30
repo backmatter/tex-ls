@@ -24,6 +24,8 @@
 //! syntax-only (decision #2). Environment names are brace-delimited *text*, never a
 //! bare control word, so they have no unbraced form to recover.
 
+pub mod editor;
+
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
@@ -271,20 +273,139 @@ pub fn scan_definition_sites(root: &SyntaxNode) -> Vec<DefSite> {
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
     {
-        let Some(name) = command_name(&command) else {
-            continue;
-        };
-        let site = match DefKind::of(&name) {
-            Some(DefKind::Command | DefKind::XparseCommand) => command_def_site(&command),
-            Some(DefKind::Def) => def_def_site(&command),
-            Some(
-                DefKind::Environment | DefKind::XparseEnvironment | DefKind::VerbatimEnvironment,
-            ) => environment_def_site(&command),
-            None => None,
-        };
-        sites.extend(site);
+        let extra = editor::extra_declarations(&command);
+        if extra.is_empty() {
+            sites.extend(ordinary_definition_site(&command));
+        } else {
+            sites.extend(extra.into_iter().map(|declaration| declaration.site));
+        }
     }
     sites
+}
+
+fn ordinary_definition_site(command: &SyntaxNode) -> Option<DefSite> {
+    let name = command_name(command)?;
+    let site = match DefKind::of(&name) {
+        Some(DefKind::Command | DefKind::XparseCommand) => command_def_site(command),
+        Some(DefKind::Def) => def_def_site(command),
+        Some(DefKind::Environment | DefKind::XparseEnvironment | DefKind::VerbatimEnvironment) => {
+            environment_def_site(command)
+        }
+        None => None,
+    };
+    site.or_else(|| {
+        if matches!(
+            DefKind::of(&name),
+            Some(DefKind::Command | DefKind::XparseCommand | DefKind::Def)
+        ) || matches!(
+            name.as_str(),
+            "let"
+                | "futurelet"
+                | "chardef"
+                | "mathchardef"
+                | "countdef"
+                | "dimendef"
+                | "skipdef"
+                | "muskipdef"
+                | "toksdef"
+                | "font"
+                | "newcount"
+                | "newdimen"
+                | "newskip"
+                | "newmuskip"
+                | "newtoks"
+                | "newbox"
+                | "newread"
+                | "newwrite"
+                | "newlength"
+                | "newsavebox"
+                | "DeclareMathSymbol"
+                | "DeclareMathDelimiter"
+                | "DeclareMathAccent"
+                | "DeclareMathOperator"
+                | "DeclareMathAlphabet"
+                | "DeclareMathRadical"
+                | "DeclareTextFontCommand"
+                | "DeclareOldFontCommand"
+                | "DeclareTextCommand"
+                | "ProvideTextCommand"
+                | "DeclareTextCommandDefault"
+                | "ProvideTextCommandDefault"
+                | "DeclareTextSymbol"
+                | "DeclareTextAccent"
+        ) || name.split_once(':').is_some_and(|(base, args)| {
+            args.starts_with('N')
+                && matches!(
+                    base,
+                    "cs_new"
+                        | "cs_set"
+                        | "cs_gset"
+                        | "cs_new_protected"
+                        | "cs_set_protected"
+                        | "cs_gset_protected"
+                        | "cs_new_nopar"
+                        | "cs_set_nopar"
+                        | "cs_gset_nopar"
+                        | "cs_new_protected_nopar"
+                        | "cs_set_protected_nopar"
+                        | "cs_gset_protected_nopar"
+                        | "cs_new_eq"
+                        | "cs_set_eq"
+                        | "cs_gset_eq"
+                )
+        }) {
+            literal_command_def_site(command)
+        } else {
+            None
+        }
+    })
+}
+
+/// Read a literal control sequence without interpreting its replacement or arity.
+/// Unlike signature extraction this also accepts control symbols and aliases.
+fn literal_command_def_site(command: &SyntaxNode) -> Option<DefSite> {
+    let head = command
+        .children_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .find(|token| token.kind() == SyntaxKind::CONTROL_WORD)?;
+    let mut token = head.next_token()?;
+    while is_trivia(token.kind()) || token.text() == "*" {
+        token = token.next_token()?;
+    }
+    let braced = token.text() == "{";
+    if braced {
+        token = token.next_token()?;
+        while is_trivia(token.kind()) {
+            token = token.next_token()?;
+        }
+    }
+    if !matches!(
+        token.kind(),
+        SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+    ) {
+        return None;
+    }
+    if token.text() == "\\csname" {
+        return None;
+    }
+    if braced {
+        let mut close = token.next_token()?;
+        while is_trivia(close.kind()) {
+            close = close.next_token()?;
+        }
+        if close.text() != "}" {
+            return None;
+        }
+    }
+    Some(DefSite {
+        name: SmolStr::new(token.text().strip_prefix('\\')?),
+        kind: DefSiteKind::Command,
+        name_range: token.text_range(),
+        range: TextRange::new(
+            command.text_range().start(),
+            command.text_range().end().max(token.text_range().end()),
+        ),
+    })
 }
 
 /// The [`DefSite`] of a `\newcommand`/xparse command definition, resolving the same
@@ -292,6 +413,10 @@ pub fn scan_definition_sites(root: &SyntaxNode) -> Vec<DefSite> {
 /// inside the name group) and unbraced `\newcommand\name` (the sibling `COMMAND`
 /// hosting the signature groups).
 fn command_def_site(command: &SyntaxNode) -> Option<DefSite> {
+    let literal = literal_command_def_site(command)?;
+    if literal.name.chars().count() == 1 && !literal.name.chars().all(char::is_alphabetic) {
+        return Some(literal);
+    }
     let def = resolve_command_def(command)?;
     let name_range = if def.first_arg_group == 1 {
         let group = nth_group(command, 0)?;
@@ -313,6 +438,14 @@ fn command_def_site(command: &SyntaxNode) -> Option<DefSite> {
 /// The [`DefSite`] of a `\def`-family definition — the name is always the
 /// immediately-following sibling `COMMAND` (TeX has no braced `\def{\name}` form).
 fn def_def_site(command: &SyntaxNode) -> Option<DefSite> {
+    let literal = literal_command_def_site(command)?;
+    if command
+        .children_with_tokens()
+        .filter_map(|element| element.into_token())
+        .any(|token| token.text_range() == literal.name_range)
+    {
+        return Some(literal);
+    }
     let name_node = adjacent_sibling_command(command)?;
     let name = command_name(&name_node)?;
     let name_range = control_word_range(&name_node)?;
@@ -570,14 +703,22 @@ enum DefKind {
 impl DefKind {
     fn of(name: &str) -> Option<Self> {
         Some(match name {
-            "newcommand" | "renewcommand" | "providecommand" | "DeclareRobustCommand" => {
-                DefKind::Command
-            }
+            "newcommand"
+            | "renewcommand"
+            | "providecommand"
+            | "DeclareRobustCommand"
+            | "newrobustcmd"
+            | "renewrobustcmd"
+            | "providerobustcmd" => DefKind::Command,
             // Plain TeX `\def` and its global/expanded variants. `\let` is excluded: it
             // aliases an existing semantics rather than carrying a replacement body to scan.
             "def" | "edef" | "gdef" | "xdef" => DefKind::Def,
             "newenvironment" | "renewenvironment" => DefKind::Environment,
             "NewDocumentCommand"
+            | "NewExpandableDocumentCommand"
+            | "RenewExpandableDocumentCommand"
+            | "ProvideExpandableDocumentCommand"
+            | "DeclareExpandableDocumentCommand"
             | "RenewDocumentCommand"
             | "ProvideDocumentCommand"
             | "DeclareDocumentCommand" => DefKind::XparseCommand,
@@ -1393,6 +1534,36 @@ mod tests {
     fn sites_of(src: &str) -> Vec<DefSite> {
         assert_eq!(reconstruct(src), src, "reconstruct must round-trip");
         scan_definition_sites(&SyntaxNode::new_root(parse(src).green))
+    }
+
+    #[test]
+    fn definition_sites_include_symbols_aliases_and_declarations() {
+        for (source, name) in [
+            (r"\def\%{percent}", "%"),
+            (r"\def\]{close} \unrelated", "]"),
+            (r"\DeclareRobustCommand\[{open}", "["),
+            (r"\newcommand{\!}{space}", "!"),
+            (r"\let\alias=\original", "alias"),
+            (r"\newlength{\length}", "length"),
+            (r"\DeclareTextFontCommand{\textbf}{\bfseries}", "textbf"),
+            (r"\DeclareTextCommand{\accent}{T1}[1]{#1}", "accent"),
+            (r"\DeclareMathAlphabet{\mathsf}{OT1}{cmss}{m}{n}", "mathsf"),
+            (
+                r"\DeclareMathSymbol{\symbol}{\mathord}{letters}{42}",
+                "symbol",
+            ),
+            (
+                r"\ExplSyntaxOn \cs_new_protected:Npn \demo:n #1 {#1}",
+                "demo:n",
+            ),
+            (r"\ExplSyntaxOn \cs_set_eq:NN \alias \original", "alias"),
+        ] {
+            let sites = sites_of(source);
+            assert_eq!(sites.len(), 1, "{source}");
+            assert_eq!(sites[0].name, name, "{source}");
+            assert_eq!(&source[sites[0].name_range], format!("\\{name}"));
+        }
+        assert!(sites_of("% \\let\\hidden=\\other\n\\verb|\\def\\hidden{}|").is_empty());
     }
 
     #[test]

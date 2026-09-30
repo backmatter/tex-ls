@@ -63,7 +63,9 @@ impl BibSuppressionMap {
         let mut map = Self::default();
         let mut open: Vec<OpenRegion> = Vec::new();
 
-        for node in root.descendants() {
+        // Comment entries are top-level siblings. Field values cannot contain
+        // directives, so do not walk every value in a large bibliography.
+        for node in root.children() {
             if node.kind() != SyntaxKind::COMMENT_ENTRY {
                 continue;
             }

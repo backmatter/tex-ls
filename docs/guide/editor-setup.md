@@ -193,6 +193,75 @@ shared IPC location. Keep Unix socket paths short (about 100 bytes maximum).
 - Workspace symbol search returns up to 256 matches; narrow the query for more
   specific results. Multiple-range formatting merges overlapping expanded blocks.
 
+Go to Definition follows static command definitions in the document, included files,
+and loaded package sources. For known built-in commands it can also load the LaTeX
+kernel, `latex.ltx`, from the selected TEXMF tree on demand. This keeps ordinary
+typing and completion free of the kernel source-loading cost. The index refreshes automatically
+when tex-ls adds support for more source file types. Navigation recognizes literal
+command declarations, control symbols, aliases such as `\let`, and expl3 `N`-name
+command definitions, including literal `c` names. Clicking `\begin` or `\end` opens the command definition;
+clicking the name in braces opens the environment definition. Environments defined
+as a pair of `\name` and `\endname` commands are supported too.
+Hover and Ctrl-click treat the command and the braced name as separate targets;
+the braces themselves have no target.
+If an environment has no source declaration, Go to Definition on its name jumps
+to the matching `\begin` or `\end` name when the parser proves the pair. Its hover
+identifies the opposite delimiter and line. Incomplete and mismatched pairs do not
+offer that navigation target.
+For a shared source with several candidate roots, Go to Definition returns the
+possible destinations from those roots. Rename remains unavailable when the
+namespace is ambiguous.
+Installed sources must be available through TEXMF discovery. Commands implemented by the engine or created through expansion may have
+no source location. Workspace diagnostics skip installed package sources and paths
+excluded by `tex-ls.toml`. Opening an installed package or `latex.ltx` through
+navigation does not add diagnostics for that source to the Problems panel. Local
+package files still receive diagnostics.
+
+Completion, hover, and argument hints use definitions from those same sources.
+Files displayed by listing commands or linked as graphics remain navigable, but
+their contents do not define commands for the document.
+Supported declarations include `\NewCommandCopy` and its variants,
+`\NewExpandableDocumentCommand` and its variants, `\newif`, `\newtheorem`,
+and `\declaretheorem`. Aliases copy the signature available at their declaration;
+tex-ls does not invent argument hints when it only knows a command's name.
+Literal etoolbox declarations such as `\csdef` and `\csletcs`, counter commands
+such as `\thesample` from `\newcounter{sample}`, and expl3 variable, variant,
+and conditional declarations are also recognized. Generated names can be navigated
+to, but cannot be renamed automatically. Unsupported argument specifications retain
+their command or environment name without partial argument hints.
+For example, `\def\sample#1;{#1}` remains navigable but has no brace-argument snippet.
+Literal `\InputIfFileExists` paths are followed like `\input` paths.
+Biblatex's literal `style`, `bibstyle`, and `citestyle` options support file navigation,
+completion, and highlighting. A `style` value can open both its `.bbx` and `.cbx` files.
+Style names may continue across a TeX comment and the following indentation.
+Navigation and highlighting retain each fragment's range. Completion leaves such
+names unchanged because replacing one fragment would damage the full name.
+
+The `unknown-command` rule warns while editing when a command is absent from core
+metadata, loaded-package metadata, and scanned definitions. A package's completion
+suggestions do not suppress warnings when that package is not loaded. Loads in
+included sources and unconditional package dependencies count too.
+Compilation is not required. Open `.ltx` and `.tikz` documents receive the same
+unknown-command checks as `.tex` documents. See
+[lint suppression comments](linting.md#rules) for package-generated commands that the
+static checker cannot recognize.
+
+Hover, completion details, and signature help share documentation cards. Common
+commands and environments have short descriptions and manual links. Recognized TeX
+and e-TeX primitives get reference cards without invented brace arguments. Hover
+also works on control symbols, `\begin`/`\end`, and the head of `\verb`.
+
+Source-defined commands and environments show definition links. A unique definition
+also shows nearby comment lines and a bounded source excerpt, including comments
+above declarations split across lines. Package commands link to package manuals
+when their provenance is known. Loaded `.dtx` macro
+and environment documentation is shown when its code association is known. Local
+redefinitions use their own source information. tex-ls does not download manuals,
+execute TeX, or interpret source comments as Markdown commands. Package/class
+metadata and resolved file arguments, including themes and bibliography styles,
+provide source links. Descriptions are curated and do not cover every package macro;
+source information remains available for the other statically resolved names.
+
 Custom option keys and values belong in
 [`[options]`](../reference/configuration.md#option-completion-schemas).
 
@@ -207,3 +276,44 @@ Use `workspace/executeCommand` with `tex-ls.inspectProject` and
 `tex-ls.inspectAcquisition` takes no arguments and reports pending work, read
 counts, source-read failures, and installation issues. A TeX lookup times out after
 two seconds per process; local editing remains available during discovery.
+
+## Syntax and semantic highlighting
+
+Your theme chooses the colors. tex-ls classifies all LaTeX commands consistently,
+including custom commands, unknown commands, and both `\begin` and `\end`.
+Literal environment names share one classification. Package loading does not
+change command colors; unknown-command warnings use diagnostic underlines.
+Comments and verbatim bodies retain their syntax highlighting.
+With semantic highlighting enabled, the literal body of `\verb|...|` and a
+flat `\texttt{...}` argument use the theme's string color. They are printed
+examples: names inside them are not commands or file references for Ctrl-click.
+A TeX command nested inside `\texttt{...}` remains a command.
+
+The extension supplies a TextMate grammar for immediate highlighting and for editors
+with semantic highlighting disabled. Its command and environment scopes match the
+server's semantic classifications. Semantic information adds roles for reference
+keys, such as labels and citations. Other LaTeX extensions can also supply a grammar;
+VS Code's **Developer: Inspect Editor Tokens and Scopes** command shows the active
+syntax scopes, semantic token, and theme rule at the cursor.
+
+### File and module arguments
+
+Literal arguments use the same file roles for highlighting and Ctrl-click/F12:
+
+| Arguments | Examples | Target |
+| --- | --- | --- |
+| Classes and packages | `\documentclass`, `\usepackage`, `\RequirePackage` | `.cls` and `.sty` files |
+| Beamer themes | `\usetheme`, `\usecolortheme`, `\usefonttheme`, `\useinnertheme`, `\useoutertheme` | The matching `beamer…theme<name>.sty` file |
+| Graphics libraries | `\usetikzlibrary`, `\usepgflibrary` | `tikzlibrary<name>.code.tex` or `pgflibrary<name>.code.tex` |
+| Bibliography styles | `\bibliographystyle`, `\RequireBibliographyStyle`, `\RequireCitationStyle` | `.bst`, `.bbx`, or `.cbx` files |
+| Bibliography language mappings | Second argument of `\DeclareLanguageMapping` | `.lbx` file |
+| Source files | `\input`, `\include`, `\import`, `\subimport`, `\subfile`, related loaders | The referenced source file |
+| Bibliography databases | `\bibliography`, `\addbibresource` | `.bib` files |
+| Images and external content | `\includegraphics`, `\includesvg`, `\lstinputlisting`, related loaders | The referenced asset |
+
+Module names use the theme's namespace color; file paths use its string color.
+Names keep their coloring even if a file is missing. Navigation requires a resolved
+local or installed target. Comma-separated lists link each name separately, and
+local files take precedence over installed files. Section titles and other prose
+arguments remain ordinary text. Macro-expanded names are not guessed.
+Biblatex `.bbx`, `.cbx`, and `.lbx` files open as LaTeX package code.

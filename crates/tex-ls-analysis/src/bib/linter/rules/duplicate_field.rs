@@ -66,7 +66,7 @@ impl BibRule for DuplicateField {
         &[SyntaxKind::ENTRY]
     }
 
-    fn check(&self, el: &SyntaxElement, _ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
+    fn check(&self, el: &SyntaxElement, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
         let Some(entry) = el.as_node() else {
             return;
         };
@@ -93,7 +93,7 @@ impl BibRule for DuplicateField {
             };
 
             // Identical value → deleting this redundant copy is semantics-preserving.
-            let identical = matches!((kept, &value), (Some(a), Some(b)) if a.to_string().trim() == b.to_string().trim());
+            let identical = matches!((kept, &value), (Some(a), Some(b)) if ctx.node_text(a).trim() == ctx.node_text(b).trim());
             let fix = identical
                 .then(|| {
                     super::edits::field_deletion_fix(
@@ -143,6 +143,7 @@ mod tests {
             project: None,
             path: std::path::Path::new("x.bib"),
             root: &root,
+            source: src,
             model: &model,
             db: crate::bib::semantic::builtin(),
             suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),

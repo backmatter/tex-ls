@@ -122,6 +122,7 @@ pub(super) enum WorkerJob {
         kind: FileKind,
         build: BuildConfig,
         options: tex_ls_protocol::presentation::OutlineOptions,
+        hierarchical: bool,
     },
     /// A `workspace/symbol` request: aggregate every tracked file's outline on the
     /// read pool and reply to `id` with the matches for `query`. The database

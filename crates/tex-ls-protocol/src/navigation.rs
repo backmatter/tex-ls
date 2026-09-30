@@ -67,6 +67,7 @@ pub fn compute_goto_definition(
             .map(|(_, range)| range)
     } else {
         let model = snapshot.semantic_model(origin_file);
+        let root = snapshot.parsed_tree(origin_file);
         rename_target_under_cursor(model, offset)
             .map(|target| target.span)
             .or_else(|| glossary::target(model, offset).map(|(_, range)| range))
@@ -78,8 +79,12 @@ pub fn compute_goto_definition(
                     .map(|reference| reference.range)
             })
             .or_else(|| {
-                name_refs::name_target_under_cursor(
-                    &snapshot.parsed_tree(origin_file),
+                tex_ls_analysis::hover::signature_target_at(&root, offset)
+                    .map(|target| target.range)
+            })
+            .or_else(|| {
+                name_refs::navigation_target_under_cursor(
+                    &root,
                     offset,
                     snapshot.definition_sites(origin_file),
                 )
@@ -194,21 +199,27 @@ fn definition_locations(
             }
         };
     }
-    // Not a `\ref`/`\cite`: a user command/environment name jumps to its
-    // definition sites (`\newcommand`/`\def`/xparse, `\newenvironment`) across
-    // the macro namespace. A name with no project definition (a built-in) falls
-    // through to the file-target tier below.
+    // A command/environment name jumps to static definitions in the project,
+    // loaded packages, or the preloaded format. An unresolved name falls through
+    // to literal file arguments below. Rename uses a separate project-only scope.
     let sites = snapshot.definition_sites(file);
-    if let Some(target) = name_refs::name_target_under_cursor(&root, offset, sites) {
-        let defs = name_definition_sites(snapshot, &lint_path, &target);
+    if let Some(target) = name_refs::navigation_target_under_cursor(&root, offset, sites) {
+        let defs = snapshot.navigation_definitions(&lint_path, &target);
         if !defs.is_empty() {
             return defs
                 .into_iter()
-                .filter_map(|(def_path, range)| {
-                    let file = snapshot.lookup_file(&def_path)?;
+                .filter_map(|(file, range)| {
+                    let def_path = snapshot.file_path(file);
                     let idx = snapshot.file_line_index(file, enc);
-                    location_for(&def_path, &idx, range)
+                    location_for(def_path, &idx, range)
                 })
+                .collect();
+        }
+        if target.kind == NameKind::Environment
+            && let Some(pair) = matching_environment_delimiter(&root, offset)
+        {
+            return location_for(path, &idx, pair.match_range)
+                .into_iter()
                 .collect();
         }
     }
@@ -233,15 +244,13 @@ pub fn file_target_under_cursor(
     snapshot
         .document_links(file)
         .into_iter()
-        .find(|link| link.range.contains_inclusive(at))
-        .and_then(|link| path_to_uri(&link.target))
-        .map(|uri| {
-            vec![Location {
-                uri,
-                range: Range::default(),
-            }]
+        .filter(|link| link.range.contains_inclusive(at))
+        .filter_map(|link| path_to_uri(&link.target))
+        .map(|uri| Location {
+            uri,
+            range: Range::default(),
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// The cite/ref key whose key range covers `offset`, refs taking precedence
@@ -535,6 +544,50 @@ pub fn environment_pair_ranges(root: &SyntaxNode, offset: usize) -> Vec<TextRang
             .into_iter()
             .collect(),
     }
+}
+
+/// A literal begin/end pair at the cursor. Only the name itself is a target;
+/// matching a delimiter command or brace would make Ctrl-hover claim a link that
+/// the environment-name hover does not cover. The parser supplies the enclosing
+/// environment, so this inspects two delimiters without walking the document.
+pub(crate) struct MatchingEnvironmentDelimiter {
+    pub match_range: TextRange,
+    pub origin_is_begin: bool,
+}
+
+pub(crate) fn matching_environment_delimiter(
+    root: &SyntaxNode,
+    offset: usize,
+) -> Option<MatchingEnvironmentDelimiter> {
+    let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
+    let delimiter = root.token_at_offset(at).find_map(|token| {
+        token
+            .parent_ancestors()
+            .find(|node| matches!(node.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
+            .filter(|node| {
+                tex_ls_parser::ast::environment_name_range(node)
+                    .is_some_and(|range| range.contains(at))
+            })
+    })?;
+    let environment = delimiter
+        .parent()
+        .filter(|node| node.kind() == SyntaxKind::ENVIRONMENT)?;
+    let begin = environment
+        .children()
+        .find(|node| node.kind() == SyntaxKind::BEGIN)?;
+    let end = environment
+        .children()
+        .find(|node| node.kind() == SyntaxKind::END)?;
+    let name = tex_ls_parser::ast::environment_name(&begin)?;
+    if name != tex_ls_parser::ast::environment_name(&end)? {
+        return None;
+    }
+    let origin_is_begin = delimiter.kind() == SyntaxKind::BEGIN;
+    let other = if origin_is_begin { &end } else { &begin };
+    Some(MatchingEnvironmentDelimiter {
+        match_range: tex_ls_parser::ast::environment_name_range(other)?,
+        origin_is_begin,
+    })
 }
 
 /// A proved local pair for editing. Body positions are accepted for code actions;
@@ -870,16 +923,7 @@ pub fn name_rename_allowed(
     if !snapshot.resolve_labels().is_closed(origin) {
         return false;
     }
-    let want = match target.kind {
-        NameKind::Command => DefSiteKind::Command,
-        NameKind::Environment => DefSiteKind::Environment,
-    };
-    if own_sites
-        .iter()
-        .any(|site| site.kind == want && site.name == target.name)
-    {
-        return true;
-    }
+    let _ = own_sites;
     !name_definition_sites(snapshot, origin, target).is_empty()
 }
 
@@ -995,11 +1039,12 @@ pub fn compute_rename(
                 let bare = new_name.strip_prefix('\\').unwrap_or(new_name);
                 if !is_valid_command_name(bare, &target.name)
                     || (bare != target.name
-                        && (tex_ls_analysis::hover::lookup_command(
-                            snapshot.scope_signatures(file),
-                            bare,
-                        )
-                        .is_some()
+                        && (snapshot.editor_symbols(file).commands.contains(bare)
+                            || tex_ls_analysis::hover::lookup_command(
+                                snapshot.editor_signatures(file),
+                                bare,
+                            )
+                            .is_some()
                             || !snapshot
                                 .name_references(
                                     &origin,
@@ -1018,11 +1063,15 @@ pub fn compute_rename(
             NameKind::Environment => {
                 if !is_valid_key(new_name)
                     || (new_name != target.name
-                        && (tex_ls_analysis::hover::lookup_environment(
-                            snapshot.scope_signatures(file),
-                            new_name,
-                        )
-                        .is_some()
+                        && (snapshot
+                            .editor_symbols(file)
+                            .environments
+                            .contains(new_name)
+                            || tex_ls_analysis::hover::lookup_environment(
+                                snapshot.editor_signatures(file),
+                                new_name,
+                            )
+                            .is_some()
                             || !snapshot
                                 .name_references(
                                     &origin,

@@ -71,7 +71,10 @@
           ".cls",
           ".dtx",
           ".def",
-          ".lco"
+          ".lco",
+          ".bbx",
+          ".cbx",
+          ".lbx"
         ],
         "configuration": "./language-configuration.json"
       },

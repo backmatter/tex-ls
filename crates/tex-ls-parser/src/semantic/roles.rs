@@ -260,6 +260,11 @@ pub enum FileRoleKind {
     Source(SourceRole),
     Bibliography,
     Package,
+    /// A module name translated to a filename by a known loader.
+    NamedFile {
+        prefix: &'static str,
+        suffix: &'static str,
+    },
     Class,
     Graphics,
     Svg,
@@ -278,8 +283,9 @@ pub struct FileRole {
 pub fn file_role(name: &str) -> Option<FileRole> {
     use FileRoleKind::*;
     use SourceRole::*;
+    let named = |prefix, suffix| NamedFile { prefix, suffix };
     let (kind, argument, directory, list) = match name {
-        "input" => (Source(Input), 0, None, false),
+        "input" | "InputIfFileExists" => (Source(Input), 0, None, false),
         "include" => (Source(Include), 0, None, false),
         "import" | "inputfrom" | "includefrom" => (Source(Import), 1, Some(0), false),
         "subimport" | "subinputfrom" | "subincludefrom" => (Source(SubImport), 1, Some(0), false),
@@ -290,6 +296,17 @@ pub fn file_role(name: &str) -> Option<FileRole> {
         "addbibresource" => (Bibliography, 0, None, false),
         "usepackage" | "RequirePackage" | "RequirePackageWithOptions" => (Package, 0, None, true),
         "documentclass" | "LoadClass" | "LoadClassWithOptions" => (Class, 0, None, false),
+        "RequireBibliographyStyle" => (named("", ".bbx"), 0, None, false),
+        "RequireCitationStyle" => (named("", ".cbx"), 0, None, false),
+        "DeclareLanguageMapping" => (named("", ".lbx"), 1, None, false),
+        "bibliographystyle" => (named("", ".bst"), 0, None, false),
+        "usetikzlibrary" => (named("tikzlibrary", ".code.tex"), 0, None, true),
+        "usepgflibrary" => (named("pgflibrary", ".code.tex"), 0, None, true),
+        "usetheme" => (named("beamertheme", ".sty"), 0, None, true),
+        "usecolortheme" => (named("beamercolortheme", ".sty"), 0, None, true),
+        "usefonttheme" => (named("beamerfonttheme", ".sty"), 0, None, true),
+        "useinnertheme" => (named("beamerinnertheme", ".sty"), 0, None, true),
+        "useoutertheme" => (named("beameroutertheme", ".sty"), 0, None, true),
         "includegraphics" => (Graphics, 0, None, false),
         "includesvg" => (Svg, 0, None, false),
         "includeinkscape" => (Inkscape, 0, None, false),
@@ -362,4 +379,285 @@ pub fn include_only(root: &crate::syntax::SyntaxNode) -> IncludeOnly {
         };
     }
     filter
+}
+
+/// Literal file-valued biblatex options. One `style` selects both style files.
+/// Values retain exact spans for links and highlighting. Comment-continued
+/// values have one span per fragment; completion must not replace just a fragment.
+pub fn biblatex_style_arguments(
+    command: &crate::syntax::SyntaxNode,
+) -> Vec<(FileRoleKind, rowan::TextRange, String)> {
+    use crate::ast::command_name;
+    use crate::syntax::SyntaxKind;
+    use rowan::{TextRange, TextSize};
+    if !command_name(command)
+        .is_some_and(|name| matches!(name.as_str(), "usepackage" | "RequirePackage"))
+        || !loads_biblatex(command)
+    {
+        return Vec::new();
+    }
+    let Some(options) = command
+        .children()
+        .find(|node| node.kind() == SyntaxKind::OPTIONAL)
+    else {
+        return Vec::new();
+    };
+    // Read TeX's literal spelling while retaining each original byte's position.
+    // A comment removes its newline and following indentation, but a blank line
+    // or ordinary whitespace cannot join two fragments of a filename.
+    let mut raw = String::new();
+    let mut positions = Vec::new();
+    let mut separators = Vec::new();
+    let mut depth = 0usize;
+    let mut after_comment = false;
+    let mut skip_indent = false;
+    for token in options
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        if (token.kind() == SyntaxKind::L_BRACKET
+            && token.text_range().start() == options.text_range().start())
+            || (token.kind() == SyntaxKind::R_BRACKET
+                && token.text_range().end() == options.text_range().end())
+        {
+            continue;
+        }
+        match token.kind() {
+            SyntaxKind::COMMENT => {
+                after_comment = true;
+                continue;
+            }
+            SyntaxKind::NEWLINE if after_comment => {
+                after_comment = false;
+                skip_indent = true;
+                continue;
+            }
+            SyntaxKind::WHITESPACE if skip_indent => continue,
+            _ => skip_indent = false,
+        }
+        match token.kind() {
+            SyntaxKind::L_BRACE => depth += 1,
+            SyntaxKind::R_BRACE => depth = depth.saturating_sub(1),
+            SyntaxKind::WORD if depth == 0 => {
+                let start = raw.len();
+                separators.extend(token.text().match_indices(',').map(|(at, _)| start + at));
+            }
+            _ => {}
+        }
+        raw.push_str(token.text());
+        positions.extend(
+            (0..token.text().len()).map(|at| token.text_range().start() + TextSize::new(at as u32)),
+        );
+    }
+    if depth == 0 {
+        separators.push(raw.len());
+    }
+    let mut result = Vec::new();
+    let mut start = 0;
+    for at in separators {
+        let segment = &raw[start..at];
+        if let Some((key, value)) = segment.split_once('=') {
+            let suffixes: &[&str] = match key.trim() {
+                "style" => &[".bbx", ".cbx"],
+                "bibstyle" => &[".bbx"],
+                "citestyle" => &[".cbx"],
+                _ => &[],
+            };
+            let mut lo = start + key.len() + 1 + value.len() - value.trim_start().len();
+            let mut text = value.trim();
+            if text.starts_with('{') && text.ends_with('}') {
+                text = &text[1..text.len() - 1];
+                lo += 1 + text.len() - text.trim_start().len();
+                text = text.trim();
+            }
+            if !text.chars().any(|c| {
+                c.is_whitespace()
+                    || matches!(c, '\\' | '#' | '{' | '}' | '%' | '=' | ',' | '[' | ']')
+            }) {
+                let mut ranges: Vec<TextRange> = Vec::new();
+                if text.is_empty() {
+                    let at = positions.get(lo).copied().unwrap_or_else(|| {
+                        options
+                            .last_token()
+                            .filter(|token| token.kind() == SyntaxKind::R_BRACKET)
+                            .map_or(options.text_range().end(), |token| {
+                                token.text_range().start()
+                            })
+                    });
+                    ranges.push(TextRange::empty(at));
+                }
+                for &position in &positions[lo..lo + text.len()] {
+                    match ranges.last_mut() {
+                        Some(previous) if previous.end() == position => {
+                            *previous =
+                                TextRange::new(previous.start(), position + TextSize::new(1));
+                        }
+                        _ => ranges.push(TextRange::at(position, TextSize::new(1))),
+                    }
+                }
+                for &suffix in suffixes {
+                    for &range in &ranges {
+                        result.push((
+                            FileRoleKind::NamedFile { prefix: "", suffix },
+                            range,
+                            text.to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+        start = at + 1;
+    }
+    result
+}
+
+fn loads_biblatex(command: &crate::syntax::SyntaxNode) -> bool {
+    use crate::ast::nth_group;
+    use crate::syntax::SyntaxKind;
+    use rowan::NodeOrToken;
+
+    let Some(group) = nth_group(command, 0) else {
+        return false;
+    };
+    let mut names = String::new();
+    let mut after_comment = false;
+    let mut skip_indent = false;
+    for element in group.children_with_tokens() {
+        let NodeOrToken::Token(token) = element else {
+            return false;
+        };
+        match token.kind() {
+            SyntaxKind::L_BRACE | SyntaxKind::R_BRACE => {}
+            SyntaxKind::COMMENT => after_comment = true,
+            SyntaxKind::NEWLINE if after_comment => {
+                after_comment = false;
+                skip_indent = true;
+            }
+            SyntaxKind::WHITESPACE if skip_indent => {}
+            SyntaxKind::WORD
+            | SyntaxKind::UNDERSCORE
+            | SyntaxKind::WHITESPACE
+            | SyntaxKind::NEWLINE => {
+                names.push_str(token.text());
+                after_comment = false;
+                skip_indent = false;
+            }
+            _ => return false,
+        }
+    }
+    names.split(',').any(|name| name.trim() == "biblatex")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ast::command_name, parser::parse};
+
+    #[test]
+    fn biblatex_style_options_ignore_comment_contents() {
+        for options in [
+            "% a comment\nstyle=numeric",
+            "% a comment,style=ghost,\nstyle=numeric",
+            "% an unmatched brace {\nstyle=numeric",
+            "style=numeric% a trailing comment\n",
+            "% 😀,style=ghost,\r\nstyle={numeric}% é\r\n",
+        ] {
+            let source = format!("\\usepackage[{options}]{{biblatex}}");
+            let root = parse(&source).syntax();
+            let command = root
+                .descendants()
+                .find(|node| command_name(node).as_deref() == Some("usepackage"))
+                .unwrap();
+            let arguments = biblatex_style_arguments(&command);
+            assert_eq!(arguments.len(), 2, "{source}: {arguments:?}");
+            for (_, range, value) in arguments {
+                assert_eq!(value, "numeric", "{source}");
+                assert_eq!(&source[range], value, "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn biblatex_style_options_use_token_delimiters() {
+        for options in [
+            r"foo=\{,style=numeric",
+            r"foo=\,style=ghost,style=numeric",
+            r"foo={\},style=ghost},style=numeric",
+        ] {
+            let source = format!("\\usepackage[{options}]{{biblatex}}");
+            let root = parse(&source).syntax();
+            let command = root
+                .descendants()
+                .find(|node| command_name(node).as_deref() == Some("usepackage"))
+                .unwrap();
+            let arguments = biblatex_style_arguments(&command);
+            assert_eq!(arguments.len(), 2, "{source}: {arguments:?}");
+            for (_, range, value) in arguments {
+                assert_eq!(value, "numeric", "{source}");
+                assert_eq!(&source[range], value, "{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn biblatex_style_options_recognize_comments_in_literal_package_lists() {
+        for packages in [
+            "biblatex% a comment\n",
+            "% a comment\nbiblatex",
+            "other,% 😀\r\nbiblatex",
+            "bib% a comment\nlatex",
+            "bib% a comment\n  latex",
+            "bib% a comment\r\n\tlatex",
+        ] {
+            let source = format!("\\usepackage[style=numeric]{{{packages}}}");
+            let root = parse(&source).syntax();
+            let command = root
+                .descendants()
+                .find(|node| command_name(node).as_deref() == Some("usepackage"))
+                .unwrap();
+            assert_eq!(biblatex_style_arguments(&command).len(), 2, "{source}");
+        }
+    }
+
+    #[test]
+    fn biblatex_style_options_preserve_comment_continued_value_spans() {
+        for value in ["num% 😀 comment\n  eric", "{num% comment\r\n\teric}"] {
+            let source = format!("\\usepackage[sty% key\nle={value}]{{biblatex}}");
+            let root = parse(&source).syntax();
+            let command = root
+                .descendants()
+                .find(|node| command_name(node).as_deref() == Some("usepackage"))
+                .unwrap();
+            let arguments = biblatex_style_arguments(&command);
+            assert_eq!(arguments.len(), 4, "{source}: {arguments:?}");
+            assert_eq!(
+                arguments
+                    .iter()
+                    .map(|(_, range, _)| &source[*range])
+                    .collect::<Vec<_>>(),
+                ["num", "eric", "num", "eric"]
+            );
+            assert!(arguments.iter().all(|(_, _, name)| name == "numeric"));
+        }
+        for value in ["num% comment\n\neric", "num eric", "num\neric"] {
+            let source = format!("\\usepackage[style={value}]{{biblatex}}");
+            let root = parse(&source).syntax();
+            let command = root
+                .descendants()
+                .find(|node| command_name(node).as_deref() == Some("usepackage"))
+                .unwrap();
+            assert!(biblatex_style_arguments(&command).is_empty(), "{source}");
+        }
+    }
+
+    #[test]
+    fn blank_line_does_not_continue_a_package_name() {
+        let source = "\\usepackage[style=numeric]{bib% comment\n\nlatex}";
+        let root = parse(source).syntax();
+        let command = root
+            .descendants()
+            .find(|node| command_name(node).as_deref() == Some("usepackage"))
+            .unwrap();
+        assert!(biblatex_style_arguments(&command).is_empty());
+    }
 }

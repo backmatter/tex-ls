@@ -118,11 +118,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     return document;
   };
-  register('tex-ls.fixAll', () => {
-    sourceDocument();
-    return vscode.commands.executeCommand('editor.action.codeAction', {
-      kind: 'source.fixAll.tex-ls', apply: 'ifSingle',
-    });
+  register('tex-ls.fixAll', async () => {
+    const document = sourceDocument();
+    const version = document.version;
+    const actions = await vscode.commands.executeCommand<(vscode.CodeAction | vscode.Command)[]>(
+      'vscode.executeCodeActionProvider', document.uri,
+      new vscode.Range(0, 0, 0, 0), 'source.fixAll.tex-ls',
+    );
+    if (document.isClosed || document.version !== version
+      || vscode.window.activeTextEditor?.document !== document) return false;
+    const fix = actions?.find((action): action is vscode.CodeAction =>
+      'edit' in action && action.kind?.value === 'source.fixAll.tex-ls' && !!action.edit);
+    if (!fix?.edit) return false;
+    return vscode.workspace.applyEdit(fix.edit);
   });
 
   // Keep one read-only report per window. Inspection never writes project files.

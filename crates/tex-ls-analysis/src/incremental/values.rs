@@ -10,6 +10,10 @@ pub enum QueryKind {
     NameOccurrences,
     Outline,
     FileReferences,
+    /// Ordered declarations and includes without source offsets.
+    EditorEvents,
+    /// The merged command names and signatures for one source's root.
+    EditorSymbols,
     IncludeComponents,
     ComponentLabels,
     ComponentCitations,

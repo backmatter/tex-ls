@@ -18,7 +18,7 @@ use tex_ls::config::Config;
 use tex_ls::config::ConfigSource;
 use tex_ls::file_discovery::{ExcludeFilter, FileDiscoveryError, collect_lint_files};
 use tex_ls_analysis::linter::{
-    Diagnostic, RuleSelection, apply_fixes, check_document_fixable, lint_document,
+    Diagnostic, RuleSelection, apply_fixes, check_document_fixable, lint_document_with_kind,
 };
 use tex_ls_analysis::source::{FileKind, file_kind_or_tex};
 use tex_ls_formatter::formatter::perturb::{
@@ -604,6 +604,7 @@ enum FileAnalysis {
 struct TexAnalysis {
     diagnostics: Vec<Diagnostic>,
     path: PathBuf,
+    kind: FileKind,
     green: GreenNode,
     model: SemanticModel,
     facts: FileFacts,
@@ -695,6 +696,7 @@ fn analyze_source(
             FileAnalysis::Tex(Box::new(TexAnalysis {
                 diagnostics,
                 path: path.to_path_buf(),
+                kind,
                 green,
                 model,
                 facts,
@@ -862,7 +864,11 @@ fn run_lint(
         let read_results: Vec<ReadResult> = files
             .par_iter()
             .map(|(path, kind)| match std::fs::read_to_string(path) {
-                Ok(content) => Ok((path.clone(), content, *kind)),
+                Ok(content) => Ok((
+                    tex_ls_analysis::source::normalize_path(path),
+                    content,
+                    *kind,
+                )),
                 Err(err) => Err((path.clone(), err)),
             })
             .collect();
@@ -948,7 +954,7 @@ fn collect_project_diagnostics_with_bibliographies(
         .collect();
 
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
-    let mut analyzed: Vec<(PathBuf, GreenNode, SemanticModel)> = Vec::new();
+    let mut analyzed: Vec<(PathBuf, FileKind, GreenNode, SemanticModel)> = Vec::new();
     let mut bib_analyzed = Vec::new();
     let mut supplemental_models = Vec::new();
     let mut facts: Vec<FileFacts> = Vec::new();
@@ -974,6 +980,7 @@ fn collect_project_diagnostics_with_bibliographies(
                 let TexAnalysis {
                     diagnostics: d,
                     path,
+                    kind,
                     green,
                     model,
                     facts: f,
@@ -986,7 +993,7 @@ fn collect_project_diagnostics_with_bibliographies(
                 label_inputs.push(label_input);
                 cite_facts.push(cite_fact);
                 option_facts.extend(o);
-                analyzed.push((path, green, model));
+                analyzed.push((path, kind, green, model));
             }
         }
     }
@@ -1021,7 +1028,7 @@ fn collect_project_diagnostics_with_bibliographies(
             &resolved_citations,
             analyzed
                 .iter()
-                .map(|(path, _, model)| (path.as_path(), model)),
+                .map(|(path, _, _, model)| (path.as_path(), model)),
             bib_analyzed
                 .iter()
                 .map(|(path, _, model)| (path.as_path(), model.as_ref()))
@@ -1042,18 +1049,66 @@ fn collect_project_diagnostics_with_bibliographies(
     // Phase 3 — lint every analyzed file in parallel, sharing the resolution by
     // reference. The red tree is materialized thread-locally from each green node
     // (red trees are not `Send`).
+    let command_names: HashMap<_, Vec<_>> = analyzed
+        .iter()
+        .map(|(path, _, green, _)| {
+            let names = tex_ls_parser::semantic::scan_definition_sites(&SyntaxNode::new_root(
+                green.clone(),
+            ))
+            .into_iter()
+            .filter(|site| site.kind == tex_ls_parser::semantic::DefSiteKind::Command)
+            .map(|site| site.name)
+            .collect();
+            (path.clone(), names)
+        })
+        .collect();
+    let package_facts: Vec<_> = analyzed
+        .iter()
+        .map(
+            |(path, _, green, _)| tex_ls_analysis::project::PackageFileFacts {
+                path: path.clone(),
+                package_edges: tex_ls_analysis::project::collect_package_edge_keys(
+                    &SyntaxNode::new_root(green.clone()),
+                    path.parent(),
+                ),
+            },
+        )
+        .collect();
+    let command_packages = tex_ls_analysis::project::PackageGraph::build(&package_facts);
     let lint_results: Vec<Vec<Diagnostic>> = analyzed
         .par_iter()
-        .map(|(path, green, model)| {
+        .map(|(path, kind, green, model)| {
             let root = SyntaxNode::new_root(green.clone());
-            lint_document(
+            let mut findings = lint_document_with_kind(
                 path,
+                *kind,
                 &root,
                 model,
                 Some(&resolved),
                 Some(&resolved_citations),
                 Some(&resolved_packages),
-            )
+            );
+            let scope =
+                tex_ls_analysis::name_refs::macro_namespace(&resolved, &command_packages, path);
+            tex_ls_analysis::linter::rules::unknown_command::suppress_defined(
+                &mut findings,
+                &green.to_string(),
+                scope
+                    .iter()
+                    .filter_map(|path| command_names.get(path))
+                    .flatten()
+                    .map(|name| name.as_str())
+                    .chain(declared.command_names()),
+            );
+            tex_ls_analysis::linter::rules::unknown_command::suppress_from_packages(
+                &mut findings,
+                &green.to_string(),
+                package_facts
+                    .iter()
+                    .filter(|fact| scope.contains(&fact.path))
+                    .flat_map(|fact| &fact.package_edges),
+            );
+            findings
         })
         .collect();
     for result in lint_results {

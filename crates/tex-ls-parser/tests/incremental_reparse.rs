@@ -39,6 +39,15 @@ use reparse_harness::{
 /// keystroke can reach. These are where the interesting edits live; the corpus
 /// sweep is breadth.
 const HAZARD_SNIPPETS: &[&str] = &[
+    "\\def\\enddisplaymath{\\]\\@ignoretrue}\n\\] after.\n",
+    "\\gdef\\close#1${\\) #1}\n\\let\\alias\\def\\ordinary{\\]}\n",
+    "\\let\\?=\\def\\ordinary{\\]}\n\\def\\close{\\]}\n",
+    "\\def\\outer{\\def\\inner}\n\\textbf{\\]}\n",
+    "\\string\\def\\ordinary{\\]}\n\\ifx\\relax\\def\\ordinary{\\]}\\fi\n",
+    "\\let\\alias\n%<*guard>\n=\\def\\frac{x_i}\n",
+    "\u{5c}NewExpandableDocumentCommand{\u{5c}opened}{m}{\u{5c}begin{align}#1}\n",
+    "\u{5c}NewCommandCopy{\u{5c}verb}{\u{5c}original}\nAfter.\n",
+    "\u{5c}ExplSyntaxOn\u{5c}cs_new:cpn {literal} #1 {#1}\u{5c}ExplSyntaxOff\n",
     "\\input chapters/a_b.tex\nAfter.\n",
     "\\input foo\\suffix\n",
     "\\input\nfile.tex\n",
@@ -98,6 +107,8 @@ const HAZARD_SNIPPETS: &[&str] = &[
     "α",
     "\\",
     "{",
+    "\\newrobustcmd*{\\theme}[2][]{#1#2}\n\\theme{x}\n",
+    "\\newcommand*{\\open}{\\begin{itemize}}\n\\newcommand*{\\close}{\\end{itemize}}\n",
 ];
 
 /// How many edits each snippet gets. Scaled by `TEX_LS_REPARSE_FUZZ_ITERS`, so the

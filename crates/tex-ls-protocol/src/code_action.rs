@@ -79,6 +79,85 @@ pub fn code_actions_for_range(
         .collect()
 }
 
+/// Suppression is an explicit user choice, never a preferred correction or Fix All.
+/// Check the inserted directive against the parser's actual suppression ranges.
+pub fn unknown_command_ignore_actions(
+    snapshot: &Analysis,
+    path: &Path,
+    uri: &Uri,
+    text: &TextBuffer,
+    range: Range,
+    findings: &[tex_ls_analysis::linter::Diagnostic],
+) -> Vec<CodeActionResponse> {
+    let idx = text.line_index();
+    let start = idx.offset_at(range.start.line, range.start.character);
+    let end = idx.offset_at(range.end.line, range.end.character);
+    let mut actions = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for finding in findings
+        .iter()
+        .filter(|d| d.rule == "unknown-command" && byte_ranges_overlap(d.start, d.end, start, end))
+    {
+        let line_start = text[..finding.start].rfind('\n').map_or(0, |at| at + 1);
+        let indent_end = text[line_start..]
+            .find(|ch| ch != ' ' && ch != '\t')
+            .map_or(text.len(), |at| line_start + at);
+        let indent = &text[line_start..indent_end];
+        let newline = if text[line_start..]
+            .split_once('\n')
+            .is_some_and(|(line, _)| line.ends_with('\r'))
+            || text.contains("\r\n")
+        {
+            "\r\n"
+        } else {
+            "\n"
+        };
+        for (verb, scope) in [
+            ("skip", "for this construct"),
+            ("skip-file", "in this file"),
+        ] {
+            if !seen.insert((line_start, verb)) {
+                continue;
+            }
+            let insert = format!("{indent}% tex-ls {verb} unknown-command{newline}");
+            let mut proposed = text.to_string();
+            proposed.insert_str(line_start, &insert);
+            let parsed = tex_ls_parser::parser::parse_with_declarations(
+                &proposed,
+                file_kind_for(path).lex_config(),
+                snapshot.declarations_for(path),
+            );
+            let suppressions =
+                tex_ls_analysis::linter::suppression::SuppressionMap::build(&parsed.syntax());
+            if !suppressions.is_suppressed(
+                finding.rule,
+                finding.start + insert.len(),
+                finding.end + insert.len(),
+            ) {
+                continue;
+            }
+            actions.push(CodeActionResponse::CodeAction(CodeAction {
+                title: format!("Ignore unknown-command {scope}"),
+                kind: Some(CodeActionKind::QuickFix),
+                diagnostics: Some(vec![lint_to_lsp(&idx, finding.clone(), true, path)]),
+                is_preferred: Some(false),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(HashMap::from([(
+                        uri.clone(),
+                        vec![TextEdit {
+                            range: byte_range_to_lsp(&idx, line_start, line_start),
+                            new_text: insert,
+                        }],
+                    )])),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }));
+        }
+    }
+    actions
+}
+
 /// Offer a structural refactoring that appends one centered column to the table
 /// enclosing the request's start position.
 ///

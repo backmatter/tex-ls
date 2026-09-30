@@ -43,7 +43,23 @@ pub fn compute_signature_help(
     let idx = snapshot.file_line_index(file, enc);
     let offset = idx.offset_at(position.line, position.character);
     let root = snapshot.parsed_tree(file);
-    let scope = snapshot.scope_signatures(file);
+    let scope = snapshot.editor_signatures(file);
+    if let Some(owner) = root
+        .token_at_offset(TextSize::new(offset as u32))
+        .right_biased()
+        .and_then(|token| {
+            token
+                .parent_ancestors()
+                .find(|node| node.kind() == SyntaxKind::COMMAND)
+        })
+        && let Some(name) = command_name(&owner)
+    {
+        let symbols = snapshot.editor_symbols(file);
+        if symbols.commands.contains(name.as_str()) && symbols.signatures.command(&name).is_none() {
+            return None;
+        }
+    }
+
     let gap_help = || {
         let at = TextSize::from(offset as u32);
         let owner = root
@@ -86,7 +102,37 @@ pub fn compute_signature_help(
         Some(help)
     };
     // A nested call's argument gap takes precedence over its enclosing argument.
-    gap_help().or_else(|| signature_help_at(&root, scope, offset))
+    let mut help = gap_help().or_else(|| signature_help_at(&root, scope, offset))?;
+    for signature in &mut help.signatures {
+        let (name, environment) = if let Some(rest) = signature.label.strip_prefix("\\begin{") {
+            (rest.split('}').next().unwrap_or(rest), true)
+        } else {
+            (
+                signature
+                    .label
+                    .strip_prefix('\\')
+                    .unwrap_or(&signature.label)
+                    .split(['{', '['])
+                    .next()
+                    .unwrap_or(""),
+                false,
+            )
+        };
+        let symbols = snapshot.editor_symbols(file);
+        if (environment && symbols.environments.contains(name) && scope.environment(name).is_none())
+            || (!environment && symbols.commands.contains(name) && scope.command(name).is_none())
+        {
+            return None;
+        }
+        if let Some(value) = crate::command_docs::card(snapshot, path, name, environment) {
+            signature.documentation =
+                Some(Documentation::MarkupContent(lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value,
+                }));
+        }
+    }
+    Some(help)
 }
 
 /// The shared body: find the argument node under the cursor, look up its owner's
@@ -271,7 +317,7 @@ fn render_help(prefix: &str, specs: &[ArgSpec], provenance: String, active: u32)
             label: ParameterInformationLabel::Tuple((pos, pos + len)),
             documentation: (provenance == "command")
                 .then(|| {
-                    crate::source_cards::argument_docs(prefix.trim_start_matches('\\'))
+                    crate::source_cards::argument_docs(prefix.strip_prefix('\\').unwrap_or(prefix))
                         .get(i)
                         .copied()
                 })
@@ -543,8 +589,12 @@ mod tests {
         assert_eq!(sig.label, "\\foo{#1}{#2}");
         assert_eq!(help.active_parameter, Some(1.into()));
         match sig.documentation.as_ref().expect("docs") {
-            Documentation::String(s) => {
-                assert!(s.contains("user-defined command"), "provenance: {s}")
+            Documentation::MarkupContent(doc) => {
+                assert!(
+                    doc.value.contains("user-defined command"),
+                    "provenance: {}",
+                    doc.value
+                )
             }
             other => panic!("expected string docs, got {other:?}"),
         }

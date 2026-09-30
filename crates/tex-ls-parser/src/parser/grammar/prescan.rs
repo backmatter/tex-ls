@@ -24,6 +24,7 @@ pub(super) struct PreScan {
     pub(super) doc_margin_lines: Vec<(usize, usize)>,
     pub(super) conditional_openers: HashSet<usize>,
     pub(super) def_parameter_dollars: HashSet<usize>,
+    pub(super) def_body_groups: HashSet<usize>,
     pub(super) alias_openers: HashMap<usize, SmolStr>,
     pub(super) alias_closers: HashMap<usize, SmolStr>,
     pub(super) literal_alias_closers: HashMap<usize, SmolStr>,
@@ -43,6 +44,7 @@ impl PreScan {
         let mut expl_toggles = Vec::new();
         let mut conditional_openers = HashSet::new();
         let mut def_parameter_dollars = HashSet::new();
+        let mut def_body_groups = HashSet::new();
         let mut alias_openers = HashMap::new();
         let mut alias_closers = HashMap::new();
         let mut literal_alias_closers = HashMap::new();
@@ -60,10 +62,12 @@ impl PreScan {
         // `expl_on` mirrors `in_expl_region` exactly: the state is the one in
         // force *before* this token, so a toggle sits outside its own region.
         let mut expl_on = false;
-        // How many upcoming control words are *names being bound* by a definition
-        // keyword rather than calls — a countdown, since `\let\a\b` binds two. See
+        // Control sequences being bound, copied, inspected, or compared are
+        // operands rather than calls. `\let\a\b` claims two. See
         // [`super::Parser::alias_openers`] for why this filter is mandatory.
         let mut def_name_slots = 0u8;
+        // A `\let` accepts one optional `=` before its source token.
+        let mut let_assignment = false;
         // `\def` parameter text runs from the definee through the token before
         // the replacement body's first `{`. A `$` there is a literal delimiter,
         // never a math opener; record it before the recursive walk can mistake a
@@ -129,23 +133,37 @@ impl PreScan {
                     def_parameter_state = 2;
                 }
                 1 => def_parameter_state = 0,
-                2 if t.kind == SyntaxKind::L_BRACE => def_parameter_state = 0,
+                2 if t.kind == SyntaxKind::L_BRACE => {
+                    def_body_groups.insert(i);
+                    def_parameter_state = 0;
+                }
+                2 if t.kind == SyntaxKind::R_BRACE => def_parameter_state = 0,
                 2 if t.kind == SyntaxKind::DOLLAR => {
                     def_parameter_dollars.insert(i);
                 }
                 _ => {}
             }
             if def_parameter_state == 0
+                && def_name_slots == 0
                 && t.kind == SyntaxKind::CONTROL_WORD
                 && super::is_def_prefix_command(&t.text)
             {
                 def_parameter_state = 1;
             }
             if t.kind != SyntaxKind::CONTROL_WORD {
-                // Trivia carries the definition-keyword state across (`\def  \bea`);
-                // anything else clears it.
-                if !super::Parser::is_trivia(t.kind) {
+                if t.kind == SyntaxKind::CONTROL_SYMBOL && def_name_slots > 0 {
+                    def_name_slots -= 1;
+                } else if let_assignment
+                    && def_name_slots == 1
+                    && t.kind == SyntaxKind::WORD
+                    && t.text == "="
+                {
+                    let_assignment = false;
+                } else if !super::Parser::is_trivia(t.kind) {
                     def_name_slots = 0;
+                }
+                if def_name_slots == 0 {
+                    let_assignment = false;
                 }
                 continue;
             }
@@ -173,14 +191,17 @@ impl PreScan {
                         literal_alias_closers.insert(i, SmolStr::new(env.as_ref()));
                     }
                 }
-                // Consuming a slot short-circuits, so a keyword sitting *in* one
-                // (`\let\a\def`) is the operand it looks like and does not arm a
-                // fresh countdown — `conditional::OpenerScan::visit` resolves the
-                // same collision the same way.
-                def_name_slots = match def_name_slots {
-                    0 => definition_name_slots(&t.text),
-                    n => n - 1,
-                };
+            }
+            // Definition operands cannot arm another definition scan. Maintain
+            // this countdown even when the file has no environment aliases.
+            if def_name_slots == 0 {
+                def_name_slots = operand_slots(&t.text);
+                let_assignment = t.text == "\\let";
+            } else {
+                def_name_slots -= 1;
+                if def_name_slots == 0 {
+                    let_assignment = false;
+                }
             }
             // `visit` is a *state machine* over the whole stream (the operand-slot
             // countdown, the `\ifcsname` body), so it must run for every control
@@ -213,6 +234,7 @@ impl PreScan {
             doc_margin_lines,
             conditional_openers,
             def_parameter_dollars,
+            def_body_groups,
             alias_openers,
             alias_closers,
             literal_alias_closers,
@@ -224,6 +246,17 @@ impl PreScan {
             last_fi,
             last_dollar,
         }
+    }
+}
+
+fn operand_slots(text: &str) -> u8 {
+    match text {
+        "\\string" | "\\meaning" | "\\show" => 1,
+        _ => definition_name_slots(text).max(
+            text.strip_prefix('\\')
+                .and_then(conditional::operand_skips)
+                .unwrap_or(0),
+        ),
     }
 }
 
@@ -416,8 +449,15 @@ mod tests {
 
     #[test]
     fn a_let_consumes_two_name_slots() {
-        let (_, pre) = scan_aliased("\\let\\oldbea\\bea\n");
-        assert!(pre.alias_openers.is_empty());
+        for source in [
+            "\\let\\oldbea\\bea\n",
+            "\\let\\oldbea=\\bea\n",
+            "\\let\\?=\\bea\n",
+            "\\let\\oldbea % name\n = % value\n \\bea\n",
+        ] {
+            let (_, pre) = scan_aliased(source);
+            assert!(pre.alias_openers.is_empty(), "{source}");
+        }
         let (_, pre) = scan_aliased("\\let\\oldbea\\bea \\eea\n");
         assert!(pre.alias_openers.is_empty());
         assert_eq!(pre.alias_closers.len(), 1);
