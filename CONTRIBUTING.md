@@ -84,7 +84,7 @@ comparison parser. Adding one to production would subject it to the production p
 
 ## Distribution
 
-VS Code client changes live in `editors/vscode`. Run `npm ci`, `npm test`, and
+VS Code client changes live in `editors/vscode`. Run `npm ci`, `npm audit`, `npm test`, and
 the real-editor integration tests described in the
 [extension development guide](docs/development/vscode.md).
 

@@ -1,10 +1,10 @@
 name: Dependencies
 on:
   pull_request:
-    paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml', '.github/workflows/dependencies.yml']
+    paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml', 'editors/vscode/package.json', 'editors/vscode/package-lock.json', '.github/workflows/dependencies.yml']
   push:
     branches: [main]
-    paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml']
+    paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml', 'editors/vscode/package.json', 'editors/vscode/package-lock.json', '.github/workflows/dependencies.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -14,3 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+  npm-audit:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npm audit
