@@ -206,7 +206,7 @@ $\alpha+\unknown$ \% % \commenthidden
   assert.equal(fixDocument.getText(), '😀  $x^2$  and $y_3$. {\\bf bold}\n',
     'fix-all preserves formatting and unsafe changes');
   await vscode.commands.executeCommand('undo');
-  assert.equal(fixDocument.getText(), fixSource, 'one undo restores all fixes');
+  await eventually('one undo restores all fixes', () => fixDocument.getText() === fixSource);
 
   const completionDocument = await vscode.workspace.openTextDocument({ language: 'latex', content: '\\sec' });
   await vscode.window.showTextDocument(completionDocument);
