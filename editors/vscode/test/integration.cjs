@@ -205,6 +205,7 @@ $\alpha+\unknown$ \% % \commenthidden
   await eventually('fix-all changes the document', () => fixDocument.getText() !== fixSource);
   assert.equal(fixDocument.getText(), '😀  $x^2$  and $y_3$. {\\bf bold}\n',
     'fix-all preserves formatting and unsafe changes');
+  await showSource(fixDocument, vscode.ViewColumn.One);
   await vscode.commands.executeCommand('undo');
   await eventually('one undo restores all fixes', () => fixDocument.getText() === fixSource);
 
