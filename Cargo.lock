@@ -1834,7 +1834,7 @@ dependencies = [
 
 [[package]]
 name = "tex-ls"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "crossbeam-channel",

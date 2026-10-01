@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/backmatter/tex-ls/compare/v0.1.2...v0.1.3) - 2026-10-01
+
+### Added
+- Improve LaTeX editing and fix Salsa memory safety ([#4](https://github.com/backmatter/tex-ls/pull/4))
+
+### Fixed
+- Update vulnerable VS Code dependencies ([#7](https://github.com/backmatter/tex-ls/pull/7))
+
 ## [0.1.2](https://github.com/backmatter/tex-ls/compare/v0.1.0...v0.1.2) - 2026-09-14
 
 - Support project-local TeX packages without requiring a system TeX installation.
