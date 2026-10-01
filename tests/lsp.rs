@@ -5209,7 +5209,9 @@ fn start_with_capabilities(
         &client,
         1,
         "initialize",
-        serde_json::json!({"capabilities":caps}),
+        // Capability tests use only their source fixtures. Discovering a host
+        // TeX installation can otherwise invalidate requests during acquisition.
+        serde_json::json!({"capabilities":caps,"initializationOptions":{"texmf":{"enabled":false}}}),
     );
     let result = recv_response(&client).response_result.unwrap();
     send_notification(&client, "initialized", serde_json::json!({}));
