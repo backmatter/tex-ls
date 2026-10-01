@@ -163,7 +163,8 @@ $\alpha+\unknown$ \% % \commenthidden
     return result?.length && result;
   });
   assert.equal((definitions[0].targetUri || definitions[0].uri).toString(), document.uri.toString());
-  const rename = await vscode.commands.executeCommand('vscode.executeDocumentRenameProvider', document.uri, position, 'sec:renamed');
+  const rename = await eventually('label rename', () =>
+    vscode.commands.executeCommand('vscode.executeDocumentRenameProvider', document.uri, position, 'sec:renamed'));
   assert.ok(rename instanceof vscode.WorkspaceEdit);
   assert.equal(rename.get(document.uri).length, 2);
   await vscode.workspace.applyEdit(rename);
@@ -204,8 +205,9 @@ $\alpha+\unknown$ \% % \commenthidden
   await eventually('fix-all changes the document', () => fixDocument.getText() !== fixSource);
   assert.equal(fixDocument.getText(), '😀  $x^2$  and $y_3$. {\\bf bold}\n',
     'fix-all preserves formatting and unsafe changes');
+  await showSource(fixDocument, vscode.ViewColumn.One);
   await vscode.commands.executeCommand('undo');
-  assert.equal(fixDocument.getText(), fixSource, 'one undo restores all fixes');
+  await eventually('one undo restores all fixes', () => fixDocument.getText() === fixSource);
 
   const completionDocument = await vscode.workspace.openTextDocument({ language: 'latex', content: '\\sec' });
   await vscode.window.showTextDocument(completionDocument);
