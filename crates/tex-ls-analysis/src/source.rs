@@ -85,19 +85,26 @@ fn is_code_tex(path: &Path) -> bool {
 /// other file.
 pub fn lint_file_kind(path: &Path) -> Option<FileKind> {
     let ext = path.extension().and_then(|ext| ext.to_str())?;
-    if ["tex", "def", "lco"]
+    if ["tex", "ltx", "def", "lco"]
         .iter()
         .any(|alias| ext.eq_ignore_ascii_case(alias))
     {
         // A `*.code.tex` package-implementation file is loaded under an implicit
         // `\makeatletter` (checked on the full name, since the extension is just
         // `tex`); classify it apart from a plain `.tex` document.
-        if is_code_tex(path) {
+        if is_code_tex(path)
+            || path
+                .file_name()
+                .is_some_and(|name| name == "latex.ltx" || name == "latex-dev.ltx")
+        {
             Some(FileKind::CodeTex)
         } else {
             Some(FileKind::Tex)
         }
-    } else if ext.eq_ignore_ascii_case("sty") {
+    } else if ["sty", "bbx", "cbx", "lbx"]
+        .iter()
+        .any(|alias| ext.eq_ignore_ascii_case(alias))
+    {
         Some(FileKind::Sty)
     } else if ext.eq_ignore_ascii_case("cls") {
         Some(FileKind::Cls)

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use rowan::TextRange;
 use smol_str::SmolStr;
 
-use crate::ast::{AstNode, Optional, child, command_name, nth_group_text};
+use crate::ast::{AstNode, Optional, child, command_name};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Which load command produced an edge. Kept distinct even where resolution is
@@ -50,12 +50,6 @@ impl PackageKind {
             | PackageKind::LoadClass
             | PackageKind::LoadClassWithOptions => "cls",
         }
-    }
-
-    /// Whether this kind takes a comma-separated *list* of names
-    /// (`\usepackage{a,b}` loads two packages). Class loads take a single name.
-    fn is_list(self) -> bool {
-        matches!(self, PackageKind::UsePackage | PackageKind::RequirePackage)
     }
 }
 
@@ -152,35 +146,21 @@ fn package_edges_of(command: &SyntaxNode, base_dir: Option<&Path>) -> Vec<Packag
         }]
     };
 
-    let Some(text) = nth_group_text(command, 0) else {
-        return dynamic();
-    };
-
-    if kind.is_list() {
-        let edges: Vec<PackageEdge> = text
-            .split(',')
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(|name| PackageEdge {
-                kind,
-                target: PackageTarget::Path(resolve(PathBuf::from(name), ext, base_dir)),
-                range,
-            })
-            .collect();
-        // An all-blank list (`\usepackage{}` / `\usepackage{ , }`) resolves to
-        // nothing literal; report it as one dynamic edge, mirroring `\bibliography`.
-        if edges.is_empty() { dynamic() } else { edges }
-    } else {
-        let name = text.trim();
-        if name.is_empty() {
-            return dynamic();
-        }
-        vec![PackageEdge {
+    let role = crate::semantic::roles::file_role(&command_name(command).unwrap()).unwrap();
+    let names = crate::external::links::file_argument_names(command, role);
+    let edges: Vec<PackageEdge> = names
+        .into_iter()
+        .map(|name| PackageEdge {
             kind,
-            target: PackageTarget::Path(resolve(PathBuf::from(name), ext, base_dir)),
+            target: name.map_or(PackageTarget::Dynamic, |name| {
+                PackageTarget::Path(resolve(PathBuf::from(name), ext, base_dir))
+            }),
             range,
-        }]
-    }
+        })
+        .collect();
+    // An all-blank list (`\usepackage{}` / `\usepackage{ , }`) resolves to
+    // nothing literal; report it as one dynamic edge, mirroring `\bibliography`.
+    if edges.is_empty() { dynamic() } else { edges }
 }
 
 /// Whether `command`'s control word is the token immediately following a `\string`
@@ -220,7 +200,7 @@ pub struct OptionArg {
 /// The literal options of `command`'s first `[...]`, split on commas. `None`
 /// when there is no optional at all, or when it holds non-literal content (any
 /// child node — a macro or group makes the whole bracket dynamic, matching
-/// [`nth_group_text`]'s posture). Empty segments (`[,]`, `[ ]`) are dropped, so
+/// [`crate::ast::nth_group_text`]'s posture). Empty segments (`[,]`, `[ ]`) are dropped, so
 /// `Some(vec![])` means "an options bracket with nothing usable in it".
 ///
 /// Commas glob into `WORD` tokens under catcode lexing, so splitting happens on
@@ -464,8 +444,16 @@ mod tests {
 
     #[test]
     fn nested_macro_argument_is_dynamic() {
-        let e = edges("\\usepackage{\\mypkgname}\n", None);
-        assert_eq!(e[0].target, PackageTarget::Dynamic);
+        for source in [
+            "\\usepackage{\\mypkgname}\n",
+            "\\usepackage{known,\\mypkgname}\n",
+        ] {
+            let e = edges(source, None);
+            assert_eq!(e[0].target, PackageTarget::Dynamic);
+        }
+        let e = edges("\\usepackage{known,invalid\nname}\n", None);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[1].target, PackageTarget::Dynamic);
     }
 
     #[test]

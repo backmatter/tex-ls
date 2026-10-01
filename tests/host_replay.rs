@@ -257,25 +257,21 @@ fn replay(transcript: &str) {
     let (server, client) = Connection::memory();
     let worker = std::thread::spawn(move || tex_ls::lsp::serve(server).unwrap());
     let mut browser = Session::default();
-    request(
-        &client,
-        0,
-        "initialize",
-        fixture
-            .get("initialize")
-            .cloned()
-            .unwrap_or_else(|| json!({"capabilities": {}})),
-    );
+    let mut initialize = fixture
+        .get("initialize")
+        .cloned()
+        .unwrap_or_else(|| json!({"capabilities": {}}));
+    // Both hosts must see the fixture's inputs. Ambient native discovery can
+    // otherwise add installed kernel definitions while requests are replayed.
+    if initialize
+        .pointer("/initializationOptions/texmf/enabled")
+        .is_none()
+    {
+        initialize["initializationOptions"]["texmf"]["enabled"] = json!(false);
+    }
+    request(&client, 0, "initialize", initialize.clone());
     notify(&client, "initialized", json!({}));
-    browser
-        .dispatch(
-            "initialize",
-            fixture
-                .get("initialize")
-                .cloned()
-                .unwrap_or_else(|| json!({})),
-        )
-        .unwrap();
+    browser.dispatch("initialize", initialize).unwrap();
     if let Some(settings) = fixture.get("settings") {
         assert_eq!(
             browser
@@ -338,6 +334,11 @@ fn replay(transcript: &str) {
 #[test]
 fn explicit_external_inputs_agree_with_native_acquisition() {
     replay(include_str!("transcripts/external-inputs.json"));
+}
+
+#[test]
+fn static_editor_coverage_agrees_between_hosts() {
+    replay(include_str!("transcripts/static-editor-coverage.json"));
 }
 
 // Applicability tokens identify host-local lifetimes, not language semantics.

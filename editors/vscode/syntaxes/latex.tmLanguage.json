@@ -2,28 +2,283 @@
   "name": "LaTeX",
   "scopeName": "text.tex.latex",
   "patterns": [
-    { "include": "#comment" },
-    { "name": "string.quoted.other.verbatim.latex", "begin": "\\\\verb\\*?([^a-zA-Z\\s])", "end": "\\1|$" },
     {
-      "name": "string.other.verbatim.latex",
-      "begin": "\\\\begin\\{(verbatim\\*?|Verbatim|lstlisting|minted)\\}",
-      "end": "\\\\end\\{\\1\\}"
-    },
-    { "name": "meta.math.block.latex", "begin": "\\$\\$", "end": "\\$\\$", "patterns": [{ "include": "#common" }] },
-    { "name": "meta.math.inline.latex", "begin": "\\$", "end": "\\$", "patterns": [{ "include": "#common" }] },
-    { "name": "meta.math.block.latex", "begin": "\\\\\\[", "end": "\\\\\\]", "patterns": [{ "include": "#common" }] },
-    { "name": "meta.math.inline.latex", "begin": "\\\\\\(", "end": "\\\\\\)", "patterns": [{ "include": "#common" }] },
-    { "include": "#common" }
+      "include": "#common"
+    }
   ],
   "repository": {
-    "comment": { "name": "comment.line.percentage.latex", "begin": "%", "end": "$" },
+    "comment": {
+      "name": "comment.line.percentage.latex",
+      "begin": "%",
+      "end": "$"
+    },
     "common": {
       "patterns": [
-        { "include": "#comment" },
-        { "name": "keyword.control.latex", "match": "\\\\(?:[a-zA-Z@:_]+\\*?|.)" },
-        { "name": "variable.parameter.latex", "match": "#+[1-9]" },
-        { "name": "punctuation.definition.group.latex", "match": "[{}\\[\\]]" },
-        { "name": "keyword.operator.math.latex", "match": "[_^&~]" }
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#protected"
+        },
+        {
+          "name": "meta.math.block.latex",
+          "begin": "\\$\\$",
+          "end": "\\$\\$",
+          "patterns": [
+            {
+              "include": "#math-content"
+            }
+          ]
+        },
+        {
+          "name": "meta.math.inline.latex",
+          "begin": "\\$",
+          "end": "\\$",
+          "patterns": [
+            {
+              "include": "#math-content"
+            }
+          ]
+        },
+        {
+          "name": "meta.math.block.latex",
+          "begin": "\\\\\\[",
+          "end": "\\\\\\]",
+          "beginCaptures": {
+            "0": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#math-content"
+            }
+          ]
+        },
+        {
+          "name": "meta.math.inline.latex",
+          "begin": "\\\\\\(",
+          "end": "\\\\\\)",
+          "beginCaptures": {
+            "0": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#math-content"
+            }
+          ]
+        },
+        {
+          "include": "#tokens"
+        }
+      ]
+    },
+    "math-content": {
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#protected"
+        },
+        {
+          "include": "#tokens"
+        }
+      ]
+    },
+    "tokens": {
+      "patterns": [
+        {
+          "begin": "(\\\\(?:usepackage|RequirePackage|RequirePackageWithOptions|documentclass|LoadClass|LoadClassWithOptions|usetheme|usecolortheme|usefonttheme|useinnertheme|useoutertheme|usetikzlibrary|usepgflibrary|bibliographystyle|RequireBibliographyStyle|RequireCitationStyle))[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?(\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comment"
+            },
+            {
+              "include": "#protected"
+            },
+            {
+              "include": "#nested-group"
+            },
+            {
+              "match": "(?:^|(?<=[{,]))[ \\t]*([^\\\\{}%,\\s#$&~^]+(?:[ \\t]+[^\\\\{}%,\\s#$&~^]+)*)(?=[ \\t]*(?:[,}]|$))",
+              "captures": {
+                "1": {
+                  "name": "entity.name.namespace.latex"
+                }
+              }
+            },
+            {
+              "include": "#tokens"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\(?:input|include|subfile|subfileinclude|loadglsentries|bibliography|addbibresource|includegraphics|includesvg|includeinkscape|verbatiminput|VerbatimInput|lstinputlisting))[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?(\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#comment"
+            },
+            {
+              "include": "#protected"
+            },
+            {
+              "include": "#nested-group"
+            },
+            {
+              "match": "(?:^|(?<=[{,]))[ \\t]*([^\\\\{}%,\\s#$&~^]+(?:[ \\t]+[^\\\\{}%,\\s#$&~^]+)*)(?=[ \\t]*(?:[,}]|$))",
+              "captures": {
+                "1": {
+                  "name": "string.other.path.latex"
+                }
+              }
+            },
+            {
+              "include": "#tokens"
+            }
+          ]
+        },
+        {
+          "match": "(\\\\(?:begin|end))[ \\t]*(\\{)([\\p{L}\\p{N}*_:@-]+)(\\})",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "punctuation.definition.group.latex"
+            },
+            "3": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "4": {
+              "name": "punctuation.definition.group.latex"
+            }
+          }
+        },
+        {
+          "name": "entity.name.function.preprocessor.latex",
+          "match": "\\\\(?:[a-zA-Z@:_]+|[^\\r\\n])"
+        },
+        {
+          "name": "variable.parameter.latex",
+          "match": "#+[1-9]"
+        },
+        {
+          "name": "punctuation.definition.group.latex",
+          "match": "[{}\\[\\]]"
+        },
+        {
+          "name": "keyword.operator.math.latex",
+          "match": "[_^&~]"
+        }
+      ]
+    },
+    "nested-group": {
+      "begin": "\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.group.latex"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.group.latex"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#nested-group"
+        },
+        {
+          "include": "#common"
+        }
+      ]
+    },
+    "protected": {
+      "patterns": [
+        {
+          "begin": "(\\\\verb)(\\*?)([^a-zA-Z\\s])",
+          "end": "\\3|$",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "punctuation.definition.group.latex"
+            },
+            "3": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.group.latex"
+            }
+          },
+          "contentName": "string.quoted.other.verbatim.latex"
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(verbatim\\*?|Verbatim|BVerbatim|LVerbatim|lstlisting|minted|comment|filecontents\\*?)\\}",
+          "end": "(\\\\end)[ \\t]*\\{(\\2)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "string.other.verbatim.latex"
+        }
       ]
     }
   }

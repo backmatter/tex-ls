@@ -100,14 +100,35 @@ pub fn prepare(
     }
     let members = snapshot.resolve_labels().namespace_members(path);
     if let CompletionContext::PackageName { kind, .. } = context {
-        let installed: HashSet<_> = (if kind == FileArgKind::Class {
-            snapshot.texmf().cls_stems()
-        } else {
-            snapshot.texmf().sty_stems()
-        })
-        .iter()
-        .map(String::as_str)
-        .collect();
+        let installed: HashSet<_> = match kind {
+            FileArgKind::NamedFile {
+                prefix,
+                suffix: ".sty",
+            } => snapshot
+                .texmf()
+                .sty_stems()
+                .iter()
+                .filter_map(|name| name.strip_prefix(prefix))
+                .collect(),
+            FileArgKind::NamedFile { .. } => snapshot
+                .texmf()
+                .by_name
+                .keys()
+                .filter_map(|name| kind.name_from_filename(name))
+                .collect(),
+            FileArgKind::Class => snapshot
+                .texmf()
+                .cls_stems()
+                .iter()
+                .map(String::as_str)
+                .collect(),
+            _ => snapshot
+                .texmf()
+                .sty_stems()
+                .iter()
+                .map(String::as_str)
+                .collect(),
+        };
         let local: HashSet<_> = snapshot
             .read_dir(path.parent().unwrap_or(Path::new("")))
             .into_iter()
@@ -118,13 +139,7 @@ pub fn prepare(
                         .iter()
                         .any(|extension| name.ends_with(&format!(".{extension}")))
             })
-            .map(|(name, _)| {
-                Path::new(&name)
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .filter_map(|(name, _)| kind.name_from_filename(&name).map(str::to_owned))
             .collect();
         for item in items.iter() {
             relevance.insert(
@@ -182,6 +197,10 @@ pub fn prepare(
         context,
         CompletionContext::CommandName { .. } | CompletionContext::EnvironmentName { .. }
     ) {
+        if !query.is_empty() {
+            let matcher = completion_rank::MatchQuery::new(&query);
+            items.retain(|item| matcher.score_item(item).is_some());
+        }
         let environment = matches!(context, CompletionContext::EnvironmentName { .. });
         let mut packages = HashSet::new();
         let mut package_members: std::collections::BTreeSet<PathBuf> =
@@ -208,17 +227,13 @@ pub fn prepare(
                 packages.insert(name.to_owned());
             }
         }
-        let scope = snapshot.scope_signatures(file);
+        let symbols = snapshot.editor_symbols(file);
         for item in items.iter() {
             let name = item.label.as_str();
             let project = if environment {
-                scope.environment(name).is_some()
+                symbols.environments.contains(name)
             } else {
-                scope.command(name).is_some()
-                    || snapshot
-                        .declarations_for(path)
-                        .command_names()
-                        .any(|declared| declared == name)
+                symbols.commands.contains(name)
             };
             let loaded = (if environment {
                 cwl().environment_packages(name)
@@ -311,7 +326,7 @@ pub fn prepare(
                 }
             }
         }
-        add_glyphs(items, Some(scope));
+        add_glyphs(items, Some(&symbols.signatures));
         if matches!(context, CompletionContext::CommandName { .. })
             && snapshot.file_text(file)[offset..].trim().is_empty()
         {

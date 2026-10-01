@@ -85,6 +85,66 @@ pub fn parse_spec(spec: &str) -> Vec<ArgSpec> {
     args
 }
 
+/// Editor argument lists must describe every parameter. Formatting can use the
+/// partial group projection above, but hover and signature help cannot present
+/// omitted stars, tokens, custom delimiters, or malformed specs as zero arguments.
+pub fn parse_editor_spec(spec: &str) -> Option<Vec<ArgSpec>> {
+    let chars: Vec<char> = spec.chars().collect();
+    let mut cursor = Cursor {
+        chars: &chars,
+        i: 0,
+    };
+    let mut args = Vec::new();
+    loop {
+        cursor.skip_editor_trivia();
+        let mut modifier = false;
+        loop {
+            match cursor.peek() {
+                Some('+') | Some('!') => {
+                    cursor.bump();
+                    modifier = true;
+                }
+                Some('>') => {
+                    cursor.bump();
+                    cursor.consume_editor_group().then_some(())?;
+                    modifier = true;
+                }
+                _ => break,
+            }
+            cursor.skip_editor_trivia();
+        }
+        let Some(kind) = cursor.bump() else {
+            return (!modifier).then_some(args);
+        };
+        args.push(match kind {
+            'm' => brace(true),
+            'o' => bracket(false),
+            'O' => {
+                cursor.consume_editor_group().then_some(())?;
+                bracket(false)
+            }
+            'r' | 'R' | 'd' | 'D' => {
+                cursor.skip_editor_trivia();
+                let open = cursor.read_token();
+                cursor.skip_editor_trivia();
+                let close = cursor.read_token();
+                if matches!(kind, 'R' | 'D') {
+                    cursor.consume_editor_group().then_some(())?;
+                }
+                ArgSpec {
+                    required: matches!(kind, 'r' | 'R'),
+                    kind: delimiter_kind(open.as_deref(), close.as_deref())?,
+                    ..brace(true)
+                }
+            }
+            _ => return None,
+        });
+        if args.len() > 9 {
+            return None;
+        }
+    }
+}
+
 fn brace(required: bool) -> ArgSpec {
     ArgSpec {
         required,
@@ -123,6 +183,42 @@ struct Cursor<'a> {
 }
 
 impl Cursor<'_> {
+    fn skip_editor_trivia(&mut self) {
+        loop {
+            self.skip_ws();
+            if self.peek() != Some('%') {
+                break;
+            }
+            while self.bump().is_some_and(|c| c != '\n' && c != '\r') {}
+        }
+    }
+
+    fn consume_editor_group(&mut self) -> bool {
+        self.skip_editor_trivia();
+        if self.bump() != Some('{') {
+            return false;
+        }
+        let mut depth = 1;
+        while let Some(c) = self.bump() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                '\\' => {
+                    // A control-symbol brace is not a group delimiter.
+                    self.bump();
+                }
+                '%' => while self.bump().is_some_and(|c| c != '\n' && c != '\r') {},
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn peek(&self) -> Option<char> {
         self.chars.get(self.i).copied()
     }
@@ -204,6 +300,43 @@ impl Cursor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn editor_specs_require_complete_representable_argument_lists() {
+        for (spec, count) in [
+            ("", 0),
+            ("m o m", 3),
+            ("+m !O{{nested} \\{value\\}} >{\\TrimSpaces} m", 3),
+            ("d{} r[] m", 3),
+            ("D[]{default} R{}{default}", 2),
+            ("m % comment\n m", 2),
+        ] {
+            assert_eq!(
+                parse_editor_spec(spec).map(|args| args.len()),
+                Some(count),
+                "{spec}"
+            );
+        }
+        for spec in [
+            "s m",
+            "m r()",
+            "m d<>",
+            "v",
+            "e{_^}",
+            "t* m",
+            "m Q",
+            "m O",
+            "R[]",
+            "O{unclosed",
+            "m +",
+            "m >",
+            "m >{}",
+        ] {
+            assert_eq!(parse_editor_spec(spec), None, "{spec}");
+        }
+        // Formatter projection remains intentionally partial.
+        assert_eq!(parse_spec("m r()").len(), 1);
+    }
 
     fn kinds(spec: &str) -> Vec<(bool, ArgKind)> {
         parse_spec(spec)

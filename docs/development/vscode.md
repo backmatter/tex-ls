@@ -17,7 +17,8 @@ running the test command. The integration test launches an isolated VS Code with
 temporary user settings and projects. On headless Linux, use
 `xvfb-run -a npm run test:integration`. Linux tests use X11 so focus-sensitive
 commands also work on an isolated display. `VSCODE_EXECUTABLE_PATH` selects an existing
-VS Code executable; otherwise the test downloads VS Code. `VSCODE_TEST_VERSION`
+VS Code Electron executable, such as `/usr/share/code/code`, rather than the
+`bin/code` or `/usr/bin/code` launcher. Otherwise the test downloads VS Code. `VSCODE_TEST_VERSION`
 selects a version, defaulting to stable.
 
 Build a release binary, then package a VSIX using native Node and vsce:
@@ -32,7 +33,8 @@ For an Extension Development Host, open this directory in VS Code and launch it
 with `--extensionDevelopmentPath` pointing here. Configure `tex-ls.server.path`
 in that window or package once to populate `server/`.
 
-The extension version can advance independently of the bundled server version.
+The extension and bundled server share one release version. Release-plz prepares
+the version change, and the release workflow synchronizes the extension metadata.
 See the [distribution guide](https://github.com/backmatter/tex-ls/blob/main/docs/development/distribution.md#vs-code)
 for packaging and publishing. The icon uses the Backmatter family mark, rendered with the existing logo renderer:
 

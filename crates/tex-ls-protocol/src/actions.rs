@@ -50,6 +50,11 @@ pub fn compute_code_actions(
     } else {
         Vec::new()
     };
+    if latex_rules && code_action_kind_requested(&CodeActionKind::QuickFix, only) {
+        actions.extend(code_action::unknown_command_ignore_actions(
+            snapshot, path, uri, text, range, &findings,
+        ));
+    }
     if code_action_kind_requested(&CodeActionKind::from("source.fixAll.tex-ls"), only)
         && let Some(action) = fix_all::action(&findings, text, uri, path, enc, &resolve)
     {

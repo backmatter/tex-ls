@@ -1,0 +1,212 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "definition": {
+          "linkSupport": true
+        },
+        "hover": {
+          "contentFormat": [
+            "markdown"
+          ]
+        },
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/xcolor.sty",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\ProvidesPackage{xcolor}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% Documented literal name.\n\\csdef{literal}#1{#1}\n\\newcounter{sample}\n\\ExplSyntaxOn\n\\tl_new:N \\l_sample_tl\n\\cs_new:Npn \\sample:n #1 {#1}\n\\cs_generate_variant:Nn \\sample:n { V }\n\\prg_new_conditional:Npnn \\sample:n #1 { T, F, TF } { \\prg_return_true: }\n\\l_sample_tl\n\\sample:V \\l_sample_tl\n\\sample:nTF {value}{yes}{no}\n\\ExplSyntaxOff\n\\literal{value}\n\\thesample\n% Comments before a multiline declaration.\n\\newcommand\n  {\\multiline}[1]{#1}\n\\multiline{value}\n\\usepackage{xcolor}\n\\textcolor{red}{value}\n\\ce{H2O}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 9,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 9,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 12,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 12,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 13,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 13,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 17,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        },
+        "position": {
+          "line": 17,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///static-editor-coverage/main.tex"
+        }
+      }
+    }
+  ]
+}

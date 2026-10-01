@@ -13,7 +13,7 @@ pub fn is_literal_file_name(name: &str, list: bool) -> bool {
             .any(|ch| ch.is_control() || "\\{}%#$&~^\"".contains(ch) || (list && ch == ','))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileCandidates {
     pub local: Vec<PathBuf>,
     pub installed: Option<(String, Vec<String>)>,

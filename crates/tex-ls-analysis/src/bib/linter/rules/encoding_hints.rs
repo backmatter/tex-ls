@@ -48,16 +48,16 @@ impl BibRule for EncodingHints {
         &[SyntaxKind::FIELD]
     }
 
-    fn check(&self, el: &SyntaxElement, _ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
+    fn check(&self, el: &SyntaxElement, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
         let Some(field) = el.as_node() else {
             return;
         };
         let Some(value) = field_value(field) else {
             return;
         };
-        let text = value.to_string();
+        let text = ctx.node_text(&value);
         let base = usize::from(value.text_range().start());
-        for (start, end, run) in non_ascii_runs(&text) {
+        for (start, end, run) in non_ascii_runs(text) {
             sink.push(Diagnostic {
                 rule: self.id(),
                 severity: self.default_severity(),
@@ -108,6 +108,7 @@ mod tests {
             project: None,
             path: std::path::Path::new("x.bib"),
             root: &root,
+            source: src,
             model: &model,
             db: crate::bib::semantic::builtin(),
             suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),

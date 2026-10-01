@@ -1,0 +1,129 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "definition": {
+          "linkSupport": true
+        },
+        "semanticTokens": {
+          "tokenTypes": [
+            "macro",
+            "namespace",
+            "string"
+          ],
+          "formats": [
+            "relative"
+          ],
+          "requests": {
+            "full": true
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\ud83d\ude00 \\usepackage[sty% key\r\n le={num% \ud83d\ude00 style\r\n eric}]{biblatex}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/numeric.bbx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% style\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/numeric.cbx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% style\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 6
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 6
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 2
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///comment-continued-styles/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 2
+        }
+      }
+    }
+  ]
+}

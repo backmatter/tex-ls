@@ -72,7 +72,9 @@ impl Default for TexmfConfig {
 }
 
 /// File extensions the index tracks: package/class sources and their literate `.dtx`.
-const INDEXED_EXTS: &[&str] = &["sty", "cls", "dtx", "tex", "def", "lco", "bib", "bibtex"];
+const INDEXED_EXTS: &[&str] = &[
+    "sty", "cls", "dtx", "tex", "ltx", "def", "lco", "bib", "bibtex", "bst", "bbx", "cbx", "lbx",
+];
 
 /// The `kpsewhich` variables naming the standard content trees, most-specific first
 /// (so a user/local override shadows the distribution copy).
@@ -402,6 +404,7 @@ fn fingerprint(roots: &[PathBuf]) -> String {
     use std::hash::{Hash, Hasher};
     let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
     "tex-ls-installed-index-v2".hash(&mut fingerprint);
+    INDEXED_EXTS.hash(&mut fingerprint);
     for root in roots {
         root.hash(&mut fingerprint);
         let mut anchors = vec![root.clone()];
@@ -616,6 +619,30 @@ mod tests {
         // A non-indexed file must be ignored.
         std::fs::write(latex.join("amsmath/amsmath.pdf"), "").unwrap();
         dir
+    }
+
+    #[test]
+    fn index_includes_format_and_bibliography_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "latex.ltx",
+            "plain.bst",
+            "numeric.bbx",
+            "numeric.cbx",
+            "english.lbx",
+        ] {
+            std::fs::write(dir.path().join(name), "").unwrap();
+        }
+        let index = build_from_roots(&[dir.path().to_path_buf()]);
+        for name in [
+            "latex.ltx",
+            "plain.bst",
+            "numeric.bbx",
+            "numeric.cbx",
+            "english.lbx",
+        ] {
+            assert_eq!(index.by_name.get(name), Some(&dir.path().join(name)));
+        }
     }
 
     #[test]

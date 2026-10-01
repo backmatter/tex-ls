@@ -8,6 +8,7 @@ use crate::declarations::ResolvedDeclarations;
 use crate::parser::{LexConfig, parse_with_declarations};
 use crate::project::{ResolvedCitations, ResolvedLabels, ResolvedPackageOptions};
 use crate::semantic::SemanticModel;
+use crate::source::{FileKind, file_kind_or_tex, lint_file_kind};
 use crate::syntax::SyntaxNode;
 
 use super::diagnostic::Diagnostic;
@@ -37,6 +38,16 @@ pub fn check_document(
     config: impl Into<LexConfig>,
     declared: &ResolvedDeclarations,
 ) -> Vec<Diagnostic> {
+    let config = config.into();
+    let kind = lint_file_kind(path).unwrap_or_else(|| {
+        if config.dtx {
+            FileKind::Dtx
+        } else if config.flavor == crate::parser::LatexFlavor::Package {
+            FileKind::Sty
+        } else {
+            FileKind::Tex
+        }
+    });
     let parsed = parse_with_declarations(text, config, declared);
     let mut diagnostics: Vec<Diagnostic> = parsed
         .errors
@@ -45,7 +56,14 @@ pub fn check_document(
         .collect();
     let root = SyntaxNode::new_root(parsed.green);
     let model = SemanticModel::build_with_declarations(&root, declared);
-    diagnostics.extend(lint_document(path, &root, &model, None, None, None));
+    diagnostics.extend(lint_document_with_kind(
+        path, kind, &root, &model, None, None, None,
+    ));
+    super::rules::unknown_command::suppress_defined(
+        &mut diagnostics,
+        text,
+        declared.command_names(),
+    );
     diagnostics
 }
 
@@ -62,7 +80,10 @@ pub fn check_document_fixable(
     let parsed = parse_with_declarations(text, config, declared);
     let root = SyntaxNode::new_root(parsed.green);
     let model = SemanticModel::build_with_declarations(&root, declared);
-    lint_with(fixable_registry(), path, &root, &model, None, None, None)
+    lint_with(
+        fixable_registry(),
+        &RuleContext::new(path, &root, &model, None, None, None),
+    )
 }
 
 /// Run all built-in rules against `root`/`model`, returning the surviving
@@ -84,9 +105,9 @@ pub fn lint_document(
     citations: Option<&ResolvedCitations>,
     packages: Option<&ResolvedPackageOptions>,
 ) -> Vec<Diagnostic> {
-    lint_with(
-        registry(),
+    lint_document_with_kind(
         path,
+        file_kind_or_tex(path),
         root,
         model,
         resolution,
@@ -95,20 +116,26 @@ pub fn lint_document(
     )
 }
 
-/// The shared driver, generic over which [`RuleRegistry`] to run — the full set
-/// ([`registry`]) for reporting, or the fix-emitting subset ([`fixable_registry`])
-/// for the `--fix` loop. Borrowing a cached registry means the dispatch table is
-/// built once, not once per file (nor once per project file).
-fn lint_with(
-    reg: &RuleRegistry,
+/// Lint with an explicit source kind when the reporting path has no file suffix.
+pub fn lint_document_with_kind(
     path: &Path,
+    kind: FileKind,
     root: &SyntaxNode,
     model: &SemanticModel,
     resolution: Option<&ResolvedLabels>,
     citations: Option<&ResolvedCitations>,
     packages: Option<&ResolvedPackageOptions>,
 ) -> Vec<Diagnostic> {
-    let ctx = RuleContext::new(path, root, model, resolution, citations, packages);
+    let mut ctx = RuleContext::new(path, root, model, resolution, citations, packages);
+    ctx.file_kind = kind;
+    lint_with(registry(), &ctx)
+}
+
+/// The shared driver, generic over which [`RuleRegistry`] to run — the full set
+/// ([`registry`]) for reporting, or the fix-emitting subset ([`fixable_registry`])
+/// for the `--fix` loop. Borrowing a cached registry means the dispatch table is
+/// built once, not once per file (nor once per project file).
+fn lint_with(reg: &RuleRegistry, ctx: &RuleContext<'_>) -> Vec<Diagnostic> {
     let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
     // Per-file stateful visitors that ride the one shared walk instead of each
@@ -120,22 +147,22 @@ fn lint_with(
     // visitor. Visits tokens too (`descendants_with_tokens`) so token-level rules
     // can subscribe to e.g. `COMMENT` or `WORD`.
     if reg.any_node_rules || !visitors.is_empty() {
-        for el in root.descendants_with_tokens() {
+        for el in ctx.root.descendants_with_tokens() {
             for &i in &reg.by_kind[el.kind() as usize] {
-                reg.rules[i].check(&el, &ctx, &mut diagnostics);
+                reg.rules[i].check(&el, ctx, &mut diagnostics);
             }
             for v in &mut visitors {
-                v.visit(&el, &ctx, &mut diagnostics);
+                v.visit(&el, ctx, &mut diagnostics);
             }
         }
     }
     for v in &mut visitors {
-        v.finish(&ctx, &mut diagnostics);
+        v.finish(ctx, &mut diagnostics);
     }
 
     // Whole-file pass for model-/resolution-driven rules.
     for rule in &reg.rules {
-        rule.check_file(&ctx, &mut diagnostics);
+        rule.check_file(ctx, &mut diagnostics);
     }
 
     let suppress = SuppressionMap::from_suppressions(&ctx.suppressions);
@@ -145,7 +172,7 @@ fn lint_with(
     });
 
     for d in &mut diagnostics {
-        d.path = path.to_path_buf();
+        d.path = ctx.path.to_path_buf();
     }
     diagnostics.sort_by_key(|d| (d.start, d.end, d.rule));
     diagnostics
@@ -164,6 +191,52 @@ mod tests {
 
     fn rules_of(src: &str) -> Vec<&'static str> {
         lint(src).iter().map(|d| d.rule).collect()
+    }
+
+    #[test]
+    fn anonymous_source_classification_uses_lexical_flavor() {
+        for (path, kind, unknown) in [
+            ("<stdin>", FileKind::Tex, true),
+            ("<stdin>", FileKind::Sty, false),
+            ("<stdin>", FileKind::Dtx, false),
+            ("install.ins", FileKind::Ins, false),
+        ] {
+            let diagnostics = check_document(
+                Path::new(path),
+                "\\unknownword\n",
+                kind.lex_config(),
+                &ResolvedDeclarations::default(),
+            );
+            assert_eq!(
+                diagnostics.iter().any(|d| d.rule == "unknown-command"),
+                unknown,
+                "{path} {kind:?}"
+            );
+            assert!(diagnostics.iter().all(|d| d.path == Path::new(path)));
+        }
+    }
+
+    #[test]
+    fn explicit_source_kind_is_independent_of_reporting_path() {
+        let source = "\\unknownword\n";
+        let root = SyntaxNode::new_root(parse(source).green);
+        let model = SemanticModel::build(&root);
+        for kind in [FileKind::Tex, FileKind::Sty, FileKind::Dtx, FileKind::Ins] {
+            let diagnostics = lint_document_with_kind(
+                Path::new("<stdin>"),
+                kind,
+                &root,
+                &model,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                diagnostics.iter().any(|d| d.rule == "unknown-command"),
+                kind == FileKind::Tex,
+                "{kind:?}"
+            );
+        }
     }
 
     #[test]

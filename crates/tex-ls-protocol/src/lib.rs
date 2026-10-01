@@ -63,9 +63,7 @@ use tex_ls_parser::declarations::ResolvedDeclarations;
 use tex_ls_parser::parser::Edit;
 #[cfg(test)]
 use tex_ls_parser::parser::{parse, parse_with_declarations};
-use tex_ls_parser::semantic::{
-    DefSiteKind, OutlineItem, OutlineSymbol, SemanticModel, SignatureDb,
-};
+use tex_ls_parser::semantic::{OutlineItem, OutlineSymbol, SemanticModel, SignatureDb};
 use tex_ls_parser::syntax::{SyntaxKind, SyntaxNode};
 
 pub(crate) use name_refs::{NameKind, NameTarget};
@@ -111,6 +109,7 @@ pub mod workspace_edits;
 
 pub mod semantic_tokens;
 
+mod command_docs;
 pub mod source_cards;
 
 #[cfg(test)]

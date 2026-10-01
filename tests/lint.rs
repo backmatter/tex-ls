@@ -479,7 +479,7 @@ fn blank_line_in_keyval_fires_end_to_end_and_its_fix_is_correct() {
     // A blank line between two keys is a `\par` the keyval processor rejects, so
     // the document does not compile at all -- hence `Error`, not `Warning`. The
     // nested one is left alone: measured, `.style={draw,\n\nthick}` compiles.
-    let src = "\\hypersetup{colorlinks=true,\n\nlinkcolor=blue}\n\
+    let src = "\\usepackage{hyperref,tikz}\n\\hypersetup{colorlinks=true,\n\nlinkcolor=blue}\n\
                \\tikzset{aa/.style={draw,\n\nthick}}\n";
     assert_eq!(lint(src), vec![("blank-line-in-keyval", Severity::Error)]);
     // The safe whitespace edit stays lossless and parses (tenet 1).

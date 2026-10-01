@@ -230,6 +230,28 @@ After applying the fix:
 $x_2$
 ```
 
+## `unknown-command`
+
+Report document commands absent from core or loaded-package metadata and scanned definitions. This is a static check, not proof that TeX will reject the command. Package source files, definition bodies, and carried code are skipped. Commands created dynamically by packages may require a `tex-ls skip unknown-command` comment. A unique close spelling gets a suggestion; no automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A misspelled list item:
+
+```tex
+\begin{itemize}
+\tem First
+\end{itemize}
+```
+
+```text
+warning: unknown-command
+ --> example.tex:2:1
+  |
+2 | \tem First
+  | ^^^^ Unknown command `\tem`; did you mean `\item`?
+```
+
 ## `dollar-display-math`
 
 Flag plain-TeX `$$...$$` display math. `$$` is a TeX primitive that bypasses `amsmath` spacing hooks and breaks `fleqn`/`\everydisplay`, so LaTeX steers users to `\[...\]`. The autofix swaps the delimiters in place and leaves the body untouched, so it parses and stays lossless; it is withheld when the display math is unclosed.

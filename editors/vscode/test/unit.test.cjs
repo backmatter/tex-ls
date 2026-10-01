@@ -98,3 +98,68 @@ test('project toolchain isolation and diagnostic policy reach the server', () =>
   }
   assert.equal(manifest.contributes.configuration.properties['tex-ls.server.path'].scope, 'machine');
 });
+
+
+test('LaTeX command and environment scopes are stable across syntax contexts', async () => {
+  const grammar = await registry.loadGrammar('text.tex.latex');
+  const macro = 'entity.name.function.preprocessor.latex';
+  const environment = 'entity.name.type.environment.latex';
+  const cases = [
+    [String.raw`\begin{frame} \end{frame} \begin{customenv} \end{customenv}`, ['\\begin', '\\end', '\\begin', '\\end']],
+    [String.raw`\newcommand{\custom}[1]{\textbf{#1}} \custom{x} \tem`, ['\\newcommand', '\\custom', '\\textbf', '\\custom', '\\tem']],
+    [String.raw`$\alpha + \mystery$ \(\beta\) \[\gamma\]`, ['\\alpha', '\\mystery', '\\(', '\\beta', '\\)', '\\[', '\\gamma', '\\]']],
+    [String.raw`\ExplSyntaxOn \foo_bar:n {\l_tmpa_tl} \ExplSyntaxOff`, ['\\ExplSyntaxOn', '\\foo_bar:n', '\\l_tmpa_tl', '\\ExplSyntaxOff']],
+    [String.raw`\% \{ \} \\ % \hidden`, ['\\%', '\\{', '\\}', '\\\\']],
+  ];
+  for (const [line, expected] of cases) {
+    const tokens = grammar.tokenizeLine(line).tokens;
+    const actual = tokens.filter(t => t.scopes.includes(macro)).map(t => line.slice(t.startIndex, t.endIndex));
+    assert.deepEqual(actual, expected, line);
+  }
+  const line = String.raw`\begin{customenv} x \end{customenv}`;
+  assert.deepEqual(grammar.tokenizeLine(line).tokens.filter(t => t.scopes.includes(environment))
+    .map(t => line.slice(t.startIndex, t.endIndex)), ['customenv', 'customenv']);
+  for (const source of [String.raw`\verb|\fake % $| \real`, String.raw`$\verb|\fake| \real$`]) {
+    const macros = grammar.tokenizeLine(source).tokens.filter(t => t.scopes.includes(macro))
+      .map(t => source.slice(t.startIndex, t.endIndex));
+    assert.deepEqual(macros, ['\\verb', '\\real']);
+  }
+  for (const name of ['verbatim', 'Verbatim', 'lstlisting', 'minted']) {
+    const begin = grammar.tokenizeLine(`\\begin{${name}}`);
+    const body = grammar.tokenizeLine(String.raw`\fake % $`, begin.ruleStack);
+    assert.ok(body.tokens.every(t => !t.scopes.includes(macro)), name);
+    const end = grammar.tokenizeLine(`\\end{${name}}`, body.ruleStack);
+    assert.ok(end.tokens.some(t => t.scopes.includes(macro)), name);
+    assert.ok(grammar.tokenizeLine('\\real', end.ruleStack).tokens.some(t => t.scopes.includes(macro)), name);
+  }
+});
+
+
+test('module and path arguments have roles without coloring prose arguments', async () => {
+  const grammar = await registry.loadGrammar('text.tex.latex');
+  for (const command of ['usepackage', 'documentclass', 'usetheme', 'usecolortheme', 'usefonttheme',
+    'useinnertheme', 'useoutertheme', 'usetikzlibrary', 'usepgflibrary', 'bibliographystyle',
+    'RequireBibliographyStyle', 'RequireCitationStyle']) {
+    const source = `\\${command}[option]{first, second}`;
+    const names = grammar.tokenizeLine(source).tokens.filter(t => t.scopes.includes('entity.name.namespace.latex'))
+      .map(t => source.slice(t.startIndex, t.endIndex));
+    assert.deepEqual(names, ['first', 'second'], command);
+  }
+  for (const command of ['input', 'includegraphics', 'bibliography', 'addbibresource']) {
+    const source = `\\${command}{folder/file}`;
+    assert.ok(grammar.tokenizeLine(source).tokens.some(t => t.scopes.includes('string.other.path.latex')), command);
+  }
+  for (const source of [String.raw`\section{metropolis}`, String.raw`\textbf{metropolis}`,
+    String.raw`\usetheme{\dynamic}`, String.raw`\usetheme{prefix\dynamic}`,
+    String.raw`\usetheme{\dynamic suffix}`, String.raw`\usetheme{#1}`,
+    String.raw`\usetheme{\dynamic{suffix}}`, String.raw`\usetheme{{literal}}`]) {
+    assert.ok(grammar.tokenizeLine(source).tokens.every(t => !t.scopes.includes('entity.name.namespace.latex')), source);
+  }
+  for (const source of [String.raw`\input{prefix\dynamic}`, String.raw`\includegraphics{\dynamic suffix}`,
+    String.raw`\includegraphics{\dynamic{suffix}}`]) {
+    assert.ok(grammar.tokenizeLine(source).tokens.every(t => !t.scopes.includes('string.other.path.latex')), source);
+  }
+  const mixed = String.raw`\usetheme{first, prefix\dynamic, \dynamic suffix, {nested}, last}`;
+  assert.deepEqual(grammar.tokenizeLine(mixed).tokens.filter(t => t.scopes.includes('entity.name.namespace.latex'))
+    .map(t => mixed.slice(t.startIndex, t.endIndex)), ['first', 'last']);
+});

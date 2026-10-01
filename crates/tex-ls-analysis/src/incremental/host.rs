@@ -3,7 +3,7 @@ use super::*;
 use std::ops::Deref;
 
 #[path = "external_inputs.rs"]
-mod external_inputs;
+pub(super) mod external_inputs;
 #[path = "source_layers.rs"]
 mod source_layers;
 
@@ -427,6 +427,22 @@ impl Analysis {
             .map(|member| (member.path.clone(), member.file))
             .collect()
     }
+    /// The selected installation index owns this exact source path. A local
+    /// source with the same basename is still authored project content.
+    pub fn is_installed_source(&self, path: &Path) -> bool {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| self.texmf().by_name.get(name))
+            .is_some_and(|installed| installed == path)
+    }
+    /// Workspace diagnostics cover authored files; installed dependencies remain
+    /// available to navigation and other language features.
+    pub fn workspace_diagnostic_files(&self) -> Vec<(PathBuf, SourceId)> {
+        self.tracked_files()
+            .into_iter()
+            .filter(|(path, _)| !self.is_installed_source(path))
+            .collect()
+    }
     pub fn project_members(&self) -> &[ProjectMember] {
         self.check_cancelled();
         &workspace_project(&self.inner, self.inner.project(self.project)).members
@@ -479,6 +495,14 @@ impl Analysis {
     pub fn file_references(&self, file: SourceId) -> &[crate::external::links::FileReference] {
         self.check_cancelled();
         file_references(&self.inner, self.inner.input(file, self.project))
+    }
+
+    pub fn file_discovery_references(
+        &self,
+        file: SourceId,
+    ) -> &[crate::external::links::FileReference] {
+        self.check_cancelled();
+        file_discovery_references(&self.inner, self.inner.input(file, self.project))
     }
     pub fn document_links(&self, file: SourceId) -> Vec<crate::external::links::LinkTarget> {
         self.check_cancelled();
@@ -587,6 +611,15 @@ impl Analysis {
         self.check_cancelled();
         resolved_citations(&self.inner, self.inner.project(self.project))
     }
+    pub fn editor_symbols(&self, file: SourceId) -> &super::queries::EditorSymbols {
+        self.check_cancelled();
+        super::queries::editor_symbols(&self.inner, self.inner.input(file, self.project))
+    }
+
+    pub fn editor_signatures(&self, file: SourceId) -> &SignatureDb {
+        &self.editor_symbols(file).signatures
+    }
+
     pub fn scope_signatures(&self, file: SourceId) -> &SignatureDb {
         self.check_cancelled();
         let file = self.inner.input(file, self.project);
@@ -651,6 +684,105 @@ impl Analysis {
             let Some(file) = self.lookup_file(&member) else {
                 continue;
             };
+            if want == crate::semantic::DefSiteKind::Command
+                && uneditable_command_names(&self.inner, self.inner.input(file, self.project))
+                    .contains(&target.name)
+            {
+                // Literal alias sources and generated names need edits beyond
+                // this target's ordinary control-sequence occurrences.
+                return Vec::new();
+            }
+            result.extend(
+                self.definition_sites(file)
+                    .iter()
+                    .filter(|site| site.kind == want && site.name == target.name)
+                    .filter(|site| {
+                        !self.definition_sites(file).iter().any(|other| {
+                            other.name_range == site.name_range && other.name != site.name
+                        })
+                    })
+                    .filter(|site| {
+                        site.kind != crate::semantic::DefSiteKind::Command
+                            || self.file_text(file)[site.name_range] == format!("\\{}", site.name)
+                    })
+                    .map(|site| (file, site.name_range)),
+            );
+        }
+        result
+    }
+
+    /// Root-scoped and acquired format sources that affect command diagnostics.
+    pub fn command_source_files(&self, origin: &Path) -> Vec<PathBuf> {
+        self.check_cancelled();
+        let Some(file) = self.lookup_file(origin) else {
+            return Vec::new();
+        };
+        let mut sources: std::collections::BTreeSet<_> =
+            command_scope(&self.inner, self.inner.input(file, self.project))
+                .iter()
+                .map(|input| input.path(&self.inner).clone())
+                .collect();
+        for path in self.format_source_paths() {
+            let actual = self.file_alias(&path).unwrap_or(&path);
+            if let Some(file) = self.lookup_file(actual) {
+                sources.extend(
+                    command_scope(&self.inner, self.inner.input(file, self.project))
+                        .iter()
+                        .map(|input| input.path(&self.inner).clone()),
+                );
+            }
+            sources.insert(path);
+        }
+        sources.into_iter().collect()
+    }
+
+    /// Navigation also follows acquired installed sources. Keep this separate
+    /// from rename, which requires a project-owned definition.
+    pub fn navigation_definitions(
+        &self,
+        origin: &Path,
+        target: &crate::name_refs::NameTarget,
+    ) -> Vec<(SourceId, rowan::TextRange)> {
+        let want = match target.kind {
+            crate::name_refs::NameKind::Command => crate::semantic::DefSiteKind::Command,
+            crate::name_refs::NameKind::Environment => crate::semantic::DefSiteKind::Environment,
+        };
+        // Navigation is read-only: the extra alias checks required by rename
+        // do not affect which definition sites we may show here.
+        let mut local = Vec::new();
+        for member in
+            crate::name_refs::macro_namespace(self.resolve_labels(), self.package_graph(), origin)
+        {
+            let Some(file) = self.lookup_file(&member) else {
+                continue;
+            };
+            local.extend(
+                self.definition_sites(file)
+                    .iter()
+                    .filter(|site| site.kind == want && site.name == target.name)
+                    .map(|site| (file, site.name_range)),
+            );
+        }
+        let roots =
+            crate::name_refs::macro_roots(self.resolve_labels(), self.package_graph(), origin);
+        if !local.is_empty() && roots.len() <= 1 {
+            return local;
+        }
+        let mut result = local;
+        let Some(file) = self.lookup_file(origin) else {
+            return result;
+        };
+        let mut origins = vec![file];
+        if roots.len() > 1 {
+            origins.extend(roots.iter().filter_map(|path| self.lookup_file(path)));
+        }
+        let inputs: std::collections::HashSet<_> = origins
+            .into_iter()
+            .flat_map(|file| command_scope(&self.inner, self.inner.input(file, self.project)))
+            .collect();
+        for input in inputs {
+            self.check_cancelled();
+            let file = *input.identity(&self.inner);
             result.extend(
                 self.definition_sites(file)
                     .iter()
@@ -658,6 +790,43 @@ impl Analysis {
                     .map(|site| (file, site.name_range)),
             );
         }
+        if result.is_empty() {
+            for path in self.format_source_paths() {
+                let Some(file) = self.lookup_file(&path).or_else(|| {
+                    self.file_alias(&path)
+                        .and_then(|actual| self.lookup_file(actual))
+                }) else {
+                    continue;
+                };
+                for input in command_scope(&self.inner, self.inner.input(file, self.project)) {
+                    let file = *input.identity(&self.inner);
+                    result.extend(
+                        self.definition_sites(file)
+                            .iter()
+                            .filter(|site| site.kind == want && site.name == target.name)
+                            .map(|site| (file, site.name_range)),
+                    );
+                }
+            }
+        }
+        if result.is_empty() && target.kind == crate::name_refs::NameKind::Environment {
+            // TeX environments can be implemented as \name / \endname macros.
+            let command = crate::name_refs::NameTarget {
+                kind: crate::name_refs::NameKind::Command,
+                ..target.clone()
+            };
+            let end = crate::name_refs::NameTarget {
+                name: format!("end{}", target.name).into(),
+                ..command.clone()
+            };
+            if !self.navigation_definitions(origin, &end).is_empty() {
+                result = self.navigation_definitions(origin, &command);
+            }
+        }
+        result.sort_by_key(|(file, range)| {
+            (self.file_path(*file).to_owned(), range.start(), range.end())
+        });
+        result.dedup();
         result
     }
 

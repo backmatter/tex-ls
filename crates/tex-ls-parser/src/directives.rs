@@ -7,7 +7,7 @@
 //! ```text
 //! % tex-ls-format <verb>              layout only
 //! % tex-ls-lint   <verb> [<rule>]     linting only, optionally one rule
-//! % tex-ls        <verb>              both at once
+//! % tex-ls        <verb> [<rule>]     one lint rule, or both axes without a rule
 //! ```
 //!
 //! with `<verb>` one of:
@@ -18,8 +18,8 @@
 //! skip-file   the whole file, wherever the directive sits
 //! ```
 //!
-//! Only the lint axis takes a `<rule>`, because only the linter has anything to
-//! select; omitting it means every rule. The `: <reason>` tail is optional
+//! A `<rule>` on `tex-ls` or `tex-ls-lint` selects only that lint rule and leaves
+//! formatting enabled. Without a rule, `tex-ls` covers both axes. The `: <reason>` tail is optional
 //! everywhere and is never interpreted.
 //!
 //! ## The retired `% tex-ls-ignore` family
@@ -191,9 +191,8 @@ pub fn parse_directive(comment: &str) -> Option<Directive> {
         "skip-file" => Verb::SkipFile,
         _ => return None,
     };
-    // Only the lint axis takes a selector. A word after the verb on another axis
-    // is prose in the reason position, not a rule we should quietly honor.
-    let rule = if axis == Axis::Lint {
+    // A selector restricts either lint-capable family to one lint rule.
+    let rule = if axis.covers_lint() {
         parse_rule(&rest[end..])
     } else {
         None
@@ -301,7 +300,7 @@ impl Suppressions {
                 continue;
             }
             let mut record = |range: TextRange, rule: &Option<String>| {
-                if directive.axis.covers_format() {
+                if directive.axis.covers_format() && directive.rule.is_none() {
                     format.push(range);
                 }
                 if directive.axis.covers_lint() {
@@ -381,7 +380,7 @@ impl Suppressions {
         let eof = root.text_range().end();
         for region in open {
             let range = TextRange::new(region.start, eof);
-            if region.axis.covers_format() {
+            if region.axis.covers_format() && region.rule.is_none() {
                 format.push(range);
             }
             if region.axis.covers_lint() {
@@ -686,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_lint_axis_takes_a_rule() {
+    fn lint_capable_families_take_a_rule() {
         assert_eq!(
             parse_directive("% tex-ls-lint skip deprecated-command: legacy"),
             Some(Directive {
@@ -702,7 +701,12 @@ mod tests {
         );
         assert_eq!(
             parse_directive("% tex-ls skip deprecated-command"),
-            Some(directive(Axis::Both, Verb::Skip))
+            Some(Directive {
+                axis: Axis::Both,
+                verb: Verb::Skip,
+                rule: Some("deprecated-command".into()),
+                deprecated: false,
+            })
         );
     }
 
@@ -880,6 +884,25 @@ mod tests {
         let s = suppressions_of(src);
         assert_eq!(slices(src, s.format_ranges()), vec![src]);
         assert!(s.lint_all_ranges().is_empty());
+    }
+
+    #[test]
+    fn short_rule_directives_preserve_formatting_for_every_scope() {
+        for (open, close) in [
+            ("skip", ""),
+            ("skip-file", ""),
+            ("off", "% tex-ls on unknown-command\n"),
+            ("off", ""),
+        ] {
+            let source = format!("% tex-ls {open} unknown-command\n\\tem text\n{close}");
+            let suppressions = suppressions_of(&source);
+            assert!(suppressions.format_ranges().is_empty(), "{source}");
+            assert!(suppressions.lint_all_ranges().is_empty(), "{source}");
+            let ranges = &suppressions.lint_rule_ranges()["unknown-command"];
+            let at = TextSize::from(source.find("\\tem").unwrap() as u32);
+            assert!(ranges.iter().any(|range| range.contains(at)), "{source}");
+            assert_eq!(suppressions.lint_rule_ranges().len(), 1);
+        }
     }
 
     #[test]

@@ -1189,6 +1189,41 @@ fn unbraced_definee_body_still_gets_the_group_gate() {
 }
 
 #[test]
+fn primitive_replacement_groups_keep_orphan_math_delimiters_as_code() {
+    for source in [
+        r"\def\enddisplaymath{\]\@ignoretrue}",
+        r"\gdef\close#1${\) #1}",
+        "\\edef % name\n\\close#1 {\\] {\\)}}\n",
+        r"\xdef\frac{\]\)}",
+        r"\def\outer{\def\inner{\]}\)}",
+        r"\def\?{\]}",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+    }
+    for source in [
+        r"\def\close{\]}\]",
+        r"\let\alias\def\ordinary{\]}",
+        r"\let\alias=\def\ordinary{\]}",
+        r"\let\?=\def\ordinary{\]}",
+        r"\let\alias=\def\def\close{\]}\]",
+        r"\def\outer{\def\inner}\textbf{\]}",
+        r"\string\def\ordinary{\]}",
+        r"\meaning\def\ordinary{\]}",
+        r"\show\def\ordinary{\]}",
+        r"\ifdefined\def\ordinary{\]}\fi",
+        r"\ifx\relax\def\ordinary{\]}\fi",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert_eq!(parsed.errors.len(), 1, "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.errors[0].message, "unmatched `\\]`");
+    }
+    assert!(!parse(r"\def\close{\]").errors.is_empty());
+}
+
+#[test]
 fn def_body_begin_is_a_plain_command() {
     // The `\def` family is not in `is_definition_body_command`, so before the
     // group gate this swallowed the closing brace.
@@ -3034,4 +3069,37 @@ fn expl3_arity_corpus_file_roundtrips_cleanly() {
     let parsed = parse_with_flavor(&text, LatexFlavor::Document);
     assert_eq!(parsed.syntax().to_string(), text, "losslessness violated");
     assert!(parsed.errors.is_empty(), "clean: {:?}", parsed.errors);
+}
+
+#[test]
+fn starred_robust_command_definitions_keep_names_and_bodies() {
+    use tex_ls_parser::semantic::{scan_definition_sites, scan_definitions};
+    for definer in [
+        "newcommand",
+        "renewcommand",
+        "providecommand",
+        "DeclareRobustCommand",
+        "newrobustcmd",
+        "renewrobustcmd",
+        "providerobustcmd",
+    ] {
+        for name in ["{\\theme}", "\\theme"] {
+            let source = format!("\\{definer}*{name}[2][]{{#1#2}}\n\\theme{{x}}\n");
+            let parsed = parse(&source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let sites = scan_definition_sites(&parsed.syntax());
+            assert_eq!(sites.len(), 1, "{source}");
+            assert_eq!(sites[0].name, "theme");
+            assert_eq!(&source[sites[0].name_range], "\\theme");
+            let definitions = scan_definitions(&parsed.syntax());
+            let signature = definitions.command("theme").unwrap();
+            assert_eq!(signature.args.len(), 2);
+            assert!(!signature.args[0].required);
+        }
+        let source = format!("\\{definer}*{{\\openlist}}{{\\begin{{itemize}}}}\n");
+        let parsed = parse(&source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+    }
 }

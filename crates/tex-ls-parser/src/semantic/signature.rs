@@ -576,6 +576,19 @@ impl SignatureDb {
         self.environment_origins.get(name).map(SmolStr::as_str)
     }
 
+    /// Forget an overwritten signature when an editor declaration has unknown arity.
+    pub fn remove_command(&mut self, name: &str) {
+        self.commands.remove(name);
+        self.command_origins.remove(name);
+    }
+
+    /// Forget an overwritten environment signature whose editor arity is unknown.
+    pub fn remove_environment(&mut self, name: &str) {
+        self.environments.remove(name);
+        self.environment_origins.remove(name);
+        self.declared_environments.remove(name);
+    }
+
     /// Record a command signature, replacing any existing entry for `name`. Used
     /// by the per-file definition scan ([`super::define`]) to populate a fresh DB;
     /// the built-in DB is built from JSON and never mutated. A redefinition wins,
@@ -811,10 +824,31 @@ pub struct CwlDb;
 impl CwlDb {
     /// Completion provenance never participates in parse or formatter lookup.
     pub fn command_packages(&self, name: &str) -> &'static [&'static str] {
-        CWL_COMMAND_PACKAGES.get(name).copied().unwrap_or(&[])
+        CWL_COMMAND_PACKAGES.get(name).copied().unwrap_or({
+            // Curated signatures also cover a few providers outside the CWL
+            // vocabulary import. These names affect editor availability only.
+            match name {
+                "CharacterTable" | "DescribeEnv" | "DescribeMacro" | "DocInput"
+                | "StopEventually" | "code" => &["doc"],
+                "frontmatter" | "mainmatter" | "backmatter" => {
+                    &["class-book", "class-memoir", "class-scrbook"]
+                }
+                "captionsetup" => &["caption"],
+                "hdashline" => &["arydshln"],
+                "newabbreviation" => &["glossaries-extra"],
+                "pgfkeys" => &["pgfkeys"],
+                "text" => &["amstext"],
+                _ => &[],
+            }
+        })
     }
     pub fn environment_packages(&self, name: &str) -> &'static [&'static str] {
         CWL_ENVIRONMENT_PACKAGES.get(name).copied().unwrap_or(&[])
+    }
+
+    /// Unconditional metadata dependencies, used only for editor name availability.
+    pub fn package_includes(&self, name: &str) -> &'static [&'static str] {
+        CWL_PACKAGE_INCLUDES.get(name).copied().unwrap_or(&[])
     }
 
     /// The signature of command `name` (without the leading `\`), if in the tier.
@@ -1109,6 +1143,8 @@ struct RawDb {
     _command_packages: Option<serde::de::IgnoredAny>,
     #[serde(default, rename = "environmentPackages")]
     _environment_packages: Option<serde::de::IgnoredAny>,
+    #[serde(default, rename = "packageIncludes")]
+    _package_includes: Option<serde::de::IgnoredAny>,
     /// An optional top-level provenance header (the generated `cwl_signatures.json`
     /// carries one); accepted and discarded so `deny_unknown_fields` still rejects
     /// genuine typos elsewhere.

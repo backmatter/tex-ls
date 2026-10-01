@@ -23,7 +23,7 @@ pub fn compute_completion(
     let mut items = if file_kind_for(path) == FileKind::Bib {
         compute_bib_completion(snapshot, path, offset)
     } else {
-        compute_tex_completion(snapshot, uri, path, offset)
+        compute_tex_completion_inner(snapshot, uri, path, offset, true)
     };
     let (query, relevance, recompute) =
         completion_context::prepare(snapshot, path, offset, &mut items);
@@ -111,6 +111,16 @@ pub fn compute_tex_completion(
     path: &Path,
     offset: usize,
 ) -> Vec<CompletionItem> {
+    compute_tex_completion_inner(snapshot, uri, path, offset, false)
+}
+
+fn compute_tex_completion_inner(
+    snapshot: &Analysis,
+    uri: &Uri,
+    path: &Path,
+    offset: usize,
+    filter_candidates: bool,
+) -> Vec<CompletionItem> {
     let Some(file) = snapshot.lookup_file(path) else {
         return Vec::new();
     };
@@ -118,7 +128,10 @@ pub fn compute_tex_completion(
     let declared = snapshot.declarations_for(path);
     let mut ctx =
         tex_ls_analysis::completion::classify_context_with_declarations(&root, offset, declared);
+    let query = completion_context::prefix(&ctx).to_owned();
     completion_context::clear_prefix(&mut ctx);
+    let matcher =
+        (filter_candidates && !query.is_empty()).then(|| completion_rank::MatchQuery::new(&query));
     if let CompletionContext::Option {
         owner,
         packages,
@@ -128,7 +141,7 @@ pub fn compute_tex_completion(
     } = &mut ctx
     {
         if !declared.options.contains_key(owner)
-            && crate::hover::lookup_command(snapshot.scope_signatures(file), owner).is_some_and(
+            && crate::hover::lookup_command(snapshot.editor_signatures(file), owner).is_some_and(
                 |(_, provenance)| matches!(provenance, crate::hover::Provenance::Document),
             )
         {
@@ -249,12 +262,73 @@ pub fn compute_tex_completion(
             let (sigs, model) = match &ctx {
                 CompletionContext::CommandName { .. }
                 | CompletionContext::EnvironmentName { .. } => {
-                    (snapshot.scope_signatures(file), &empty_model)
+                    (snapshot.editor_signatures(file), &empty_model)
                 }
                 CompletionContext::ColorName { .. } => (&empty_sigs, snapshot.semantic_model(file)),
                 _ => (&empty_sigs, &empty_model),
             };
-            build_completion_items(&ctx, sigs, model, declared, uri, snapshot)
+            let mut items = build_completion_items(
+                &ctx,
+                sigs,
+                model,
+                declared,
+                uri,
+                snapshot,
+                matcher.as_ref(),
+            );
+            if matches!(ctx, CompletionContext::CommandName { .. }) {
+                let symbols = snapshot.editor_symbols(file);
+                let unknown: Vec<_> = symbols
+                    .commands
+                    .iter()
+                    .filter(|name| symbols.signatures.command(name).is_none())
+                    .filter(|name| {
+                        matcher
+                            .as_ref()
+                            .is_none_or(|m| m.score_text(name).is_some())
+                    })
+                    .collect();
+                let replaced: HashSet<_> = unknown.iter().map(|name| name.as_str()).collect();
+                items.retain(|item| !replaced.contains(item.label.as_str()));
+                for name in unknown {
+                    items.push(candidate_to_item(
+                        CompletionCandidate {
+                            label: name.clone(),
+                            kind: tex_ls_analysis::completion::CandidateKind::Command,
+                            insert_text: None,
+                            snippet: false,
+                        },
+                        Some(path),
+                    ));
+                }
+            }
+            if matches!(ctx, CompletionContext::EnvironmentName { .. }) {
+                let symbols = snapshot.editor_symbols(file);
+                let unknown: Vec<_> = symbols
+                    .environments
+                    .iter()
+                    .filter(|name| symbols.signatures.environment(name).is_none())
+                    .filter(|name| {
+                        matcher
+                            .as_ref()
+                            .is_none_or(|m| m.score_text(name).is_some())
+                    })
+                    .collect();
+                let replaced: HashSet<_> = unknown.iter().map(|name| name.as_str()).collect();
+                items.retain(|item| !replaced.contains(item.label.as_str()));
+                for name in unknown {
+                    items.push(candidate_to_item(
+                        CompletionCandidate {
+                            label: name.clone(),
+                            kind: tex_ls_analysis::completion::CandidateKind::Environment,
+                            insert_text: None,
+                            snippet: false,
+                        },
+                        Some(path),
+                    ));
+                }
+            }
+            items
         }
     }
 }
@@ -369,13 +443,14 @@ pub fn bib_candidate_to_item(candidate: BibCompletionCandidate) -> CompletionIte
 /// Turn a classified [`CompletionContext`] into LSP items. Name/label contexts go
 /// through the pure [`tex_ls_analysis::completion::candidates`]; a file-path context reads
 /// the document's directory off disk (see [`file_completion_items`]).
-pub fn build_completion_items(
+pub(crate) fn build_completion_items(
     ctx: &CompletionContext,
     sigs: &SignatureDb,
     model: &SemanticModel,
     declared: &ResolvedDeclarations,
     uri: &Uri,
     texmf: &Analysis,
+    matcher: Option<&completion_rank::MatchQuery>,
 ) -> Vec<CompletionItem> {
     match ctx {
         CompletionContext::FilePath { prefix, kind } => {
@@ -391,10 +466,16 @@ pub fn build_completion_items(
             // Preserve the same source identity as synchronization, including
             // synthetic untitled keys. Resolve only consults captured analysis.
             let file = uri_to_path(uri);
-            tex_ls_analysis::completion::candidates_with_declarations(ctx, sigs, model, declared)
-                .into_iter()
-                .map(|candidate| candidate_to_item(candidate, Some(&file)))
-                .collect()
+            tex_ls_analysis::completion::candidates_with_declarations_matching(
+                ctx,
+                sigs,
+                model,
+                declared,
+                |name| matcher.is_none_or(|matcher| matcher.score_text(name).is_some()),
+            )
+            .into_iter()
+            .map(|candidate| candidate_to_item(candidate, Some(&file)))
+            .collect()
         }
     }
 }
@@ -525,12 +606,15 @@ pub fn package_completion_items(
     let mut seen = std::collections::HashSet::new();
     let mut items: Vec<CompletionItem> = Vec::new();
     // Tier 1: local files (offered as stems).
-    for file_item in file_completion_items(uri, prefix, kind, host) {
+    let file_prefix = format!("{}{prefix}", kind.file_prefix());
+    for file_item in file_completion_items(uri, &file_prefix, kind, host) {
         // A directory can't be a package/class *name*; only files, as stems.
         if file_item.kind != Some(CompletionItemKind::File) {
             continue;
         }
-        let stem = file_stem(&file_item.label);
+        let Some(stem) = kind.name_from_filename(&file_item.label).map(str::to_owned) else {
+            continue;
+        };
         if seen.insert(stem.clone()) {
             items.push(CompletionItem {
                 label: stem,
@@ -541,14 +625,28 @@ pub fn package_completion_items(
     }
     // Tier 2: the installed set (what the user actually has), prefix-filtered here
     // (the baked tier filters inside `candidates`).
-    let installed = match kind {
-        FileArgKind::Class => texmf.cls_stems(),
-        _ => texmf.sty_stems(),
+    let mut installed: Vec<_> = match kind {
+        FileArgKind::NamedFile {
+            prefix,
+            suffix: ".sty",
+        } => texmf
+            .sty_stems()
+            .iter()
+            .filter_map(|name| name.strip_prefix(prefix))
+            .collect(),
+        FileArgKind::NamedFile { .. } => texmf
+            .by_name
+            .keys()
+            .filter_map(|name| kind.name_from_filename(name))
+            .collect(),
+        FileArgKind::Class => texmf.cls_stems().iter().map(String::as_str).collect(),
+        _ => texmf.sty_stems().iter().map(String::as_str).collect(),
     };
-    for stem in installed.iter().filter(|s| s.starts_with(prefix)) {
-        if seen.insert(stem.clone()) {
+    installed.sort_unstable();
+    for stem in installed.into_iter().filter(|s| s.starts_with(prefix)) {
+        if seen.insert(stem.to_owned()) {
             items.push(CompletionItem {
-                label: stem.clone(),
+                label: stem.to_owned(),
                 kind: Some(CompletionItemKind::Module),
                 ..Default::default()
             });
@@ -594,5 +692,61 @@ pub fn has_extension(name: &str, exts: &[&str]) -> bool {
             exts.contains(&ext.as_str())
         }
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn unknown_arity_overrides_metadata_without_losing_known_signatures() {
+        for (source, unknown, known, unknown_detail, known_detail) in [
+            (
+                "\\RenewDocumentCommand{\\section}{r()}{#1}\n\\NewDocumentCommand{\\auditblind}{r()}{#1}\n\\newcommand{\\auditknown}[1]{#1}\n\\aud",
+                "section",
+                "auditknown",
+                "\\section",
+                "\\auditknown{}",
+            ),
+            (
+                "\\RenewDocumentEnvironment{tabular}{r()}{#1}{}\n\\NewDocumentEnvironment{auditblind}{r()}{#1}{}\n\\newenvironment{auditknown}[1]{}{}\n\\begin{aud",
+                "tabular",
+                "auditknown",
+                "\\begin{tabular}",
+                "\\begin{auditknown}{}",
+            ),
+        ] {
+            let path = Path::new(fixture_path!("/completion/main.tex"));
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(path, source, None);
+            let snapshot = db.snapshot();
+            let items =
+                compute_tex_completion(&snapshot, &path_to_uri(path).unwrap(), path, source.len());
+            for name in [unknown, known, "auditblind"] {
+                assert_eq!(
+                    items.iter().filter(|item| item.label == name).count(),
+                    1,
+                    "{name}"
+                );
+            }
+            let resolve = |name: &str| {
+                crate::completion_resolve::resolve(
+                    &snapshot,
+                    items
+                        .iter()
+                        .find(|item| item.label == name)
+                        .unwrap()
+                        .clone(),
+                )
+            };
+            let unknown_item = resolve(unknown);
+            assert_eq!(unknown_item.detail.as_deref(), Some(unknown_detail));
+            assert!(
+                matches!(unknown_item.documentation, Some(lsp_types::Documentation::MarkupContent(doc)) if doc.value.contains("argument signature is unknown"))
+            );
+            assert_eq!(resolve(known).detail.as_deref(), Some(known_detail));
+        }
     }
 }

@@ -61,14 +61,17 @@
         "signatures": [
           {
             "label": "\\textbf{#1}",
-            "documentation": "command · 1 required argument",
+            "documentation": {
+              "kind": "plaintext",
+              "value": "\\textbf{}\n\ncommand · 1 required argument\nArgument 1: Text to set in boldface\nTypesets its argument in boldface.\nDocumentation (https://www.latex-project.org/help/documentation/)"
+            },
             "parameters": [
               {
                 "label": [
                   7,
                   11
                 ],
-                "documentation": "Text to emphasize"
+                "documentation": "Text to set in boldface"
               }
             ],
             "activeParameter": 0

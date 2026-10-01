@@ -275,6 +275,8 @@ struct RawDb {
     command_packages: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "environmentPackages")]
     environment_packages: BTreeMap<String, Vec<String>>,
+    #[serde(default, rename = "packageIncludes")]
+    package_includes: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "_comment")]
     _comment: Option<serde::de::IgnoredAny>,
     // BTreeMaps so the generated source is deterministic (sorted) across builds.
@@ -323,6 +325,7 @@ fn generate_cwl_signatures() {
     for (name, packages) in [
         ("CWL_COMMAND_PACKAGES", &db.command_packages),
         ("CWL_ENVIRONMENT_PACKAGES", &db.environment_packages),
+        ("CWL_PACKAGE_INCLUDES", &db.package_includes),
     ] {
         let mut map = phf_codegen::Map::new();
         for (symbol, packages) in packages {

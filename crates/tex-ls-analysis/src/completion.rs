@@ -133,17 +133,39 @@ pub enum FileArgKind {
     Bib,
     /// `\usepackage` / `\RequirePackage` — `.sty` package files (`.dtx` sources).
     Package,
+    /// A logical module name whose loader supplies the filename prefix/suffix.
+    NamedFile {
+        prefix: &'static str,
+        suffix: &'static str,
+    },
     /// `\documentclass` / `\LoadClass` — `.cls` class files (`.dtx` sources).
     Class,
 }
 
 impl FileArgKind {
+    pub fn file_prefix(self) -> &'static str {
+        match self {
+            Self::NamedFile { prefix, .. } => prefix,
+            _ => "",
+        }
+    }
+
+    pub fn name_from_filename(self, filename: &str) -> Option<&str> {
+        match self {
+            Self::NamedFile { prefix, suffix } => {
+                filename.strip_prefix(prefix)?.strip_suffix(suffix)
+            }
+            _ => std::path::Path::new(filename).file_stem()?.to_str(),
+        }
+    }
+
     pub fn from_role(kind: tex_ls_parser::semantic::roles::FileRoleKind) -> Self {
         use tex_ls_parser::semantic::roles::FileRoleKind;
         match kind {
             FileRoleKind::Source(_) => Self::TexSource,
             FileRoleKind::Bibliography => Self::Bib,
             FileRoleKind::Package => Self::Package,
+            FileRoleKind::NamedFile { prefix, suffix } => Self::NamedFile { prefix, suffix },
             FileRoleKind::Class => Self::Class,
             FileRoleKind::Graphics => Self::Graphics,
             FileRoleKind::Svg => Self::Svg,
@@ -167,6 +189,12 @@ impl FileArgKind {
             // `.dtx` is offered because a `.sty`/`.cls` load resolves through a
             // sibling `.dtx` source (`project::package::dtx_source_of`).
             FileArgKind::Package => &["sty", "dtx"],
+            FileArgKind::NamedFile { suffix: ".sty", .. } => &["sty", "dtx"],
+            FileArgKind::NamedFile { suffix: ".bst", .. } => &["bst"],
+            FileArgKind::NamedFile { suffix: ".bbx", .. } => &["bbx"],
+            FileArgKind::NamedFile { suffix: ".cbx", .. } => &["cbx"],
+            FileArgKind::NamedFile { suffix: ".lbx", .. } => &["lbx"],
+            FileArgKind::NamedFile { .. } => &["tex"],
             FileArgKind::Class => &["cls", "dtx"],
         }
     }
@@ -228,6 +256,25 @@ pub fn classify_context_with_declarations(
         && let Some(ctx) = command_name_context(left, offset)
     {
         return ctx;
+    }
+
+    for command in root.descendants().filter(|node| {
+        node.kind() == SyntaxKind::COMMAND && node.text_range().contains_inclusive(offset)
+    }) {
+        for (kind, range, name) in
+            tex_ls_parser::semantic::roles::biblatex_style_arguments(&command)
+        {
+            if range.contains_inclusive(offset) {
+                if usize::from(range.len()) != name.len() {
+                    return CompletionContext::None;
+                }
+                let end = usize::from(offset - range.start()).min(name.len());
+                return CompletionContext::PackageName {
+                    prefix: name[..end].to_owned(),
+                    kind: FileArgKind::from_role(kind),
+                };
+            }
+        }
     }
 
     if let Some(context) = options::classify(root, usize::from(offset), declared) {
@@ -348,8 +395,12 @@ fn command_arg_context(
         });
     }
     if let Some(kind) = package_arg(name)
-        && index == 0
+        && tex_ls_parser::semantic::roles::file_role(name)
+            .is_some_and(|role| role.argument == index)
     {
+        if discontiguous_file_name_at(group, name, offset) {
+            return Some(CompletionContext::None);
+        }
         // A `\usepackage{amsmath,gr|}` completes the name after the last comma.
         let inner = group_prefix(group, offset);
         let prefix = inner.rsplit(',').next().unwrap_or(&inner).trim_start();
@@ -361,6 +412,9 @@ fn command_arg_context(
     if let Some((kind, path_index)) = file_arg(name)
         && index == path_index
     {
+        if discontiguous_file_name_at(group, name, offset) {
+            return Some(CompletionContext::None);
+        }
         let inner = group_prefix(group, offset);
         let prefix =
             if tex_ls_parser::semantic::roles::file_role(name).is_some_and(|role| role.list) {
@@ -408,6 +462,25 @@ fn command_arg_context(
     None
 }
 
+fn discontiguous_file_name_at(group: &SyntaxNode, name: &str, offset: TextSize) -> bool {
+    if !group
+        .children_with_tokens()
+        .any(|element| element.kind() == SyntaxKind::COMMENT)
+    {
+        return false;
+    }
+    let Some(command) = group.parent() else {
+        return false;
+    };
+    crate::semantic::roles::file_role(name).is_some_and(|role| {
+        crate::external::links::file_argument_spans(&command, role)
+            .iter()
+            .any(|(name, range)| {
+                range.contains_inclusive(offset) && usize::from(range.len()) != name.len()
+            })
+    })
+}
+
 /// Whether the `index`-th brace group of `name` takes an *existing* color name.
 /// `\fcolorbox{frame}{bg}{text}` completes both its first two groups; `\colorlet`
 /// completes only its *second* group (the base), the first being the new name.
@@ -441,8 +514,14 @@ fn tikz_library_command(name: &str) -> Option<bool> {
 /// first `{…}` completes package/class *names* (baked list + local files), or
 /// `None`. Returns [`FileArgKind::Package`]/[`FileArgKind::Class`] only.
 fn package_arg(name: &str) -> Option<FileArgKind> {
+    if tikz_library_command(name).is_some() {
+        return None;
+    }
     match tex_ls_parser::semantic::roles::file_role(name)?.kind {
         tex_ls_parser::semantic::roles::FileRoleKind::Package => Some(FileArgKind::Package),
+        tex_ls_parser::semantic::roles::FileRoleKind::NamedFile { prefix, suffix } => {
+            Some(FileArgKind::NamedFile { prefix, suffix })
+        }
         tex_ls_parser::semantic::roles::FileRoleKind::Class => Some(FileArgKind::Class),
         _ => None,
     }
@@ -454,6 +533,9 @@ fn package_arg(name: &str) -> Option<FileArgKind> {
 /// `\import{dir}{file}` completes its second group; shared search directories
 /// retain the first group for acquisition and insertion.
 fn file_arg(name: &str) -> Option<(FileArgKind, usize)> {
+    if tikz_library_command(name).is_some() {
+        return None;
+    }
     let role = tex_ls_parser::semantic::roles::file_role(name)?;
     Some((FileArgKind::from_role(role.kind), role.argument))
 }
@@ -564,6 +646,26 @@ pub fn candidates_with_declarations(
     }
 }
 
+/// Filter command and environment names before allocating candidates. The
+/// caller supplies the same matcher used for final protocol ranking.
+pub fn candidates_with_declarations_matching(
+    context: &CompletionContext,
+    user_sigs: &SignatureDb,
+    model: &SemanticModel,
+    declared: &ResolvedDeclarations,
+    mut matches: impl FnMut(&str) -> bool,
+) -> Vec<CompletionCandidate> {
+    match context {
+        CompletionContext::CommandName { prefix } => {
+            command_candidates_matching(user_sigs, declared, prefix, &mut matches)
+        }
+        CompletionContext::EnvironmentName { prefix, closing } => {
+            environment_candidates_matching(user_sigs, prefix, *closing, &mut matches)
+        }
+        _ => candidates_with_declarations(context, user_sigs, model, declared),
+    }
+}
+
 /// Baked package/class name candidates for `\usepackage`/`\documentclass`,
 /// prefix-filtered. The list is pre-sorted into rank order (namesake/common names
 /// first), which is *preserved* here (no re-sort) so the LSP layer can turn
@@ -571,6 +673,22 @@ pub fn candidates_with_declarations(
 /// files. Class-taking commands draw from [`class_names`], the rest from
 /// [`package_names`].
 fn package_candidates(kind: FileArgKind, prefix: &str) -> Vec<CompletionCandidate> {
+    if let FileArgKind::NamedFile { suffix: ".bst", .. } = kind {
+        return arg_enum_values("bibliographystyle", 0)
+            .unwrap_or_default()
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| CompletionCandidate {
+                label: name.clone(),
+                kind: CandidateKind::Package,
+                insert_text: None,
+                snippet: false,
+            })
+            .collect();
+    }
+    if matches!(kind, FileArgKind::NamedFile { suffix, .. } if suffix != ".sty") {
+        return Vec::new();
+    }
     let names = if kind == FileArgKind::Class {
         class_names()
     } else {
@@ -578,8 +696,9 @@ fn package_candidates(kind: FileArgKind, prefix: &str) -> Vec<CompletionCandidat
     };
     names
         .iter()
+        .filter_map(|name| name.strip_prefix(kind.file_prefix()))
         .filter(|name| name.starts_with(prefix))
-        .map(|&label| CompletionCandidate {
+        .map(|label| CompletionCandidate {
             label: label.to_string(),
             kind: CandidateKind::Package,
             insert_text: None,
@@ -641,14 +760,23 @@ fn command_candidates(
     declared: &ResolvedDeclarations,
     prefix: &str,
 ) -> Vec<CompletionCandidate> {
-    let mut names = union_names(
-        builtin()
-            .command_names()
-            .chain(user_sigs.command_names())
-            .chain(declared.command_names())
-            .chain(cwl().command_names()),
-        prefix,
-    );
+    command_candidates_matching(user_sigs, declared, prefix, &mut |_| true)
+}
+
+fn command_candidates_matching(
+    user_sigs: &SignatureDb,
+    declared: &ResolvedDeclarations,
+    prefix: &str,
+    matches: &mut impl FnMut(&str) -> bool,
+) -> Vec<CompletionCandidate> {
+    let mut names: Vec<_> = builtin()
+        .command_names()
+        .chain(user_sigs.command_names())
+        .chain(declared.command_names())
+        .chain(cwl().command_names())
+        .filter(|name| name.starts_with(prefix) && matches(name))
+        .map(str::to_string)
+        .collect();
     names.sort();
     names.dedup();
     names
@@ -669,13 +797,22 @@ fn environment_candidates(
     prefix: &str,
     _closing: bool,
 ) -> Vec<CompletionCandidate> {
-    let mut names = union_names(
-        builtin()
-            .environment_names()
-            .chain(user_sigs.environment_names())
-            .chain(cwl().environment_names()),
-        prefix,
-    );
+    environment_candidates_matching(user_sigs, prefix, _closing, &mut |_| true)
+}
+
+fn environment_candidates_matching(
+    user_sigs: &SignatureDb,
+    prefix: &str,
+    _closing: bool,
+    matches: &mut impl FnMut(&str) -> bool,
+) -> Vec<CompletionCandidate> {
+    let mut names: Vec<_> = builtin()
+        .environment_names()
+        .chain(user_sigs.environment_names())
+        .chain(cwl().environment_names())
+        .filter(|name| name.starts_with(prefix) && matches(name))
+        .map(str::to_string)
+        .collect();
     names.sort();
     names.dedup();
     names
@@ -985,6 +1122,42 @@ mod tests {
                 kind: FileArgKind::Package,
             }
         );
+    }
+
+    #[test]
+    fn file_completion_does_not_replace_part_of_a_comment_continued_name() {
+        for source in [
+            "\\usepackage{mh% comment\n chem}",
+            "\\input{chap% comment\n ter}",
+        ] {
+            let first = source.find('%').unwrap();
+            let second = source.rfind('}').unwrap();
+            assert_eq!(classify(source, first), CompletionContext::None);
+            assert_eq!(classify(source, second), CompletionContext::None);
+        }
+    }
+
+    #[test]
+    fn style_completion_preserves_comment_continuations_and_empty_values() {
+        let source = "\\usepackage[style=num% comment\n eric]{biblatex}";
+        for at in [
+            source.find("num").unwrap() + 1,
+            source.find("eric").unwrap() + 2,
+        ] {
+            assert_eq!(classify(source, at), CompletionContext::None);
+        }
+        for source in [
+            "\\usepackage[style=]{biblatex}",
+            "\\usepackage[style={}]{biblatex}",
+            "\\usepackage[style=% comment\n ]{biblatex}",
+            "\\usepackage[style=% comment\r\n\t]{biblatex}",
+        ] {
+            let at = source.find(']').unwrap() - usize::from(source.contains("{}"));
+            assert!(
+                matches!(classify(source, at), CompletionContext::PackageName { prefix, kind: FileArgKind::NamedFile { suffix: ".bbx", .. } } if prefix.is_empty()),
+                "{source}"
+            );
+        }
     }
 
     #[test]

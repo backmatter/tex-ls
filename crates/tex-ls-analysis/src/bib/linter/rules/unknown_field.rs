@@ -121,6 +121,7 @@ mod tests {
             project: None,
             path: std::path::Path::new("x.bib"),
             root: &root,
+            source: src,
             model: &model,
             db: crate::bib::semantic::builtin(),
             suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),

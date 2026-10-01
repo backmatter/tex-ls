@@ -5,14 +5,15 @@ use serde_json::json;
 use std::{
     hash::{Hash, Hasher},
     hint::black_box,
-    path::Path,
     time::Instant,
 };
 use tex_ls_analysis::{
     incremental::IncrementalDatabase, linter::RuleSelection, text::PositionEncoding,
 };
 use tex_ls_protocol::{
-    diagnostics::analyze_bib, response_policy::ResponsePolicy, symbols::compute_bib_symbols,
+    diagnostics::analyze_bib,
+    response_policy::ResponsePolicy,
+    symbols::{compute_bib_symbol_response, compute_bib_symbols},
 };
 fn stage<T>(name: &str, f: impl FnOnce() -> T) -> T {
     let before = allocations::live_bytes();
@@ -55,7 +56,10 @@ fn main() {
         eprintln!("run in release mode");
         std::process::exit(2);
     }
-    let path = Path::new("target/lsp-release-inputs/bibliography/rendering-bibtex.bib");
+    let input = std::env::current_dir()
+        .unwrap()
+        .join("target/lsp-release-inputs/bibliography/rendering-bibtex.bib");
+    let path = input.as_path();
     let text = std::fs::read_to_string(path).unwrap();
     let mut db = IncrementalDatabase::default();
     let file = db.apply_change(path, text.clone(), None);
@@ -101,6 +105,24 @@ fn main() {
             black_box(serde_json::to_vec(&value).unwrap())
         });
         if generation == 0 {
+            let flat = stage("direct_outline_conversion", || {
+                compute_bib_symbol_response(&snapshot, path, enc, false)
+            });
+            let mut direct = stage("direct_outline_json", || {
+                serde_json::to_value(&flat).unwrap()
+            });
+            policy.response("textDocument/documentSymbol", None, &mut direct);
+            let direct_items = direct.as_array_mut().unwrap();
+            // The legacy harness uses this synthetic URI; normalize only it.
+            for item in direct_items {
+                item["location"]["uri"] = json!("file:///profile.bib");
+            }
+            let direct_digest = digest(&direct);
+            stage("direct_outline_serialization", || {
+                black_box(serde_json::to_vec(&direct).unwrap())
+            });
+            drop(direct);
+            drop(flat);
             let symbols = stage("outline_conversion", || {
                 compute_bib_symbols(&snapshot, path, enc)
             });
@@ -123,6 +145,7 @@ fn main() {
             });
             assert_eq!(value.as_array().unwrap().len(), count);
             assert_eq!(digest(&value), expected);
+            assert_eq!(direct_digest, expected);
             println!(
                 "{}",
                 json!({"outline_items":count,"legacy_wire_equal":true})

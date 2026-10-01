@@ -30,7 +30,9 @@ pub fn check_document(path: &Path, text: &str) -> Vec<Diagnostic> {
         .collect();
     let root = parsed.syntax();
     let model = Model::build(&root);
-    diagnostics.extend(lint_document(path, &root, &model));
+    diagnostics.extend(lint_document_with_project_and_source(
+        path, &root, &model, None, text,
+    ));
     diagnostics
 }
 
@@ -62,11 +64,33 @@ pub fn lint_document_with_rules(
     project: Option<&super::project::ProjectFacts>,
     rules: &[Box<dyn BibRule>],
 ) -> Vec<Diagnostic> {
+    lint_with_source_and_rules(path, root, model, project, &root.to_string(), rules)
+}
+
+pub(crate) fn lint_document_with_project_and_source(
+    path: &Path,
+    root: &SyntaxNode,
+    model: &Model,
+    project: Option<&super::project::ProjectFacts>,
+    source: &str,
+) -> Vec<Diagnostic> {
+    lint_with_source_and_rules(path, root, model, project, source, &all_rules())
+}
+
+fn lint_with_source_and_rules(
+    path: &Path,
+    root: &SyntaxNode,
+    model: &Model,
+    project: Option<&super::project::ProjectFacts>,
+    source: &str,
+    rules: &[Box<dyn BibRule>],
+) -> Vec<Diagnostic> {
     let suppress = BibSuppressionMap::build(root);
     let ctx = BibRuleContext {
         project,
         path,
         root,
+        source,
         model,
         db: semantic::builtin(),
         suppressions: &suppress,

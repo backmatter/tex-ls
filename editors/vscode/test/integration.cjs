@@ -34,8 +34,13 @@ async function showSource(document, column) {
   const reports = vscode.window.tabGroups.all.flatMap((group) => group.tabs)
     .filter((tab) => tab.input instanceof vscode.TabInputText && tab.input.uri.scheme === 'tex-ls-project');
   if (reports.length) await vscode.window.tabGroups.close(reports);
+  const canFocusWindow = (await vscode.commands.getCommands(true)).includes('workbench.action.focusWindow');
   await eventually('source editor becomes active', async () => {
+    // Recent VS Code versions can focus the native window on unattended desktops.
+    if (canFocusWindow) await vscode.commands.executeCommand('workbench.action.focusWindow');
     await vscode.window.showTextDocument(document, { viewColumn: column, preview: false, preserveFocus: false });
+    // Code-action and undo commands need editor focus, not just an active tab.
+    await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
     return vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString();
   });
 }
@@ -67,6 +72,91 @@ exports.run = async function run() {
     return undefined;
   });
   assert.ok(JSON.stringify(symbols).includes('Introduction'));
+  for (const [line, column, otherLine, otherColumn, otherKind] of [
+    [1, 9, 4, 5, 'closing'],
+    [4, 7, 1, 7, 'opening'],
+  ]) {
+    const at = new vscode.Position(line, column);
+    const links = await eventually('matching document delimiter definition', async () => {
+      const result = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', document.uri, at);
+      return result?.length && result;
+    });
+    assert.equal((links[0].targetUri || links[0].uri).toString(), document.uri.toString());
+    assert.deepEqual(links[0].targetSelectionRange?.start || links[0].range.start,
+      new vscode.Position(otherLine, otherColumn));
+    const hovers = await eventually('matching document delimiter hover', async () => {
+      const result = await vscode.commands.executeCommand('vscode.executeHoverProvider', document.uri, at);
+      return result?.length && result;
+    });
+    assert.ok(hovers.some((hover) => hover.range.start.line === line
+      && hover.contents.some((content) => content.value.includes(`Matching ${otherKind} delimiter:`))));
+  }
+  for (const [line, commandEnd, nameStart, nameEnd] of [[1, 6, 7, 15], [4, 4, 5, 13]]) {
+    const command = await vscode.commands.executeCommand('vscode.executeHoverProvider',
+      document.uri, new vscode.Position(line, 1));
+    assert.ok(command?.some((hover) => hover.range.start.character === 0
+      && hover.range.end.character === commandEnd));
+    for (const column of [commandEnd, nameEnd]) {
+      const brace = await vscode.commands.executeCommand('vscode.executeHoverProvider',
+        document.uri, new vscode.Position(line, column));
+      assert.deepEqual(brace || [], [], 'braces between adjacent hover targets are not hoverable');
+    }
+    const name = await vscode.commands.executeCommand('vscode.executeHoverProvider',
+      document.uri, new vscode.Position(line, nameStart));
+    assert.ok(name?.some((hover) => hover.range.start.character === nameStart
+      && hover.range.end.character === nameEnd));
+  }
+  const colorUri = uri('first', 'highlighting.tex');
+  const colorSource = String.raw`\begin{customenv}
+\newcommand{\custom}{} \custom \tem \item
+$\alpha+\unknown$ \% % \commenthidden
+\verb|\inlinehidden|
+\texttt{chapters/intro.tex}
+\usetheme{metropolis}
+\usetikzlibrary{calc}
+\bibliographystyle{plain}
+\end{customenv}`;
+  for (const name of ['beamerthememetropolis.sty', 'tikzlibrarycalc.code.tex', 'plain.bst']) {
+    await vscode.workspace.fs.writeFile(uri('first', name), Buffer.from('% module fixture\n'));
+  }
+  await vscode.workspace.fs.writeFile(colorUri, Buffer.from(colorSource));
+  const colorDocument = await vscode.workspace.openTextDocument(colorUri);
+  const legend = await eventually('semantic token legend', () =>
+    vscode.commands.executeCommand('vscode.provideDocumentSemanticTokensLegend', colorUri));
+  const colorTokens = await eventually('semantic command tokens', async () => {
+    const result = await vscode.commands.executeCommand('vscode.provideDocumentSemanticTokens', colorUri);
+    return result?.data?.length && result;
+  });
+  let tokenLine = 0, tokenColumn = 0;
+  const commands = [];
+  const modules = [];
+  const printed = [];
+  for (let i = 0; i < colorTokens.data.length; i += 5) {
+    const [deltaLine, deltaColumn, length, type] = colorTokens.data.slice(i, i + 5);
+    tokenLine += deltaLine;
+    tokenColumn = (deltaLine ? 0 : tokenColumn) + deltaColumn;
+    if (legend.tokenTypes[type] === 'namespace') {
+      modules.push(colorDocument.lineAt(tokenLine).text.slice(tokenColumn, tokenColumn + length));
+    }
+    if (legend.tokenTypes[type] === 'macro') {
+      commands.push(colorDocument.lineAt(tokenLine).text.slice(tokenColumn, tokenColumn + length));
+    }
+    if (legend.tokenTypes[type] === 'string') {
+      printed.push(colorDocument.lineAt(tokenLine).text.slice(tokenColumn, tokenColumn + length));
+    }
+  }
+  assert.deepEqual(commands, ['\\begin', '\\newcommand', '\\custom', '\\custom', '\\tem', '\\item',
+    '\\alpha', '\\unknown', '\\%', '\\verb', '\\texttt', '\\usetheme', '\\usetikzlibrary', '\\bibliographystyle', '\\end']);
+  assert.deepEqual(printed, ['\\inlinehidden', 'chapters/intro.tex']);
+  assert.deepEqual(modules, ['metropolis', 'calc', 'plain']);
+  for (const [name, target] of [['metropolis', 'beamerthememetropolis.sty'], ['calc', 'tikzlibrarycalc.code.tex'], ['plain', 'plain.bst']]) {
+    const position = colorDocument.positionAt(colorSource.indexOf(name) + 1);
+    await eventually(`module definition for ${name}`, async () => {
+      const links = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', colorUri, position);
+      return links?.some(link => (link.targetUri || link.uri).path.endsWith('/' + target));
+    });
+  }
+
   const position = new vscode.Position(3, document.lineAt(3).text.indexOf('sec:intro') + 3);
   const definitions = await eventually('label definition', async () => {
     const result = await vscode.commands.executeCommand('vscode.executeDefinitionProvider', document.uri, position);
@@ -108,7 +198,9 @@ exports.run = async function run() {
       fixDocument.uri, new vscode.Range(0, 0, 0, 0), 'source.fixAll.tex-ls');
     return actions?.length > 0;
   });
-  await vscode.commands.executeCommand('tex-ls.fixAll');
+  await showSource(fixDocument, vscode.ViewColumn.One);
+  assert.equal(await vscode.commands.executeCommand('tex-ls.fixAll'), true,
+    'the command applies the current server fix-all action');
   await eventually('fix-all changes the document', () => fixDocument.getText() !== fixSource);
   assert.equal(fixDocument.getText(), '😀  $x^2$  and $y_3$. {\\bf bold}\n',
     'fix-all preserves formatting and unsafe changes');
@@ -196,5 +288,6 @@ exports.run = async function run() {
 
   await Promise.all([1, 2, 3].map(() => vscode.commands.executeCommand('tex-ls.restartServer')));
   await eventually('providers recover after restart', async () => (await format(bibliography))?.length > 0);
+  await vscode.workspace.fs.writeFile(vscode.Uri.file(path.join(root, '.integration-complete')), Buffer.from('passed\n'));
   console.log('VS Code integration passed: activation, symbols, UTF-16 definition/rename, safe fix-all and undo, read-only project inspection, completion, formatting, scoped settings, build-only formatting, isolated relative TEXMF roots, excluded package refresh, config watching, diagnostics, BibTeX, queued restarts.');
 };

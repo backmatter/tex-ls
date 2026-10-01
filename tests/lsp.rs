@@ -2127,6 +2127,50 @@ fn lsp_signature_help_active_argument_and_null() {
 }
 
 #[test]
+fn workspace_diagnostics_with_untitled_buffers_do_not_request_file_settings_for_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let (client, server_thread) = start_server(Some(serde_json::json!({
+        "texmf": {"enabled": false}
+    })));
+    let file_uri = path_to_file_uri(&dir.path().join("main.tex"));
+    did_open(&client, &file_uri, 1, "Plain text.\n");
+    let _ = recv_diagnostics(&client);
+    let untitled: Uri = "untitled:workspace-diagnostics".parse().unwrap();
+    did_open(&client, &untitled, 1, "\\tem\n");
+    let direct = recv_diagnostics_matching(&client, &untitled, |_| true);
+    assert_eq!(direct.uri, untitled);
+    assert!(
+        direct
+            .diagnostics
+            .iter()
+            .any(|diagnostic| matches!(&diagnostic.code, Some(Code::String(code)) if code == "unknown-command"))
+    );
+
+    send_request(
+        &client,
+        2,
+        "workspace/diagnostic",
+        serde_json::json!({"previousResultIds":[]}),
+    );
+    let response = recv_response(&client);
+    let result = response
+        .response_result
+        .expect("workspace diagnostics must not panic for untitled buffers");
+    let reports = result["items"].as_array().unwrap();
+    assert!(
+        reports
+            .iter()
+            .any(|report| report["uri"] == file_uri.as_str())
+    );
+    assert!(
+        reports
+            .iter()
+            .all(|report| report["uri"] != untitled.as_str())
+    );
+    shutdown(&client, server_thread);
+}
+
+#[test]
 fn lsp_completion_in_untitled_buffers_preserves_edits_and_local_signatures() {
     let (client, server_thread) = start_server(Some(serde_json::json!({
         "texmf": {"enabled": false}
@@ -2175,7 +2219,7 @@ fn lsp_completion_commands_environments_and_refs() {
     let (client, server_thread) = start_server(None);
     let uri: Uri = fixture_uri!("/complete.tex").parse().unwrap();
 
-    // A clean document so diagnostics stay empty (the env is matched).
+    // The unfinished command is diagnosed while completion remains available.
     let doc = "\\section{Intro}\n\
         \\label{sec:intro}\n\
         \\ref{sec:i}\n\
@@ -2185,11 +2229,12 @@ fn lsp_completion_commands_environments_and_refs() {
         \\sub\n";
     did_open(&client, &uri, 1, doc);
     let diags = recv_diagnostics(&client);
-    assert!(
-        diags.diagnostics.is_empty(),
-        "clean doc → no diagnostics, got {:?}",
-        diags.diagnostics
+    assert_eq!(diags.diagnostics.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&diags.diagnostics[0]).unwrap()["code"],
+        "unknown-command"
     );
+    assert_eq!(diags.diagnostics[0].range.start, Position::new(6, 0));
 
     // Command names: cursor at the end of `\sub` (line 6).
     let cmds = complete(&client, 2, &uri, Position::new(6, 4));
@@ -2218,6 +2263,12 @@ fn lsp_completion_commands_environments_and_refs() {
     let refs = complete(&client, 4, &uri, Position::new(2, 10));
     assert_eq!(labels(&refs), vec!["sec:intro"]);
     assert_eq!(refs[0].kind, Some(CompletionItemKind::Module));
+
+    // Candidate filtering must retain fuzzy command matches, not only prefixes.
+    did_change_full(&client, &uri, 2, &doc.replace("\\sub\n", "\\sbs\n"));
+    let _ = recv_diagnostics(&client);
+    let fuzzy = complete(&client, 5, &uri, Position::new(6, 4));
+    assert!(labels(&fuzzy).contains(&"subsection"));
 
     shutdown(&client, server_thread);
 }
@@ -2437,6 +2488,7 @@ fn lsp_cross_file_resolution_clears_diagnostics() {
     .unwrap();
     let main_path = dir.path().join("main.tex");
     let main = "\\documentclass{article}\n\
+        \\usepackage{biblatex}\n\
         \\addbibresource{refs.bib}\n\
         \\begin{document}\n\
         \\input{part}\n\
@@ -6074,7 +6126,11 @@ fn configuration_and_package_changes_refresh_unedited_documents_for_pull_clients
                 line += token[0].as_u64().unwrap();
                 line == 1 && token[1] == 0
             }),
-        "new package command should be highlighted: {tokens}"
+        "package command should remain highlighted: {tokens}"
+    );
+    assert_eq!(
+        tokens_after, tokens,
+        "package acquisition must not recolor commands"
     );
     query(&client, 8, "shutdown", Value::Null, &mut seen);
     send_notification(&client, "exit", Value::Null);
@@ -6183,14 +6239,32 @@ fn installed_package_index_refreshes_without_edits_or_client_events() {
     did_open(&client, &uri, 1, source);
     let mut id = 10;
     let mut links = || {
-        id += 1;
-        send_request(
-            &client,
-            id,
-            "textDocument/documentLink",
-            serde_json::json!({"textDocument":{"uri":uri}}),
-        );
-        recv_response(&client).response_result.unwrap()
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            id += 1;
+            send_request(
+                &client,
+                id,
+                "textDocument/documentLink",
+                serde_json::json!({"textDocument":{"uri":uri}}),
+            );
+            let response = recv_response(&client);
+            assert_eq!(response.id, RequestId::from(id));
+            // Installation refresh can invalidate a captured read. Retry the
+            // protocol's temporary response while retaining the link assertions.
+            if response
+                .response_result
+                .as_ref()
+                .is_err_and(|error| error.code == lsp_server::ErrorCode::ContentModified as i32)
+            {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "document-link inputs never settled"
+                );
+                continue;
+            }
+            break response.response_result.unwrap();
+        }
     };
     assert!(links().as_array().unwrap().is_empty());
     std::fs::create_dir_all(&root).unwrap();
@@ -6282,5 +6356,143 @@ fn compiler_diagnostic_setting_toggles_reports_without_disabling_aux() {
         }}),
     );
     wait(true);
+    shutdown(&client, server);
+}
+
+#[test]
+fn shared_source_edit_acquires_installed_dependencies_for_each_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let package = tree.path().join("reviewshared.sty");
+    std::fs::write(&package, "\\newcommand{\\fromshared}[1]{#1}\n").unwrap();
+    let source = "\\documentclass{article}\n\\input{shared}\n\\fromshared{x}\n";
+    let roots: Vec<_> = ["one.tex", "two.tex"]
+        .into_iter()
+        .map(|name| directory.path().join(name))
+        .collect();
+    for path in &roots {
+        std::fs::write(path, source).unwrap();
+    }
+    let shared = directory.path().join("shared.tex");
+    std::fs::write(&shared, "\\relax\n").unwrap();
+    let shared_uri = path_to_file_uri(&shared);
+    let (client, server) = start_server(Some(serde_json::json!({
+        "texmf": {"roots": [tree.path()], "explicitOnly": true, "useKpsewhich": false}
+    })));
+    for path in &roots {
+        did_open(&client, &path_to_file_uri(path), 1, source);
+    }
+    did_open(&client, &shared_uri, 1, "\\relax\n");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        send_request(
+            &client,
+            10,
+            "textDocument/documentLink",
+            serde_json::json!({"textDocument": {"uri": shared_uri}}),
+        );
+        match recv_response(&client).response_result {
+            Ok(value) => {
+                assert!(value.as_array().unwrap().is_empty());
+                break;
+            }
+            Err(error) if matches!(error.code, -32801 | -32802) => {}
+            Err(error) => panic!("unexpected document link error: {error:?}"),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "initial acquisition did not settle"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    did_change_full(&client, &shared_uri, 2, "\\RequirePackage{reviewshared}\n");
+    for (index, path) in roots.iter().enumerate() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            send_request(
+                &client,
+                11 + index as i32,
+                "textDocument/definition",
+                serde_json::json!({
+                    "textDocument": {"uri": path_to_file_uri(path)},
+                    "position": {"line": 2, "character": 3}
+                }),
+            );
+            match recv_response(&client).response_result {
+                Ok(value) if value.as_array().is_some_and(|items| !items.is_empty()) => {
+                    let locations: Vec<Location> = serde_json::from_value(value).unwrap();
+                    assert_eq!(locations.len(), 1);
+                    assert_eq!(locations[0].uri, path_to_file_uri(&package));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) if matches!(error.code, -32801 | -32802) => {}
+                Err(error) => panic!("unexpected definition error: {error:?}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shared dependency was not acquired"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    shutdown(&client, server);
+}
+
+#[test]
+fn installed_format_is_acquired_for_navigation() {
+    let directory = tempfile::tempdir().unwrap();
+    let tree = tempfile::tempdir().unwrap();
+    let kernel = tree.path().join("latex.ltx");
+    std::fs::write(
+        &kernel,
+        "\\def\\documentclass#1{}\n\\def\\[{open}\n\\def\\]{close}\n",
+    )
+    .unwrap();
+    std::fs::write(tree.path().join("ls-R"), "./:\nlatex.ltx\n").unwrap();
+    let path = directory.path().join("main.tex");
+    let uri = path_to_file_uri(&path);
+    let (client, server) = start_server(Some(serde_json::json!({
+        "texmf": {"roots": [tree.path()], "explicitOnly": true, "useKpsewhich": false}
+    })));
+    let definitions = |id, line, character, expect_target: bool| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            send_request(
+                &client,
+                id,
+                "textDocument/definition",
+                serde_json::json!({
+                    "textDocument": {"uri": uri}, "position": {"line": line, "character": character}
+                }),
+            );
+            let response = recv_response(&client);
+            match response.response_result {
+                Ok(value)
+                    if !expect_target
+                        || value.as_array().is_some_and(|items| !items.is_empty()) =>
+                {
+                    break serde_json::from_value::<Vec<Location>>(value).unwrap();
+                }
+                Err(error) if error.code == -32801 || error.code == -32802 => {}
+                Ok(_) => {}
+                Err(error) => panic!("unexpected definition error: {error:?}"),
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "format acquisition did not complete"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    did_open(&client, &uri, 1, "Text\n");
+    assert!(definitions(10, 0, 1, false).is_empty());
+    did_change_full(&client, &uri, 2, "\\documentclass{article}\n\\[x\\]\n");
+    for (id, line, col, target_line) in [(11, 0, 2, 0), (12, 1, 1, 1), (13, 1, 4, 2)] {
+        let targets = definitions(id, line, col, true);
+        assert_eq!(targets.len(), 1, "{line}:{col}");
+        assert_eq!(targets[0].uri, path_to_file_uri(&kernel));
+        assert_eq!(targets[0].range.start.line, target_line);
+    }
     shutdown(&client, server);
 }

@@ -212,7 +212,7 @@ pub(super) fn main_loop(
                                 on_type_formatting(&connection, &mut state, &job_tx, req)
                             }
                             method if method == DocumentSymbolRequest::METHOD.as_str() => {
-                                on_document_symbol(&connection, &mut state, &job_tx, req)
+                                on_document_symbol(&connection, &mut state, &job_tx, req, &policy)
                             }
                             method if method == WorkspaceSymbolRequest::METHOD.as_str() => {
                                 on_workspace_symbol(&connection, &mut state, &job_tx, req)

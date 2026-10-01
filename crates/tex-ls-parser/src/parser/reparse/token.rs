@@ -567,6 +567,27 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_let_assignment_token_across_line_endings() {
+        for text in [
+            "\\let\\alias\n=\\def\\ordinary{\\]}",
+            "\\let\\? % name\n=\\def\\ordinary{\\]}",
+            "\\let\n\\alias\nx\\def\\ordinary{\\]}",
+        ] {
+            let at = text
+                .find('=')
+                .unwrap_or_else(|| text.find("x\\def").unwrap());
+            assert_refuses(text, edit(at..at + 1, "="));
+            assert_refuses(text, edit(at..at + 1, "x"));
+        }
+        let text = "\\let\\alias\n%<*guard>\n=\\def\\frac{x_i}\n";
+        with_dtx_base(text, |base| {
+            let at = text.find('=').unwrap();
+            let e = edit(at..at + 1, "x");
+            assert!(reparse_token(base, &e, &e.apply(text)).is_none());
+        });
+    }
+
+    #[test]
     fn splices_partition_preserving_math_words() {
         assert_splices("$ab$\n", edit(2..2, "c"));
         assert_splices("$a b$\n", edit(3..3, "+"));

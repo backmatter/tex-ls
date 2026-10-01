@@ -332,7 +332,7 @@ pub fn latex_lint_findings(
         .then(|| resolved_labels(db, db.project_input(*file.project(db))));
     let citations = (!model.citations().is_empty())
         .then(|| resolved_citations(db, db.project_input(*file.project(db))));
-    crate::linter::lint_document(
+    let mut findings = crate::linter::lint_document(
         file.path(db),
         &root,
         model,
@@ -342,7 +342,22 @@ pub fn latex_lint_findings(
             db,
             db.project_input(*file.project(db)),
         )),
-    )
+    );
+    if findings.iter().any(|d| d.rule == "unknown-command") {
+        crate::linter::rules::unknown_command::suppress_defined(
+            &mut findings,
+            file.text(db),
+            editor_symbols(db, file).commands.iter().map(String::as_str),
+        );
+        crate::linter::rules::unknown_command::suppress_from_packages(
+            &mut findings,
+            file.text(db),
+            command_scope(db, file)
+                .iter()
+                .flat_map(|source| package_edges(db, *source)),
+        );
+    }
+    findings
 }
 
 /// BibTeX's current rules depend only on the local syntax and semantic model.
@@ -373,11 +388,12 @@ pub fn bib_lint_findings(
             })
             .map(|(path, source)| (path.as_path(), bib_semantic_model(db, *source))),
     );
-    crate::bib::linter::lint_document_with_project(
+    crate::bib::linter::check::lint_document_with_project_and_source(
         file.path(db),
         &parsed_bib_tree_root(db, file),
         bib_semantic_model(db, file),
         Some(&project),
+        file.text(db),
     )
 }
 
@@ -554,8 +570,17 @@ pub fn file_references(
     let Some(context) = crate::project::root_views::file_context(db, file) else {
         return Vec::new();
     };
+    file_references_in_context(db, file, context)
+}
+
+fn file_references_in_context(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+    context: &crate::external::FilePathContext,
+) -> Vec<crate::external::links::FileReference> {
     let root = parsed_tree_root(db, file);
     let mut references: Vec<crate::external::links::FileReference> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for base in &context.bases {
         for reference in crate::external::links::file_references(
             &root,
@@ -563,7 +588,63 @@ pub fn file_references(
             Some(&context.root_directory),
             &context.graphics,
         ) {
-            if !references.contains(&reference) {
+            if seen.insert(reference.clone()) {
+                references.push(reference);
+            }
+        }
+    }
+    references
+}
+
+/// A root request can resolve a shared source using that root's import context.
+/// Standalone requests keep the conservative default for ambiguous sources.
+fn file_references_from_root(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+    root: &std::path::Path,
+) -> Vec<crate::external::links::FileReference> {
+    let project = db.project_input(*file.project(db));
+    let Some(bases) = crate::project::root_views::contexts(db, project, root)
+        .and_then(|contexts| contexts.get(file.path(db)))
+    else {
+        return file_references(db, file).clone();
+    };
+    let root_directory = root.parent().unwrap_or(std::path::Path::new(""));
+    let context = crate::external::FilePathContext {
+        root_directory: root_directory.to_owned(),
+        bases: bases.clone(),
+        graphics: crate::project::root_views::project_sources(db, project)
+            .get(root)
+            .map(|root_file| root_graphics(db, *root_file).clone())
+            .unwrap_or_default(),
+    };
+    file_references_in_context(db, file, &context)
+}
+
+#[salsa::tracked(returns(ref))]
+fn root_graphics(db: &dyn IncrementalDb, file: SourceInput) -> Vec<PathBuf> {
+    crate::external::inherited_graphics(
+        &parsed_tree_root(db, file),
+        file.path(db).parent().unwrap_or(Path::new("")),
+    )
+}
+
+/// Acquisition may observe all candidate roots without selecting one for links.
+#[salsa::tracked(returns(ref))]
+pub fn file_discovery_references(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> Vec<crate::external::links::FileReference> {
+    let project = db.project_input(*file.project(db));
+    let roots = resolved_labels(db, project).candidate_roots(file.path(db));
+    if roots.len() <= 1 {
+        return file_references(db, file).clone();
+    }
+    let mut references = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for root in roots {
+        for reference in file_references_from_root(db, file, root) {
+            if seen.insert(reference.clone()) {
                 references.push(reference);
             }
         }
@@ -581,4 +662,296 @@ pub fn name_occurrences(
         file: Some(*file.identity(db)),
     });
     crate::name_refs::NameOccurrences::build(&parsed_tree_root(db, file))
+}
+
+/// Source membership for command lookup, including resolved installed dependencies.
+#[salsa::tracked(returns(ref))]
+pub(super) fn command_scope(db: &dyn IncrementalDb, origin: SourceInput) -> Vec<SourceInput> {
+    let project = db.project_input(*origin.project(db));
+    let members: std::collections::BTreeMap<_, _> = project
+        .files(db)
+        .iter()
+        .filter(|input| file_kind_or_tex(input.path(db)).is_latex())
+        .map(|input| (input.path(db).clone(), *input))
+        .collect();
+    let mut pending = crate::name_refs::macro_namespace(
+        resolved_labels(db, project),
+        package_graph(db, project),
+        origin.path(db),
+    );
+    let roots = crate::name_refs::macro_roots(
+        resolved_labels(db, project),
+        package_graph(db, project),
+        origin.path(db),
+    );
+    let root = if roots.len() == 1 {
+        roots.first().unwrap().as_path()
+    } else {
+        origin.path(db).as_path()
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut result = Vec::new();
+    while let Some(path) = pending.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let path = super::inputs::file_aliases(db, project)
+            .iter()
+            .find(|(requested, _)| requested == &path)
+            .map(|(_, actual)| actual)
+            .unwrap_or(&path);
+        let Some(file) = members.get(path) else {
+            continue;
+        };
+        result.push(*file);
+        for reference in file_references_from_root(db, *file, root)
+            .into_iter()
+            .filter(|reference| reference.loads_commands)
+        {
+            if let crate::external::Observation::Present(path) =
+                super::host::external_inputs::resolve_candidates(db, project, &reference.candidates)
+                    .target
+            {
+                pending.push(path);
+            }
+        }
+    }
+    result
+}
+
+/// Names and signatures shared by editor features, independent of formatting.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EditorSymbols {
+    pub signatures: SignatureDb,
+    pub commands: rustc_hash::FxHashSet<String>,
+    pub environments: rustc_hash::FxHashSet<String>,
+}
+
+#[salsa::tracked(returns(ref))]
+fn editor_declarations(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> Vec<crate::semantic::define::editor::EditorDeclaration> {
+    crate::semantic::define::editor::editor_declarations(&parsed_tree_root(db, file))
+}
+
+/// Commands whose rename would leave a literal alias source or generated name
+/// unchanged. Keep this range-free projection cached independently of offsets.
+#[salsa::tracked(returns(ref))]
+pub fn uneditable_command_names(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> std::collections::BTreeSet<SmolStr> {
+    let mut names = std::collections::BTreeSet::new();
+    for declaration in editor_declarations(db, file) {
+        if declaration.alias_is_name_text
+            && let Some(alias) = &declaration.alias
+        {
+            names.insert(alias.clone());
+        }
+        let site = &declaration.site;
+        if site.kind == crate::semantic::DefSiteKind::Command {
+            let spelling = file.text(db)[site.name_range].strip_prefix('\\');
+            if spelling != Some(site.name.as_str()) {
+                // A later direct redefinition does not make this generated or
+                // name-text declaration safe to omit from the rename edits.
+                names.insert(site.name.clone());
+                if let Some(spelling) = spelling {
+                    names.insert(spelling.into());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Preserve declaration/include order without retaining offsets. Prose edits
+/// can then reuse the root's merged symbols even when every later range moves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EditorEvent {
+    Include(PathBuf),
+    Declaration {
+        name: SmolStr,
+        kind: crate::semantic::DefSiteKind,
+        signatures: Box<SignatureDb>,
+        alias: Option<SmolStr>,
+    },
+}
+
+#[salsa::tracked(returns(ref))]
+fn editor_events(db: &dyn IncrementalDb, file: SourceInput, root: SourceInput) -> Vec<EditorEvent> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::EditorEvents,
+        file: Some(*file.identity(db)),
+    });
+    let project = db.project_input(*file.project(db));
+    let mut events: Vec<_> = editor_declarations(db, file)
+        .iter()
+        .map(|declaration| {
+            (
+                declaration.site.range.start(),
+                EditorEvent::Declaration {
+                    name: declaration.site.name.clone(),
+                    kind: declaration.site.kind,
+                    signatures: Box::new(declaration.signatures.clone()),
+                    alias: declaration.alias.clone(),
+                },
+            )
+        })
+        .collect();
+    for reference in file_references_from_root(db, file, root.path(db))
+        .into_iter()
+        .filter(|reference| reference.loads_commands)
+    {
+        if let crate::external::Observation::Present(path) =
+            super::host::external_inputs::resolve_candidates(db, project, &reference.candidates)
+                .target
+        {
+            events.push((reference.range.start(), EditorEvent::Include(path)));
+        }
+    }
+    events.sort_by_key(|(offset, _)| *offset);
+    events.into_iter().map(|(_, event)| event).collect()
+}
+
+/// Kernel and root declarations are visited in source order, following includes.
+/// Cycle guards and supplied observations keep this host-independent.
+#[salsa::tracked(returns(ref))]
+pub fn editor_symbols(db: &dyn IncrementalDb, origin: SourceInput) -> EditorSymbols {
+    use crate::external::Observation;
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::EditorSymbols,
+        file: Some(*origin.identity(db)),
+    });
+    let project = db.project_input(*origin.project(db));
+    let members: std::collections::BTreeMap<_, _> = project
+        .files(db)
+        .iter()
+        .filter(|file| file_kind_or_tex(file.path(db)).is_latex())
+        .map(|file| (file.path(db).clone(), *file))
+        .collect();
+    let mut roots = Vec::new();
+    if let Observation::Present(metadata) = project.installed(db).as_ref()
+        && let Some(path) = metadata.index.by_name.get("latex.ltx")
+    {
+        roots.push(path.clone());
+    }
+    let loaders = crate::name_refs::macro_roots(
+        resolved_labels(db, project),
+        package_graph(db, project),
+        origin.path(db),
+    );
+    roots.push(if loaders.len() == 1 {
+        loaders.first().unwrap().clone()
+    } else {
+        origin.path(db).clone()
+    });
+    enum Work {
+        File {
+            path: std::path::PathBuf,
+            root: SourceInput,
+        },
+        Declaration(SourceInput, SourceInput, usize),
+    }
+    let mut pending: Vec<_> = roots
+        .into_iter()
+        .rev()
+        .filter_map(|path| {
+            let actual = super::inputs::file_aliases(db, project)
+                .iter()
+                .find(|(requested, _)| requested == &path)
+                .map(|(_, actual)| actual)
+                .unwrap_or(&path);
+            members
+                .get(actual)
+                .map(|root| Work::File { root: *root, path })
+        })
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut ordered = Vec::new();
+    while let Some(work) = pending.pop() {
+        match work {
+            Work::Declaration(file, root, index) => ordered.push((file, root, index)),
+            Work::File { path, root } => {
+                let path = super::inputs::file_aliases(db, project)
+                    .iter()
+                    .find(|(requested, _)| requested == &path)
+                    .map(|(_, actual)| actual)
+                    .unwrap_or(&path);
+                let Some(file) = members.get(path) else {
+                    continue;
+                };
+                if !seen.insert(path.clone()) {
+                    continue;
+                }
+                pending.extend(editor_events(db, *file, root).iter().enumerate().rev().map(
+                    |(index, event)| match event {
+                        EditorEvent::Include(path) => Work::File {
+                            path: path.clone(),
+                            root,
+                        },
+                        EditorEvent::Declaration { .. } => Work::Declaration(*file, root, index),
+                    },
+                ));
+            }
+        }
+    }
+    let mut result = EditorSymbols::default();
+    for (file, root, index) in ordered {
+        let EditorEvent::Declaration {
+            name,
+            kind,
+            signatures,
+            alias,
+        } = &editor_events(db, file, root)[index]
+        else {
+            unreachable!("only declarations are collected")
+        };
+        if *kind == crate::semantic::DefSiteKind::Command {
+            let signature = alias.as_ref().and_then(|target| {
+                result.signatures.command(target).cloned().or_else(|| {
+                    (!result.commands.contains(target.as_str()))
+                        .then(|| {
+                            crate::hover::lookup_command(&result.signatures, target)
+                                .map(|(sig, _)| sig.clone())
+                        })
+                        .flatten()
+                })
+            });
+            result.commands.insert(name.to_string());
+            result.signatures.remove_command(name);
+            result.signatures.merge_from(
+                signatures,
+                if file == origin {
+                    None
+                } else {
+                    file.path(db).file_stem().and_then(|s| s.to_str())
+                },
+            );
+            if let Some(signature) = signature {
+                result.signatures.insert_command(name.clone(), signature);
+            }
+        } else {
+            result.environments.insert(name.to_string());
+            result.signatures.remove_environment(name);
+            result.signatures.merge_from(
+                signatures,
+                if file == origin {
+                    None
+                } else {
+                    file.path(db).file_stem().and_then(|s| s.to_str())
+                },
+            );
+        }
+    }
+    result
+        .signatures
+        .merge_declarations(parse_declarations_of(db, origin));
+    result
+        .commands
+        .extend(origin.declarations(db).command_names().map(str::to_owned));
+    result
+        .environments
+        .extend(result.signatures.environment_names().map(str::to_owned));
+    result
 }

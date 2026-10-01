@@ -27,29 +27,42 @@ pub struct BibOutlineItem {
 }
 
 pub fn outline(model: &Model, root: &SyntaxNode) -> Vec<BibOutlineItem> {
+    outline_items(model, root, true)
+}
+
+/// Entry and string symbols for workspace search, without unused field children.
+pub fn top_level_outline(model: &Model, root: &SyntaxNode) -> Vec<BibOutlineItem> {
+    outline_items(model, root, false)
+}
+
+fn outline_items(model: &Model, root: &SyntaxNode, with_fields: bool) -> Vec<BibOutlineItem> {
     let mut items: Vec<_> = model
         .entries()
         .iter()
         .map(|entry| {
-            let children = ast::entry_at_range(root, entry.range)
-                .into_iter()
-                .flat_map(|node| ast::fields(&node).collect::<Vec<_>>())
-                .filter_map(|field| {
-                    let name = ast::field_name(&field)?;
-                    let selection_range = field
-                        .children()
-                        .find(|node| node.kind() == SyntaxKind::FIELD_NAME)?
-                        .text_range();
-                    Some(BibOutlineItem {
-                        name,
-                        detail: String::new(),
-                        kind: BibSymbolKind::Field,
-                        range: field.text_range(),
-                        selection_range,
-                        children: Vec::new(),
+            let children = if with_fields {
+                ast::entry_at_range(root, entry.range)
+                    .into_iter()
+                    .flat_map(|node| ast::fields(&node).collect::<Vec<_>>())
+                    .filter_map(|field| {
+                        let name = ast::field_name(&field)?;
+                        let selection_range = field
+                            .children()
+                            .find(|node| node.kind() == SyntaxKind::FIELD_NAME)?
+                            .text_range();
+                        Some(BibOutlineItem {
+                            name,
+                            detail: String::new(),
+                            kind: BibSymbolKind::Field,
+                            range: field.text_range(),
+                            selection_range,
+                            children: Vec::new(),
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            } else {
+                Vec::new()
+            };
             BibOutlineItem {
                 name: entry.key.to_string(),
                 detail: entry.entry_type.to_string(),
@@ -108,5 +121,10 @@ mod tests {
         assert_eq!(items[0].kind, BibSymbolKind::String);
         assert_eq!(items[1].kind, BibSymbolKind::Book);
         assert_eq!(&source[items[1].children[0].selection_range], "title");
+        let mut expected = items;
+        for item in &mut expected {
+            item.children.clear();
+        }
+        assert_eq!(top_level_outline(&Model::build(&root), &root), expected);
     }
 }

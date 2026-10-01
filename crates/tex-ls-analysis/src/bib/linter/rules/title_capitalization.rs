@@ -28,7 +28,7 @@
 use std::path::PathBuf;
 
 use crate::bib::ast::{field_name, field_value};
-use crate::bib::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
+use crate::bib::syntax::{SyntaxElement, SyntaxKind};
 use crate::linter::diagnostic::{Diagnostic, Severity};
 
 use super::{BibRule, BibRuleContext, Example};
@@ -80,7 +80,7 @@ impl BibRule for TitleCapitalization {
         &[SyntaxKind::FIELD]
     }
 
-    fn check(&self, el: &SyntaxElement, _ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
+    fn check(&self, el: &SyntaxElement, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
         let Some(field) = el.as_node() else {
             return;
         };
@@ -96,18 +96,19 @@ impl BibRule for TitleCapitalization {
         };
         for piece in value.children() {
             let (inner, base) = match piece.kind() {
-                SyntaxKind::BRACE_GROUP => match inner_of(&piece, '{', '}') {
+                SyntaxKind::BRACE_GROUP => match inner_of(ctx.node_text(&piece), '{', '}') {
                     Some(parts) => parts,
                     None => continue,
                 },
-                SyntaxKind::QUOTED => match inner_of(&piece, '"', '"') {
+                SyntaxKind::QUOTED => match inner_of(ctx.node_text(&piece), '"', '"') {
                     Some(parts) => parts,
                     None => continue,
                 },
                 // Bare LITERAL pieces are macros/numbers, not title prose.
                 _ => continue,
             };
-            for (start, end, run) in unprotected_acronyms(&inner) {
+            let base = usize::from(piece.text_range().start()) + base;
+            for (start, end, run) in unprotected_acronyms(inner) {
                 sink.push(Diagnostic {
                     rule: self.id(),
                     severity: self.default_severity(),
@@ -127,13 +128,11 @@ impl BibRule for TitleCapitalization {
 }
 
 /// The inner text of a delimited piece (between `open` and `close`) and the byte
-/// offset of that inner text in the document. Returns `None` for a piece missing
+/// offset of that inner text in the piece. Returns `None` for a piece missing
 /// its closing delimiter (a recovery artifact) so a partial group is not scanned.
-fn inner_of(node: &SyntaxNode, open: char, close: char) -> Option<(String, usize)> {
-    let text = node.to_string();
+fn inner_of(text: &str, open: char, close: char) -> Option<(&str, usize)> {
     let stripped = text.strip_prefix(open)?.strip_suffix(close)?;
-    let base = usize::from(node.text_range().start()) + open.len_utf8();
-    Some((stripped.to_string(), base))
+    Some((stripped, open.len_utf8()))
 }
 
 /// Find the byte ranges (relative to the start of `text`) of acronym-like capital
@@ -148,23 +147,19 @@ fn unprotected_acronyms(text: &str) -> Vec<(usize, usize, String)> {
     // brand pattern `iPhone` apart from a surname particle like `McDonald`).
     let mut prev_alpha = false;
     let mut word_has_upper = false;
-    let chars: Vec<(usize, char)> = text.char_indices().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let (off, ch) = chars[i];
+    let mut chars = text.char_indices().peekable();
+    while let Some((off, ch)) = chars.next() {
         match ch {
             '{' => {
                 depth += 1;
                 prev_alpha = false;
                 word_has_upper = false;
-                i += 1;
                 continue;
             }
             '}' => {
                 depth -= 1;
                 prev_alpha = false;
                 word_has_upper = false;
-                i += 1;
                 continue;
             }
             _ => {}
@@ -175,18 +170,17 @@ fn unprotected_acronyms(text: &str) -> Vec<(usize, usize, String)> {
             // A single interior capital counts only when it is the *first* capital of
             // a lowercase-initial word; a later capital is a name/style token.
             let midword_single = prev_alpha && !word_has_upper;
-            let mut j = i;
-            while j < chars.len() && chars[j].1.is_ascii_uppercase() {
-                j += 1;
+            let mut run_len = 1;
+            while chars.peek().is_some_and(|(_, ch)| ch.is_ascii_uppercase()) {
+                chars.next();
+                run_len += 1;
             }
-            let run_len = j - i;
-            let run_end = chars.get(j).map(|&(o, _)| o).unwrap_or(text.len());
+            let run_end = chars.peek().map(|&(o, _)| o).unwrap_or(text.len());
             if run_len >= 2 || midword_single {
                 hits.push((run_start, run_end, text[run_start..run_end].to_string()));
             }
             prev_alpha = true;
             word_has_upper = true;
-            i = j;
             continue;
         }
         let alpha = depth == 0 && ch.is_alphabetic();
@@ -195,7 +189,6 @@ fn unprotected_acronyms(text: &str) -> Vec<(usize, usize, String)> {
             word_has_upper = false;
         }
         prev_alpha = alpha;
-        i += 1;
     }
     hits
 }
@@ -213,6 +206,7 @@ mod tests {
             project: None,
             path: std::path::Path::new("x.bib"),
             root: &root,
+            source: src,
             model: &model,
             db: crate::bib::semantic::builtin(),
             suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),

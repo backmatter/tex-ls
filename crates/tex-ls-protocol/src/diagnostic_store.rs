@@ -40,6 +40,9 @@ fn identity(
         );
         members.extend(citations.bib_definers(citer).iter().cloned());
     }
+    if file_kind_for(path).is_latex() {
+        members.extend(snapshot.command_source_files(path));
+    }
     // Local package declarations can contribute signatures and option facts.
     members.extend(
         snapshot
@@ -95,6 +98,13 @@ pub fn document_diagnostics(
     enc: PositionEncoding,
     previous: Option<&str>,
 ) -> Value {
+    if snapshot.is_installed_source(path) {
+        return DiagnosticEntry {
+            items: Vec::new(),
+            result_id: "installed-source".into(),
+        }
+        .report(previous);
+    }
     let result_id = identity(snapshot, path, rules, enc);
     if previous == Some(result_id.as_str()) {
         json!({"kind":"unchanged", "resultId":result_id})
@@ -116,6 +126,12 @@ impl DiagnosticEntry {
         rules: &RuleSelection,
         enc: PositionEncoding,
     ) -> Self {
+        if snapshot.is_installed_source(path) {
+            return Self {
+                items: Vec::new(),
+                result_id: "installed-source".into(),
+            };
+        }
         Self::capture_with_identity(
             snapshot,
             path,
@@ -232,10 +248,18 @@ pub fn workspace_diagnostics(
     version: impl Fn(&Path) -> Option<i32>,
 ) -> Value {
     let mut items = Vec::new();
-    stream_workspace_diagnostics(snapshots, previous, enc, rules, version, |batch| {
-        items.extend(batch);
-        true
-    });
+    stream_workspace_diagnostics(
+        snapshots,
+        previous,
+        enc,
+        rules,
+        version,
+        |_| true,
+        |batch| {
+            items.extend(batch);
+            true
+        },
+    );
     json!({"items":items})
 }
 
@@ -246,6 +270,7 @@ pub fn stream_workspace_diagnostics(
     enc: PositionEncoding,
     rules: impl Fn(&Path) -> RuleSelection,
     version: impl Fn(&Path) -> Option<i32>,
+    include: impl Fn(&Path) -> bool,
     mut emit: impl FnMut(Vec<Value>) -> bool,
 ) {
     let previous: std::collections::BTreeMap<String, String> = previous
@@ -261,12 +286,16 @@ pub fn stream_workspace_diagnostics(
         .collect();
     let mut sources = std::collections::BTreeMap::new();
     for snapshot in snapshots {
-        for (path, _) in snapshot.tracked_files() {
-            if let Some(uri) = path_to_uri(&path) {
-                sources
-                    .entry(uri.as_str().to_owned())
-                    .or_insert((snapshot, path));
+        for (path, _) in snapshot.workspace_diagnostic_files() {
+            let Some(uri) = path_to_uri(&path) else {
+                continue;
+            };
+            if !include(&path) {
+                continue;
             }
+            sources
+                .entry(uri.as_str().to_owned())
+                .or_insert((snapshot, path));
         }
     }
     let mut batch = Vec::new();

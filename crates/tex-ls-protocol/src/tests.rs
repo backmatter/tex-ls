@@ -1,6 +1,129 @@
 use super::*;
 use crate::test_host::TestHost;
 use tex_ls_analysis::linter::lint_document;
+
+#[test]
+fn builtin_environment_names_navigate_to_the_opposite_delimiter() {
+    let mut db = IncrementalDatabase::default();
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    db.apply_change(
+        &path,
+        "\\begin{document}\n\\begin{itemize}\n\\end{itemize}\n\\end{document}\n",
+        None,
+    );
+    let snapshot = db.snapshot();
+    for (line, start, other_line, other_start, other_kind) in [
+        (0, 7, 3, 5, "closing"),
+        (1, 7, 2, 5, "closing"),
+        (2, 5, 1, 7, "opening"),
+        (3, 5, 0, 7, "opening"),
+    ] {
+        let position = Position::new(line, start + 2);
+        let links = compute_goto_definition(&snapshot, &path, position, PositionEncoding::Utf16);
+        assert_eq!(links.len(), 1, "{line}: {links:?}");
+        assert_eq!(
+            links[0].origin_selection_range.unwrap().start,
+            Position::new(line, start)
+        );
+        assert_eq!(
+            links[0].target_selection_range.start,
+            Position::new(other_line, other_start)
+        );
+        let hover = hover::compute_hover(&snapshot, &path, PositionEncoding::Utf16, position)
+            .expect("environment hover");
+        assert_eq!(hover.range.unwrap().start, Position::new(line, start));
+        assert!(
+            serde_json::to_string(&hover.contents)
+                .unwrap()
+                .contains(&format!(
+                    "Matching {other_kind} delimiter: line {}.",
+                    other_line + 1
+                )),
+            "{hover:?}"
+        );
+    }
+}
+
+#[test]
+fn delimiter_hover_switches_only_on_the_actual_command_or_name() {
+    let mut db = IncrementalDatabase::default();
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    db.apply_change(&path, "\\begin{document}\n\\end{document}\n", None);
+    let snapshot = db.snapshot();
+    for (line, command_end, name_start, name_end) in [(0, 6, 7, 15), (1, 4, 5, 13)] {
+        for character in 0..command_end {
+            let hover = hover::compute_hover(
+                &snapshot,
+                &path,
+                PositionEncoding::Utf16,
+                Position::new(line, character),
+            )
+            .expect("command hover");
+            assert_eq!(hover.range.unwrap().end.character, command_end);
+        }
+        for character in [command_end, name_end] {
+            assert!(
+                hover::compute_hover(
+                    &snapshot,
+                    &path,
+                    PositionEncoding::Utf16,
+                    Position::new(line, character),
+                )
+                .is_none(),
+                "no hover on delimiter brace at {line}:{character}"
+            );
+        }
+        for character in name_start..name_end {
+            let hover = hover::compute_hover(
+                &snapshot,
+                &path,
+                PositionEncoding::Utf16,
+                Position::new(line, character),
+            )
+            .expect("environment hover");
+            assert_eq!(hover.range.unwrap().start.character, name_start);
+        }
+    }
+}
+
+#[test]
+fn command_definition_origin_includes_its_backslash() {
+    let mut db = IncrementalDatabase::default();
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    db.apply_change(&path, "\\newcommand{\\demo}{}\n\\demo\n", None);
+    let snapshot = db.snapshot();
+    let links = compute_goto_definition(
+        &snapshot,
+        &path,
+        Position::new(1, 0),
+        PositionEncoding::Utf16,
+    );
+    assert_eq!(links.len(), 1);
+    assert_eq!(
+        links[0].origin_selection_range,
+        Some(Range::new(Position::new(1, 0), Position::new(1, 5)))
+    );
+}
+
+#[test]
+fn environment_pair_navigation_rejects_incomplete_and_mismatched_delimiters() {
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    for source in ["\\begin{itemize}\n", "\\begin{itemize}\n\\end{enumerate}\n"] {
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(&path, source, None);
+        let snapshot = db.snapshot();
+        assert!(
+            compute_goto_definition(
+                &snapshot,
+                &path,
+                Position::new(0, 9),
+                PositionEncoding::Utf16
+            )
+            .is_empty(),
+            "{source}"
+        );
+    }
+}
 #[test]
 fn refactoring_uses_snapshot_syntax_without_running_lint() {
     let mut db = IncrementalDatabase::default();

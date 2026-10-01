@@ -1,0 +1,127 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "semanticTokens": {
+          "tokenTypes": [
+            "macro",
+            "namespace",
+            "string"
+          ],
+          "formats": [
+            "relative"
+          ],
+          "requests": {
+            "full": true
+          }
+        },
+        "definition": {
+          "linkSupport": true
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\usetheme{metro}\n\\usetikzlibrary{calc}\n\\bibliographystyle{plain}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/beamerthememetro.sty",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% theme\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/tikzlibrarycalc.code.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% library\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/plain.bst",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% style\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 12
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 18
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///module-arguments/main.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 22
+        }
+      }
+    }
+  ]
+}

@@ -224,7 +224,17 @@ pub(crate) fn is_definition_keyword(text: &str) -> bool {
             | "\\renewcommand"
             | "\\providecommand"
             | "\\DeclareRobustCommand"
+            | "\\newrobustcmd"
+            | "\\renewrobustcmd"
+            | "\\providerobustcmd"
             | "\\NewDocumentCommand"
+            | "\\NewExpandableDocumentCommand"
+            | "\\RenewExpandableDocumentCommand"
+            | "\\ProvideExpandableDocumentCommand"
+            | "\\DeclareExpandableDocumentCommand"
+            | "\\NewCommandCopy"
+            | "\\RenewCommandCopy"
+            | "\\DeclareCommandCopy"
             | "\\RenewDocumentCommand"
             | "\\ProvideDocumentCommand"
             | "\\DeclareDocumentCommand"
@@ -233,13 +243,14 @@ pub(crate) fn is_definition_keyword(text: &str) -> bool {
             | "\\gdef"
             | "\\xdef"
             | "\\let"
+            | "\\newif"
     )
 }
 
 /// Returns the number of following control words claimed as definition names.
 pub(crate) fn definition_name_slots(text: &str) -> u8 {
     match text {
-        "\\let" => 2,
+        "\\let" | "\\NewCommandCopy" | "\\RenewCommandCopy" | "\\DeclareCommandCopy" => 2,
         _ if is_definition_keyword(text) => 1,
         _ => 0,
     }

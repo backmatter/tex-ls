@@ -34,9 +34,17 @@ python3 scripts/benchmark_lsp_rpc.py \
   --project target/lsp-release-inputs/bibliography/rendering-bibtex.bib
 ```
 
-Each run starts a fresh server with TEXMF disabled. Real-project runs wait for
-acquisition and document symbols, then measure completion and diagnostics through
-five edits. Assertions check completion, report invalidation/reuse, and zero warm
+Each run starts a fresh server with TEXMF disabled by default. Pass `--texmf` to
+include the local TeX installation and record that choice in the output.
+Real-project runs wait for acquisition and document symbols, then warm editor
+features so intentional first-use source loads are outside the edit IO counter.
+The edit IO baseline requires a quiet acquisition window because completed
+source reads can queue a final compiler-artifact batch.
+They measure completion, hover, definition, and diagnostics
+through five edits. Synthetic runs
+assert that a documented command resolves to its declaration, including across
+files. Real-project definition counts depend on the available dependencies.
+Assertions check completion, report invalidation/reuse, and zero warm
 source reads/compiler probes. Fallback watcher reads are outside those acquisition
 counters. Each workload also observes three idle seconds (`--idle-seconds`): Linux
 CPU and read counters cover the whole process, including fallback watching and
@@ -66,8 +74,9 @@ Run `cargo run --release --locked --example NAME`:
 `session_profile` needs `--features tex-ls-browser/allocation-metrics`.
 `scripts/profile_wasm_session.cjs` profiles an allocation-metrics WASM build.
 
-`bibliography_profile` checks full/incremental equivalence and compares flat symbols
-with a reference adapter. Allocation counting adds overhead; stage timings are not
+`bibliography_profile` checks full/incremental equivalence and compares direct flat
+symbols and the response adapter with a reference adapter. It records their
+conversion and JSON allocation peaks separately. Allocation counting adds overhead; stage timings are not
 RPC latency. `bib_rules_profile -- OUTPUT_PREFIX` writes complete model and finding
 records for before/after comparison. Isolated rule times include their own traversal
 and suppression setup, so do not sum them; the example checks combined findings.

@@ -1,0 +1,377 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "diagnostic": {},
+        "definition": {
+          "linkSupport": true
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/shared.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\newcommand{\\fromshared}[1]{#1}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/numeric.bbx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% bibliography style"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/numeric.cbx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% citation style"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\InputIfFileExists{shared.tex}{}{}\n\\newcommand{\\original}[1]{#1}\n\\NewCommandCopy{\\copied}{\\original}\n\\NewExpandableDocumentCommand{\\expanded}{m}{#1}\n\\newif\\ifflag\n\\newtheorem{statement}{Statement}\n\\ExplSyntaxOn\\cs_new:cpn {literal} #1 {#1}\\ExplSyntaxOff\n\\copied{value}\n\\expanded{value}\n\\flagtrue\n\\literal{value}\n\\fromshared{value}\n\\begin{statement}[Title]Text\\end{statement}\n\\usepackage[style=numeric]{biblatex}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 9,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 9,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 9,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 11,
+          "character": 3
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 11,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 11,
+          "character": 3
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 12,
+          "character": 10
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 12,
+          "character": 10
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 12,
+          "character": 10
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 13,
+          "character": 22
+        }
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 9
+        }
+      },
+      "expectedActiveParameter": 0
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 8,
+          "character": 11
+        }
+      },
+      "expectedActiveParameter": 0
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 10,
+          "character": 10
+        }
+      },
+      "expectedActiveParameter": 0
+    },
+    {
+      "method": "textDocument/signatureHelp",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        },
+        "position": {
+          "line": 11,
+          "character": 13
+        }
+      },
+      "expectedActiveParameter": 0
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///editor-declarations/main.tex"
+        }
+      }
+    }
+  ]
+}

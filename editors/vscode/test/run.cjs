@@ -50,8 +50,23 @@ async function main() {
         // Keep the test window responsive when a CI desktop takes focus.
         '--disable-background-timer-throttling', '--disable-renderer-backgrounding',
         '--disable-backgrounding-occluded-windows',
-        '--log', 'trace', '--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-gpu', '--no-sandbox'],
+        // Enable protocol traces only for this extension.
+        '--log', 'backmatter.tex-ls:trace',
+        '--disable-extensions', '--skip-welcome', '--skip-release-notes', '--disable-gpu', '--no-sandbox'],
     });
+    await fs.access(path.join(temp, '.integration-complete')).catch(() => {
+      throw new Error('VS Code exited without completing the integration tests. '
+        + 'VSCODE_EXECUTABLE_PATH must point to the Electron executable, not a command-line launcher.');
+    });
+    const logs = path.join(temp, 'user', 'logs');
+    for (const name of await fs.readdir(logs, { recursive: true })) {
+      if (/tex-ls.*\.log$/.test(name)) {
+        const contents = await fs.readFile(path.join(logs, name), 'utf8');
+        if (/\bpanicked at\b|Language request .* panicked/.test(contents)) {
+          throw new Error('The language server panicked during the integration tests.');
+        }
+      }
+    }
   } catch (error) {
     const logs = path.join(temp, 'user', 'logs');
     for (const name of await fs.readdir(logs, { recursive: true }).catch(() => [])) {

@@ -81,7 +81,10 @@ try {
   // Tests supply installation observations explicitly; do not inherit a local
   // machine's TeX tree unless the fixture deliberately configures discovery.
   const initialize = { capabilities: {}, ...fixture.initialize };
-  initialize.initializationOptions = { texmf: { enabled: false }, ...initialize.initializationOptions };
+  initialize.initializationOptions = {
+    ...initialize.initializationOptions,
+    texmf: { enabled: false, ...initialize.initializationOptions?.texmf },
+  };
   await request('initialize', initialize);
   send({ method: 'initialized', params: {} });
   session.dispatch('initialize', JSON.stringify(initialize));

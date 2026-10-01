@@ -60,6 +60,267 @@ fn lint_source(db: &mut Database, path: &Path, text: impl IntoSourceText) -> Sou
 }
 
 #[test]
+fn unknown_commands_use_package_loads_from_the_selected_root() {
+    let mut db = Database::default();
+    let first = lint_source(
+        &mut db,
+        Path::new("/project/one.tex"),
+        "\\documentclass{article}\n\\input{preamble}\n\\input{shared}\n\\ce{H2O}\n",
+    );
+    let second = lint_source(
+        &mut db,
+        Path::new("/project/two.tex"),
+        "\\documentclass{article}\n\\input{shared}\n\\ce{H2O}\n",
+    );
+    lint_source(
+        &mut db,
+        Path::new("/project/preamble.tex"),
+        "\\usepackage{mhchem}\n",
+    );
+    lint_source(&mut db, Path::new("/project/shared.tex"), "Text\n");
+    let unknown = |file| {
+        latex_lint_findings(&db, file)
+            .iter()
+            .filter(|finding| finding.rule == "unknown-command")
+            .count()
+    };
+    assert_eq!(unknown(first), 0);
+    assert_eq!(unknown(second), 1);
+}
+
+#[test]
+fn unknown_commands_follow_transitive_local_package_loads() {
+    let mut db = Database::default();
+    let document = lint_source(
+        &mut db,
+        Path::new("/project/main.tex"),
+        "\\documentclass{article}\n\\usepackage{local}\n\\SI{1}{m}\n",
+    );
+    lint_source(
+        &mut db,
+        Path::new("/project/local.sty"),
+        "\\RequirePackage{siunitx}\n",
+    );
+    assert!(
+        latex_lint_findings(&db, document)
+            .iter()
+            .all(|finding| finding.rule != "unknown-command")
+    );
+    lint_source(&mut db, Path::new("/project/local.sty"), "% no package\n");
+    assert!(
+        latex_lint_findings(&db, document)
+            .iter()
+            .any(|finding| finding.rule == "unknown-command")
+    );
+}
+
+#[test]
+fn editor_symbols_follow_shared_sources_in_the_selected_root() {
+    let mut db = Database::default();
+    let first = lint_source(
+        &mut db,
+        Path::new("/project/one/main.tex"),
+        "\\documentclass{article}\n\\input{../shared}\n\\fromleaf\n",
+    );
+    let second = lint_source(
+        &mut db,
+        Path::new("/project/two/main.tex"),
+        "\\documentclass{article}\n\\input{../shared}\n\\fromleaf\n",
+    );
+    lint_source(&mut db, Path::new("/project/shared.tex"), "\\input{leaf}\n");
+    for (path, source) in [
+        ("/project/one/leaf.tex", "\\newcommand{\\fromleaf}[1]{#1}\n"),
+        (
+            "/project/two/leaf.tex",
+            "\\newcommand{\\fromleaf}[2]{#1#2}\n",
+        ),
+    ] {
+        lint_source(&mut db, Path::new(path), source);
+    }
+    for (file, arity) in [(first, 1), (second, 2)] {
+        assert_eq!(
+            editor_symbols(&db, file)
+                .signatures
+                .command("fromleaf")
+                .map(|sig| sig.args.len()),
+            Some(arity)
+        );
+        assert!(
+            latex_lint_findings(&db, file)
+                .iter()
+                .all(|finding| finding.rule != "unknown-command")
+        );
+    }
+}
+
+#[test]
+fn displayed_files_do_not_define_document_commands() {
+    let mut db = Database::default();
+    let document = lint_source(
+        &mut db,
+        Path::new("/project/main.tex"),
+        "\\lstinputlisting{listing.tex}\n\\includegraphics{picture.tex}\n\\bibliographystyle{plain}\n\\input{executed}\n\\fromlisting \\frompicture \\frombibstyle \\frominput\n",
+    );
+    for (name, command) in [
+        ("listing.tex", "fromlisting"),
+        ("picture.tex", "frompicture"),
+        ("plain.bst", "frombibstyle"),
+        ("executed.tex", "frominput"),
+    ] {
+        lint_source(
+            &mut db,
+            &Path::new("/project").join(name),
+            format!("\\newcommand{{\\{command}}}{{}}\n"),
+        );
+    }
+    let symbols = editor_symbols(&db, document);
+    assert!(!symbols.commands.contains("fromlisting"));
+    assert!(!symbols.commands.contains("frompicture"));
+    assert!(!symbols.commands.contains("frombibstyle"));
+    assert!(symbols.commands.contains("frominput"));
+    let unknown: Vec<_> = latex_lint_findings(&db, document)
+        .iter()
+        .filter(|finding| finding.rule == "unknown-command")
+        .map(|finding| finding.message.as_str())
+        .collect();
+    assert!(
+        unknown
+            .iter()
+            .any(|message| message.contains("fromlisting"))
+    );
+    assert!(
+        unknown
+            .iter()
+            .any(|message| message.contains("frompicture"))
+    );
+    assert!(
+        unknown
+            .iter()
+            .any(|message| message.contains("frombibstyle"))
+    );
+    assert!(!unknown.iter().any(|message| message.contains("frominput")));
+}
+
+#[test]
+fn acquisition_observes_all_shared_source_contexts_without_selecting_a_link() {
+    let mut db = IncrementalDatabase::default();
+    for (path, source) in [
+        (
+            "/project/one/main.tex",
+            "\\documentclass{article}\n\\input{../shared}\n",
+        ),
+        (
+            "/project/two/main.tex",
+            "\\documentclass{article}\n\\input{../shared}\n",
+        ),
+        ("/project/shared.tex", "\\input{leaf}\n"),
+    ] {
+        db.apply_change(Path::new(path), source, None);
+    }
+    let shared = Path::new("/project/shared.tex");
+    {
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(shared).unwrap();
+        assert!(snapshot.file_references(file).is_empty());
+        let needs = snapshot.file_discovery_needs(shared);
+        for path in ["/project/one/leaf.tex", "/project/two/leaf.tex"] {
+            assert!(needs.contains(&crate::external::InputNeed::Location(path.into())));
+        }
+    }
+    db.apply_change(shared, "\\input{replacement}\n", None);
+    let snapshot = db.snapshot();
+    let needs = snapshot.file_discovery_needs(shared);
+    for path in [
+        "/project/one/replacement.tex",
+        "/project/two/replacement.tex",
+    ] {
+        assert!(needs.contains(&crate::external::InputNeed::Location(path.into())));
+    }
+    assert!(!needs.contains(&crate::external::InputNeed::Location(
+        "/project/one/leaf.tex".into()
+    )));
+}
+
+#[test]
+fn prose_edits_reuse_editor_symbols_but_declaration_order_stays_current() {
+    let mut db = Database::default();
+    let path = Path::new("/project/main.tex");
+    let source = "\\documentclass{article}\n\\newcommand{\\original}[1]{#1}\n\\input{copy}\n\\renewcommand{\\original}[2]{#1#2}\n";
+    let file = lint_source(&mut db, path, source);
+    lint_source(
+        &mut db,
+        Path::new("/project/copy.tex"),
+        "\\NewCommandCopy{\\copied}{\\original}\n",
+    );
+    lint_source(
+        &mut db,
+        Path::new("/project/article.cls"),
+        "\\newcommand{\\fromclass}[1]{#1}\n",
+    );
+    assert!(editor_symbols(&db, file).commands.contains("fromclass"));
+    assert_eq!(
+        editor_symbols(&db, file)
+            .signatures
+            .command("copied")
+            .unwrap()
+            .args
+            .len(),
+        1
+    );
+    db.clear_query_log();
+    lint_source(&mut db, path, format!("Some prose.\n{source}"));
+    assert_eq!(
+        editor_symbols(&db, file)
+            .signatures
+            .command("copied")
+            .unwrap()
+            .args
+            .len(),
+        1
+    );
+    assert!(
+        !db.query_log()
+            .iter()
+            .any(|entry| entry.kind == QueryKind::EditorSymbols)
+    );
+    assert!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::EditorEvents)
+            .all(|entry| entry.file == Some(*file.identity(&db)))
+    );
+
+    // Moving the include across a declaration must invalidate the ordered facts.
+    let reordered = "\\documentclass{article}\n\\newcommand{\\original}[1]{#1}\n\\renewcommand{\\original}[2]{#1#2}\n\\input{copy}\n";
+    lint_source(&mut db, path, reordered);
+    assert_eq!(
+        editor_symbols(&db, file)
+            .signatures
+            .command("copied")
+            .unwrap()
+            .args
+            .len(),
+        2
+    );
+    let mut fresh = Database::default();
+    let fresh_file = lint_source(&mut fresh, path, reordered);
+    lint_source(
+        &mut fresh,
+        Path::new("/project/copy.tex"),
+        "\\NewCommandCopy{\\copied}{\\original}\n",
+    );
+    lint_source(
+        &mut fresh,
+        Path::new("/project/article.cls"),
+        "\\newcommand{\\fromclass}[1]{#1}\n",
+    );
+    assert_eq!(
+        editor_symbols(&db, file),
+        editor_symbols(&fresh, fresh_file)
+    );
+}
+
+#[test]
 fn lint_queries_reuse_findings_and_follow_project_changes() {
     let mut db = Database::default();
     let main = PathBuf::from("/project/main.tex");

@@ -107,6 +107,54 @@ pub fn name_target_under_cursor(
         })
 }
 
+/// Navigation distinguishes the delimiter command from its environment argument
+/// and accepts control symbols. Rename keeps its more restrictive target policy.
+pub fn navigation_target_under_cursor(
+    root: &SyntaxNode,
+    offset: usize,
+    sites: &[DefSite],
+) -> Option<NameTarget> {
+    let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
+    for token in root.token_at_offset(at) {
+        if token.kind() == SyntaxKind::VERB && token.text().starts_with("\\verb") {
+            let head = TextRange::at(token.text_range().start(), TextSize::new(5));
+            if head.contains(at) {
+                return Some(NameTarget {
+                    kind: NameKind::Command,
+                    name: "verb".into(),
+                    span: strip_backslash(head),
+                });
+            }
+            return None;
+        }
+        if matches!(
+            token.kind(),
+            SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+        ) && token.text_range().contains(at)
+        {
+            let name = token.text().strip_prefix('\\')?;
+            if !name.is_empty() && !name.chars().any(char::is_whitespace) {
+                return Some(NameTarget {
+                    kind: NameKind::Command,
+                    name: name.into(),
+                    span: strip_backslash(token.text_range()),
+                });
+            }
+        }
+    }
+    if let Some(site) = sites
+        .iter()
+        .find(|site| site.kind == DefSiteKind::Command && site.name_range.contains(at))
+    {
+        return Some(NameTarget {
+            kind: NameKind::Command,
+            name: site.name.clone(),
+            span: site.name_range,
+        });
+    }
+    name_target_under_cursor(root, offset, sites)
+}
+
 /// Every `\name` control-word token in `root`, as full token ranges (backslash
 /// included, matching [`DefSite::name_range`] for commands so declaration
 /// classification can compare ranges for equality). Definition-site names
@@ -212,6 +260,21 @@ mod tests {
         let root = root_of(src);
         let sites = scan_definition_sites(&root);
         name_target_under_cursor(&root, offset, &sites)
+    }
+
+    #[test]
+    fn navigation_accepts_symbols_and_verb_head_but_preserves_protected_bodies() {
+        let src = "\\% \\verb|\\hidden| % \\comment\n";
+        let root = root_of(src);
+        let target = navigation_target_under_cursor(&root, 1, &[]).unwrap();
+        assert_eq!(target.name, "%");
+        assert!(name_target_under_cursor(&root, 1, &[]).is_none());
+        let target = navigation_target_under_cursor(&root, 5, &[]).unwrap();
+        assert_eq!(target.name, "verb");
+        assert_eq!(&src[target.span], "verb");
+        for name in ["hidden", "comment"] {
+            assert!(navigation_target_under_cursor(&root, src.find(name).unwrap(), &[]).is_none());
+        }
     }
 
     #[test]

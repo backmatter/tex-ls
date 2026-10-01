@@ -168,84 +168,16 @@ impl Analysis {
     /// Resolve availability from supplied source membership and observations.
     /// An incomplete directory listing proves only the entries it contains.
     pub fn location_kind(&self, path: &Path) -> Observation<LocationKind> {
-        let path = normalize_path(path);
-        if self.lookup_file(&path).is_some() {
+        if self.lookup_file(path).is_some() {
             return Observation::Present(LocationKind::File);
         }
-        let observation = self.location_observation(&path);
-        if observation.kind != Observation::Unknown {
-            return observation.kind;
-        }
-        let Some(parent) = path.parent() else {
-            return Observation::Unknown;
-        };
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            return Observation::Unknown;
-        };
-        match self.location_observation(parent).directory {
-            Observation::Present(directory) => match directory.entries.get(name) {
-                Some(kind) => Observation::Present(*kind),
-                None if directory.complete => Observation::Absent,
-                None => Observation::Unknown,
-            },
-            Observation::Absent => Observation::Absent,
-            Observation::Error(error) => Observation::Error(error),
-            Observation::Unknown => Observation::Unknown,
-        }
+        observed_location_kind(&self.inner, self.inner.project(self.project), path)
     }
 
     /// Preserve candidate precedence even when an earlier location is unknown.
     /// Acquisition errors stay explicit until the host refreshes that input.
     pub fn resolve_file(&self, candidates: &FileCandidates) -> FileResolution {
-        let mut needs = Vec::new();
-        for path in &candidates.local {
-            match self.location_kind(path) {
-                Observation::Present(LocationKind::File) => {
-                    return FileResolution {
-                        target: if needs.is_empty() {
-                            Observation::Present(path.clone())
-                        } else {
-                            Observation::Unknown
-                        },
-                        needs,
-                    };
-                }
-                Observation::Present(LocationKind::Directory) | Observation::Absent => {}
-                Observation::Unknown => needs.push(InputNeed::Location(path.clone())),
-                Observation::Error(error) => {
-                    return FileResolution {
-                        target: Observation::Error(error),
-                        needs,
-                    };
-                }
-            }
-        }
-        if !needs.is_empty() {
-            return FileResolution {
-                target: Observation::Unknown,
-                needs,
-            };
-        }
-        let target = match &candidates.installed {
-            None => Observation::Absent,
-            Some((stem, extensions)) => match self.installed_metadata() {
-                Observation::Present(metadata) => {
-                    let extensions: Vec<_> = extensions.iter().map(String::as_str).collect();
-                    metadata
-                        .index
-                        .resolve(stem, &extensions)
-                        .map(|path| Observation::Present(path.to_path_buf()))
-                        .unwrap_or(Observation::Absent)
-                }
-                Observation::Absent => Observation::Absent,
-                Observation::Error(error) => Observation::Error(error.clone()),
-                Observation::Unknown => {
-                    needs.push(InputNeed::Installed);
-                    Observation::Unknown
-                }
-            },
-        };
-        FileResolution { target, needs }
+        resolve_candidates(&self.inner, self.inner.project(self.project), candidates)
     }
 
     pub fn installed_metadata(&self) -> &Observation<InstalledMetadata> {
@@ -359,6 +291,21 @@ impl Analysis {
 }
 
 impl Analysis {
+    /// The preloaded LaTeX format has source definitions even though documents
+    /// do not explicitly input it. The host's selected TEXMF index owns its path.
+    pub fn format_source_paths(&self) -> Vec<PathBuf> {
+        match self.installed_metadata() {
+            Observation::Present(metadata) => metadata
+                .index
+                .by_name
+                .get("latex.ltx")
+                .cloned()
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Literal target acquisition requests. Hosts deduplicate acquisition by
     /// generation; negative and failed observations do not cause query retries.
     pub fn file_discovery_needs(&self, path: &Path) -> Vec<InputNeed> {
@@ -366,6 +313,17 @@ impl Analysis {
             return Vec::new();
         };
         if path.extension().is_some_and(|ext| ext == "bib") {
+            return Vec::new();
+        }
+        // The preloaded format is consulted for literal definitions on demand.
+        // Its bootstrap inputs are not document dependencies; following every
+        // conditional input there would load much of the installation for one
+        // navigation request.
+        if matches!(
+            self.installed_metadata(),
+            Observation::Present(metadata)
+                if metadata.index.by_name.get("latex.ltx").is_some_and(|format| format == path)
+        ) {
             return Vec::new();
         }
         let mut needs = Vec::new();
@@ -383,7 +341,7 @@ impl Analysis {
                 }
             }
         }
-        for reference in self.file_references(file) {
+        for reference in self.file_discovery_references(file) {
             let mut resolution = self.resolve_file(&reference.candidates);
             if let Observation::Present(target) = &resolution.target
                 && crate::source::lint_file_kind(target).is_some()
@@ -403,4 +361,104 @@ impl Analysis {
         }
         needs
     }
+}
+
+pub(super) fn observed_location_kind(
+    db: &dyn IncrementalDb,
+    project: ProjectInput,
+    path: &Path,
+) -> Observation<LocationKind> {
+    let observe = |path: &Path| {
+        project
+            .locations(db)
+            .get(path)
+            .map(|input| input.observation(db).clone())
+            .unwrap_or_default()
+    };
+
+    let path = normalize_path(path);
+    let actual = super::inputs::file_aliases(db, project)
+        .iter()
+        .find(|(requested, _)| requested == &path)
+        .map(|(_, actual)| actual)
+        .unwrap_or(&path);
+    if crate::project::root_views::project_sources(db, project).contains_key(actual) {
+        return Observation::Present(LocationKind::File);
+    }
+    let observation = observe(&path);
+    if observation.kind != Observation::Unknown {
+        return observation.kind;
+    }
+    let Some(parent) = path.parent() else {
+        return Observation::Unknown;
+    };
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Observation::Unknown;
+    };
+    match observe(parent).directory {
+        Observation::Present(directory) => match directory.entries.get(name) {
+            Some(kind) => Observation::Present(*kind),
+            None if directory.complete => Observation::Absent,
+            None => Observation::Unknown,
+        },
+        Observation::Absent => Observation::Absent,
+        Observation::Error(error) => Observation::Error(error),
+        Observation::Unknown => Observation::Unknown,
+    }
+}
+
+pub(in crate::incremental) fn resolve_candidates(
+    db: &dyn IncrementalDb,
+    project: ProjectInput,
+    candidates: &FileCandidates,
+) -> FileResolution {
+    let mut needs = Vec::new();
+    for path in &candidates.local {
+        match observed_location_kind(db, project, path) {
+            Observation::Present(LocationKind::File) => {
+                return FileResolution {
+                    target: if needs.is_empty() {
+                        Observation::Present(path.clone())
+                    } else {
+                        Observation::Unknown
+                    },
+                    needs,
+                };
+            }
+            Observation::Present(LocationKind::Directory) | Observation::Absent => {}
+            Observation::Unknown => needs.push(InputNeed::Location(path.clone())),
+            Observation::Error(error) => {
+                return FileResolution {
+                    target: Observation::Error(error),
+                    needs,
+                };
+            }
+        }
+    }
+    if !needs.is_empty() {
+        return FileResolution {
+            target: Observation::Unknown,
+            needs,
+        };
+    }
+    let target = match &candidates.installed {
+        None => Observation::Absent,
+        Some((stem, extensions)) => match project.installed(db).as_ref() {
+            Observation::Present(metadata) => {
+                let extensions: Vec<_> = extensions.iter().map(String::as_str).collect();
+                metadata
+                    .index
+                    .resolve(stem, &extensions)
+                    .map(|path| Observation::Present(path.to_path_buf()))
+                    .unwrap_or(Observation::Absent)
+            }
+            Observation::Absent => Observation::Absent,
+            Observation::Error(error) => Observation::Error(error.clone()),
+            Observation::Unknown => {
+                needs.push(InputNeed::Installed);
+                Observation::Unknown
+            }
+        },
+    };
+    FileResolution { target, needs }
 }

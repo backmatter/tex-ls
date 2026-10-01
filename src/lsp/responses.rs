@@ -67,15 +67,17 @@ pub(super) fn run_symbols(
     encoding: PositionEncoding,
     kind: FileKind,
     options: &tex_ls_protocol::presentation::OutlineOptions,
+    hierarchical: bool,
     out_tx: &Sender<Outbound>,
 ) {
     respond(id, out_tx, || {
-        let symbols = if kind == FileKind::Bib {
-            compute_bib_symbols(snapshot, path, encoding)
+        if kind == FileKind::Bib {
+            tex_ls_protocol::compute_bib_symbol_response(snapshot, path, encoding, hierarchical)
         } else {
-            compute_symbols(snapshot, path, encoding, options)
-        };
-        DocumentSymbolResponse::DocumentSymbolList(symbols)
+            DocumentSymbolResponse::DocumentSymbolList(compute_symbols(
+                snapshot, path, encoding, options,
+            ))
+        }
     });
 }
 
@@ -461,6 +463,7 @@ mod response_tests {
                 PositionEncoding::Utf16,
                 |_| RuleSelection::all(),
                 |_| None,
+                |_| true,
                 |batch| {
                     assert_eq!(batch.len(), 64);
                     tx.send(Outbound::Progress {

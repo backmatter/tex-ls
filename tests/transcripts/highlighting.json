@@ -1,0 +1,91 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-16"
+        ]
+      },
+      "textDocument": {
+        "semanticTokens": {
+          "tokenTypes": [
+            "macro",
+            "type",
+            "variable"
+          ],
+          "formats": [
+            "relative"
+          ],
+          "requests": {
+            "full": true,
+            "range": true
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///highlight/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "😀 \\newcommand{\\custom}{}\n\\begin{customenv}\\custom \\tem \\end{customenv}\n$\\alpha+\\unknown$ \\%\n% \\hidden\n\\verb|\\hidden|\n\\begin{verbatim}\n\\hidden\n\\end{verbatim}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///highlight/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///highlight/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 0
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///highlight/main.tex",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "😀 \\newcommand{\\custom}{}\n\\begin{customenv}\\custom \\item \\end{customenv}\n$\\alpha+\\unknown$ \\%\n% \\hidden\n\\verb|\\hidden|\n\\begin{verbatim}\n\\hidden\n\\end{verbatim}\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///highlight/main.tex"
+        }
+      }
+    }
+  ]
+}

@@ -12,7 +12,7 @@
 //!   defining local package by name, preserved through the scope merge).
 //!   Looked up scope-first (the document's own + loaded packages' scanned defs),
 //!   then the curated built-in DB, then the bulk CWL tier — mirroring
-//!   [`super::build_completion_items`]'s tiering.
+//!   [`super::compute_tex_completion`]'s tiering.
 //! - **Citation → `.bib` entry.** A `\cite`-family key resolves cross-file against
 //!   the project bibliography ([`Analysis::resolve_project`]); the matched
 //!   `@entry`'s author/title/year/journal are pulled from the cached bib CST.
@@ -26,12 +26,11 @@
 use std::fmt::Write as _;
 
 use super::*;
-use crate::document_link::comma_spans;
 use lsp_types::{Contents, Hover, MarkupContent, MarkupKind};
 use tex_ls_analysis::bib::ast as bib_ast;
 pub use tex_ls_analysis::hover::{Provenance, lookup_command, lookup_environment};
 use tex_ls_analysis::hover::{TargetKind, signature_target_at};
-use tex_ls_parser::ast::{command_name, nth_group, nth_group_inner};
+use tex_ls_parser::ast::{command_name, nth_group};
 use tex_ls_parser::semantic::LabelContext;
 use tex_ls_parser::semantic::completion::{PackageMeta, package_metadata};
 use tex_ls_parser::semantic::pkgmeta::{NeedsFormatDecl, OptionDecl, ProvidesDecl, provides_kind};
@@ -71,7 +70,7 @@ pub fn compute_hover(
         snapshot,
         &snapshot.parsed_tree(file),
         snapshot.semantic_model(file),
-        snapshot.scope_signatures(file),
+        snapshot.editor_signatures(file),
         snapshot.file_path(file),
         offset,
         &idx,
@@ -85,7 +84,7 @@ fn build_hover(
     snapshot: &Analysis,
     root: &SyntaxNode,
     model: &SemanticModel,
-    scope: &SignatureDb,
+    _scope: &SignatureDb,
     lint_path: &Path,
     offset: usize,
     idx: &LineIndex,
@@ -109,23 +108,63 @@ fn build_hover(
         ));
     }
     if let Some(target) = signature_target_at(root, offset) {
-        let value = match target.kind {
-            TargetKind::Command => {
-                let (sig, provenance) = lookup_command(scope, &target.name)?;
-                render_command(&target.name, sig, &provenance)
-            }
-            TargetKind::Environment => {
-                let (sig, provenance) = lookup_environment(scope, &target.name)?;
-                render_environment(&target.name, sig, &provenance)
-            }
-        };
+        let mut value = crate::command_docs::card(
+            snapshot,
+            lint_path,
+            &target.name,
+            matches!(target.kind, TargetKind::Environment),
+        )?;
+        if matches!(target.kind, TargetKind::Environment)
+            && let Some(pair) = crate::navigation::matching_environment_delimiter(root, offset)
+        {
+            let line = lsp_range(idx, pair.match_range).start.line + 1;
+            let other = if pair.origin_is_begin {
+                "closing"
+            } else {
+                "opening"
+            };
+            let _ = write!(value, "\n\nMatching {other} delimiter: line {line}.");
+        }
         return Some(markup_hover(value, target.range, idx));
     }
 
+    if let Some(file) = snapshot.lookup_file(lint_path)
+        && let Some(site) = snapshot
+            .definition_sites(file)
+            .iter()
+            .find(|site| site.name_range.contains(TextSize::new(offset as u32)))
+        && let Some(value) = crate::command_docs::card(
+            snapshot,
+            lint_path,
+            &site.name,
+            site.kind == tex_ls_parser::semantic::DefSiteKind::Environment,
+        )
+    {
+        return Some(markup_hover(value, site.name_range, idx));
+    }
+
     if let Some(target) = package_target_at(root, offset) {
-        let meta = package_metadata(&target.name)?;
-        let value = render_package(&target.name, target.is_class, meta);
+        let mut value = package_metadata(&target.name)
+            .map(|meta| render_package(&target.name, target.is_class, meta))
+            .unwrap_or_else(|| {
+                format!(
+                    "    {}\n\n{}",
+                    target.name,
+                    if target.is_class {
+                        "Document class"
+                    } else {
+                        "Package"
+                    }
+                )
+            });
+        if let Some((links, _)) = file_hover(snapshot, lint_path, offset) {
+            value.push_str("\n\n");
+            value.push_str(&links);
+        }
         return Some(markup_hover(value, target.range, idx));
+    }
+    if let Some((value, range)) = file_hover(snapshot, lint_path, offset) {
+        return Some(markup_hover(value, range, idx));
     }
 
     if let Some((key, range)) = crate::glossary::target(model, offset)
@@ -203,23 +242,12 @@ struct PackageTarget {
     is_class: bool,
 }
 
-/// Recognized package/class loaders whose brace `{name}` argument gets a CTAN
-/// metadata hover. Mirrors `document_link::classify`'s `usepackage`/`documentclass`
-/// arms and `completion::package_arg`.
-fn package_loader_is_class(name: &str) -> Option<bool> {
-    use tex_ls_parser::semantic::roles::{FileRoleKind, file_role};
-    match file_role(name)?.kind {
-        FileRoleKind::Package => Some(false),
-        FileRoleKind::Class => Some(true),
-        _ => None,
-    }
-}
-
 /// The package/class name token the cursor sits on, if any: a name inside the first
 /// brace `{…}` argument of a `\usepackage`/`\documentclass`-family command, resolved
 /// to the single comma-separated segment covering the offset (so `\usepackage{a,b|}`
-/// hovers `b`). Reuses `document_link::comma_spans` for the per-name spans.
+/// hovers `b`). Comment continuations use the same literal spans as file links.
 fn package_target_at(root: &SyntaxNode, offset: usize) -> Option<PackageTarget> {
+    use tex_ls_parser::semantic::roles::{FileRoleKind, file_role};
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
     let (left, right) = match root.token_at_offset(at) {
         rowan::TokenAtOffset::None => return None,
@@ -243,23 +271,26 @@ fn package_target_at(root: &SyntaxNode, offset: usize) -> Option<PackageTarget> 
         let Some(name) = command_name(&command) else {
             continue;
         };
-        let Some(is_class) = package_loader_is_class(&name) else {
+        let Some(role) = file_role(&name) else {
             continue;
+        };
+        let is_class = match role.kind {
+            FileRoleKind::Package => false,
+            FileRoleKind::Class => true,
+            _ => continue,
         };
         // Only the first brace group is the `{name}` list (a `[options]` bracket
         // group is not a `GROUP` child, so group 0 is always the names).
-        if nth_group(&command, 0).as_ref() != Some(&group) {
+        if nth_group(&command, role.argument).as_ref() != Some(&group) {
             continue;
         }
-        let Some((inner_range, inner)) = nth_group_inner(&command, 0) else {
-            continue;
-        };
-        if let Some((seg, range)) = comma_spans(&inner, inner_range)
-            .into_iter()
-            .find(|(_, r)| r.contains_inclusive(at))
+        if let Some((name, range)) =
+            tex_ls_analysis::external::links::file_argument_spans(&command, role)
+                .into_iter()
+                .find(|(_, r)| r.contains_inclusive(at))
         {
             return Some(PackageTarget {
-                name: seg.to_string(),
+                name,
                 range,
                 is_class,
             });
@@ -644,6 +675,38 @@ fn capitalize(word: &str) -> String {
     }
 }
 
+/// Every acquired literal file role gets the same source link in hover.
+fn file_hover(snapshot: &Analysis, path: &Path, offset: usize) -> Option<(String, TextRange)> {
+    let file = snapshot.lookup_file(path)?;
+    let at = TextSize::new(offset as u32);
+    let links: Vec<_> = snapshot
+        .document_links(file)
+        .into_iter()
+        .filter(|link| link.range.contains(at))
+        .collect();
+    let range = links.first()?.range;
+    let value = links
+        .iter()
+        .filter_map(|link| {
+            let uri = path_to_uri(&link.target)?;
+            let filename = link.target.file_name()?.to_str()?;
+            let mut value = format!(
+                "[Open {}]({uri})",
+                tex_ls_analysis::bib::render::markdown_text(filename)
+            );
+            if let Some(source) = snapshot.lookup_file(&link.target)
+                && let Some(package) = snapshot.semantic_model(source).provides()
+            {
+                value.push_str("\n\n");
+                value.push_str(&render_provides(package));
+            }
+            Some(value)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some((value, range))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -990,6 +1053,44 @@ mod tests {
         let md =
             hover_md("\\usepackage{amsmath, booktabs}\n", "booktabs").expect("hover for booktabs");
         assert!(md.contains("Publication quality tables"), "desc: {md}");
+    }
+
+    #[test]
+    fn package_hover_uses_comment_continuations_and_exact_ranges() {
+        let source = "😀 \\usepackage{% note 😀\r\n ams% continued\r\n  math, booktabs}\r\n";
+        let path = Path::new(fixture_path!("/p/commented.tex"));
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(path, source, None);
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(path).unwrap();
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = snapshot.file_line_index(file, encoding);
+            for fragment in ["ams", "math"] {
+                let offset = source.find(fragment).unwrap();
+                let (line, character) = index.position(offset + 1);
+                let hover =
+                    compute_hover(&snapshot, path, encoding, Position::new(line, character))
+                        .unwrap();
+                let Contents::MarkupContent(contents) = hover.contents else {
+                    panic!("expected markdown");
+                };
+                assert!(
+                    contents.value.contains("AMS mathematical facilities"),
+                    "{}",
+                    contents.value
+                );
+                assert!(contents.value.contains("https://texdoc.org/pkg/amsmath"));
+                assert!(!contents.value.contains("continued"));
+                assert_eq!(
+                    hover.range,
+                    Some(byte_range_to_lsp(&index, offset, offset + fragment.len()))
+                );
+            }
+            let (line, character) = index.position(source.find("note").unwrap() + 1);
+            assert!(
+                compute_hover(&snapshot, path, encoding, Position::new(line, character)).is_none()
+            );
+        }
     }
 
     #[test]
