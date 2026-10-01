@@ -163,7 +163,8 @@ $\alpha+\unknown$ \% % \commenthidden
     return result?.length && result;
   });
   assert.equal((definitions[0].targetUri || definitions[0].uri).toString(), document.uri.toString());
-  const rename = await vscode.commands.executeCommand('vscode.executeDocumentRenameProvider', document.uri, position, 'sec:renamed');
+  const rename = await eventually('label rename', () =>
+    vscode.commands.executeCommand('vscode.executeDocumentRenameProvider', document.uri, position, 'sec:renamed'));
   assert.ok(rename instanceof vscode.WorkspaceEdit);
   assert.equal(rename.get(document.uri).length, 2);
   await vscode.workspace.applyEdit(rename);
