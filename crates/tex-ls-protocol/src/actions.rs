@@ -66,7 +66,13 @@ pub fn compute_code_actions(
     if !matches!(kind, FileKind::Bib) && (tables_requested || environments_requested) {
         let root = snapshot.parsed_tree(file);
         if tables_requested {
-            actions.extend(code_action::table_column_actions(&root, text, uri, range));
+            actions.extend(code_action::table_column_actions_with_definitions(
+                &root,
+                text,
+                uri,
+                range,
+                || snapshot.document_signatures(file),
+            ));
         }
         let idx = buffer.line_index();
         let offset = idx.offset_at(range.start.line, range.start.character);

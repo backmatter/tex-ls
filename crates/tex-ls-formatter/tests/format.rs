@@ -17,6 +17,67 @@ use tex_ls_parser::parser::{LatexFlavor, LexConfig, parse, parse_with_flavor, re
 use tex_ls_parser::semantic::SignatureDb;
 use tex_ls_parser::syntax::SyntaxKind;
 
+#[test]
+fn embedded_code_keeps_its_layout_including_active_tex_islands() {
+    let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+        "../../tex-ls-parser/tests/fixtures/embedded-coloring.json"
+    ))
+    .unwrap();
+    for case in fixtures.as_array().unwrap() {
+        let source = case["source"].as_str().unwrap();
+        if !source.contains("\\begin") && !source.contains("\\pyinline") {
+            continue;
+        }
+        let output = format(source).unwrap();
+        assert_eq!(format(&output).unwrap(), output, "{}", case["name"]);
+        if let Some(start) = source.find("\\begin") {
+            let body = source[start..].split_once('\n').unwrap().1;
+            let body = body.rsplit_once("\\end").unwrap().0;
+            assert!(output.contains(body), "{}: {output:?}", case["name"]);
+        }
+    }
+}
+
+#[test]
+fn primitive_string_keeps_its_printed_token_and_active_following_source() {
+    for source in [
+        "\\string\\ref{printed}\\ref{real}",
+        "\\string\\ref{\\ref{real}}",
+        "\\string\\catcode37=12\n%\\ref{fake}\n\\ref{real}",
+        "\\string\\string\\ref{real}",
+        "\\string\\verb|\\ref{real}|",
+        "\\string abc",
+        "\\newcommand{\\show}[1]{\\string#1}",
+        "\\newcommand{\\outer}{\\newcommand{\\show}[1]{\\string##1}}",
+        "\\newcommand{\\show}[1]{\\string#1\\string\\verb|\\ref{real}|}",
+    ] {
+        let output = format(source).unwrap();
+        assert_eq!(format(&output).unwrap(), output, "{source}");
+        let printed = |text: &str| {
+            parse(text)
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .filter(|token| token.kind() == SyntaxKind::STRINGIFIED_TOKEN)
+                .map(|token| token.text().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(printed(&output), printed(source), "{source}: {output}");
+        let references = |text: &str| {
+            tex_ls_parser::semantic::SemanticModel::build(&parse(text).syntax())
+                .refs()
+                .iter()
+                .map(|reference| reference.name.to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            references(&output),
+            references(source),
+            "{source}: {output}"
+        );
+    }
+}
+
 /// Every `%` comment in `text`, in document order, trailing whitespace trimmed
 /// (the printer may drop a comment's trailing spaces along with the line's).
 ///
@@ -2650,6 +2711,22 @@ fn user_verbatim_environment_body_is_protected() {
     assert_format_invariants(input);
 }
 
+#[test]
+fn uncertain_listing_settings_preserve_authored_body_layout() {
+    let body = "  x = $\\ref{fake}$  % literal\n    y    =    2\n";
+    for settings in [
+        r"\iffalse\lstset{language=Python,mathescape=true}\fi",
+        r"\lstset{language=Python,mathescape=true}\lstset{\options}",
+        r"\lstset{language=Python,mathescape=true}\lstset\options",
+    ] {
+        let input =
+            format!("{settings}\n\\begin{{lstlisting}}\n{body}\\end{{lstlisting}}\nAfter.\n");
+        let formatted = format(&input).expect("formats");
+        assert!(formatted.contains(body), "{formatted:?}");
+        assert_format_invariants(&input);
+    }
+}
+
 /// Environments carrying the `noIndent` signature flag (`document`) keep their body
 /// flush against the surrounding indentation, while environments nested inside them
 /// still indent normally. This pins the convention that `\begin{document}` content
@@ -3343,6 +3420,39 @@ fn expl_fallback_and_tie_boundaries_converge() {
                 ..FormatStyle::default()
             };
             check_format_invariants(input, style, LatexFlavor::Document.into()).unwrap();
+        }
+    }
+}
+
+#[test]
+fn active_literal_bodies_preserve_their_whitespace() {
+    for body in [
+        "\\begin{alltt}\n% $ # ^ _ & ~  \\textbf{two  words}\n    \\ref{real}\n\\end{alltt}",
+        "\\detokenize{ two  words\n  \\ref{fake} $x_1$ % keep this\n  body }",
+        "\\catcode37=12\\relax\\detokenize{% two  words\\ref{fake}}",
+    ] {
+        for wrap in [WrapMode::Reflow, WrapMode::Preserve, WrapMode::Stable] {
+            let source = format!("{body}\n");
+            let result = format_with_style(
+                &source,
+                FormatStyle {
+                    wrap,
+                    ..FormatStyle::default()
+                },
+            )
+            .unwrap_or_else(|error| panic!("cannot format {source:?}: {error:?}"));
+            assert!(result.contains(body), "literal layout changed: {result:?}");
+            assert_eq!(
+                format_with_style(
+                    &result,
+                    FormatStyle {
+                        wrap,
+                        ..FormatStyle::default()
+                    }
+                )
+                .unwrap(),
+                result
+            );
         }
     }
 }

@@ -27,13 +27,19 @@ pub fn attach(
                 prefix: prefix.clone(),
             })
     } else {
-        Some(
-            tex_ls_analysis::completion::classify_context_with_declarations(
-                &snapshot.parsed_tree(file),
-                offset,
-                snapshot.declarations_for(path),
-            ),
-        )
+        let root = snapshot.parsed_tree(file);
+        Some(tex_ls_analysis::completion::classify_context_with_roles(
+            &root,
+            offset,
+            snapshot.declarations_for(path),
+            || {
+                tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
+                    &root,
+                    snapshot.definition_sites(file),
+                    snapshot.file_operand_contexts(file),
+                )
+            },
+        ))
     };
     let command = matches!(context, Some(CompletionContext::CommandName { .. }));
     let key = matches!(

@@ -109,6 +109,33 @@ pub(super) fn reparse_token(
         .find_map(|leaf| try_leaf(base, edit, new_text, &leaf, range))
 }
 
+/// Restricted token proof for files with source-scoped control-word alphabets.
+pub(super) fn reparse_letters(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+) -> Option<Reparsed> {
+    if !edit
+        .insert
+        .bytes()
+        .chain(base.text[edit.range.clone()].bytes())
+        .all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let range = TextRange::new(
+        TextSize::try_from(edit.range.start).ok()?,
+        TextSize::try_from(edit.range.end).ok()?,
+    );
+    candidates(&base.syntax(), range)
+        .into_iter()
+        .filter(|leaf| {
+            leaf.kind() == SyntaxKind::WORD
+                && leaf.text().bytes().all(|byte| byte.is_ascii_alphabetic())
+        })
+        .find_map(|leaf| try_leaf(base, edit, new_text, &leaf, range))
+}
+
 /// The leaves an edit of `range` could be inside, in preference order.
 ///
 /// An insertion at a token boundary belongs to *either* neighbour, and which one

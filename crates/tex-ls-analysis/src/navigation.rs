@@ -39,6 +39,15 @@ impl Analysis {
         origin: &Path,
         name: &str,
     ) -> Option<tex_ls_parser::semantic::LabelContext> {
+        self.label_context_ref(origin, name).cloned()
+    }
+
+    /// Borrow the cached description without copying a section or caption title.
+    pub fn label_context_ref(
+        &self,
+        origin: &Path,
+        name: &str,
+    ) -> Option<&tex_ls_parser::semantic::LabelContext> {
         std::iter::once(origin)
             .chain(
                 self.resolve_labels()
@@ -48,15 +57,7 @@ impl Analysis {
             )
             .find_map(|path| {
                 let file = self.lookup_file(path)?;
-                let label = self
-                    .semantic_model(file)
-                    .labels()
-                    .iter()
-                    .find(|label| label.name == name)?;
-                tex_ls_parser::semantic::label_context(
-                    &self.parsed_tree(file),
-                    label.key_range.start(),
-                )
+                self.file_label_contexts(file).get(name).flatten()
             })
     }
     pub fn label_occurrences(&self, origin: &Path, names: &[SmolStr]) -> Vec<KeyOccurrence> {

@@ -19,6 +19,7 @@
 //! `\DescribeMacro`/`\DescribeEnv` carry no nested code (the definition lives
 //! elsewhere).
 
+use super::context::PrimitiveOperandContexts;
 use rowan::TextRange;
 
 use crate::ast::{
@@ -59,20 +60,29 @@ pub struct DocAssociation {
 
 /// Collect every documentation↔code association in `root`, in document order.
 pub fn doc_associations(root: &SyntaxNode) -> Vec<DocAssociation> {
+    let operands =
+        PrimitiveOperandContexts::from_definition_sites(root, &super::scan_definition_sites(root));
+    doc_associations_with_context(root, &operands)
+}
+
+pub fn doc_associations_with_context(
+    root: &SyntaxNode,
+    operands: &PrimitiveOperandContexts,
+) -> Vec<DocAssociation> {
     let mut out = Vec::new();
-    collect(root, &mut out);
+    collect(root, &mut out, operands);
     out
 }
 
 /// Walk `node`'s children in document order. `COMMAND`/`ENVIRONMENT` are classified;
 /// every other container is transparent (recursed into) so a documented construct
 /// nested inside still surfaces.
-fn collect(node: &SyntaxNode, out: &mut Vec<DocAssociation>) {
+fn collect(node: &SyntaxNode, out: &mut Vec<DocAssociation>, operands: &PrimitiveOperandContexts) {
     for child in node.children() {
         match child.kind() {
-            SyntaxKind::COMMAND => collect_command(&child, out),
-            SyntaxKind::ENVIRONMENT => collect_environment(&child, out),
-            _ => collect(&child, out),
+            SyntaxKind::COMMAND => collect_command(&child, out, operands),
+            SyntaxKind::ENVIRONMENT => collect_environment(&child, out, operands),
+            _ => collect(&child, out, operands),
         }
     }
 }
@@ -80,7 +90,11 @@ fn collect(node: &SyntaxNode, out: &mut Vec<DocAssociation>) {
 /// Emit an association for a `macro`/`environment` documentation environment, then
 /// recurse into its body so a nested documented construct also surfaces. A
 /// non-ltxdoc environment is transparent.
-fn collect_environment(env: &SyntaxNode, out: &mut Vec<DocAssociation>) {
+fn collect_environment(
+    env: &SyntaxNode,
+    out: &mut Vec<DocAssociation>,
+    operands: &PrimitiveOperandContexts,
+) {
     // The name and the documented-entity argument both live on the `\begin` node.
     let begin = Environment::cast(env.clone()).and_then(|e| e.begin());
     let kind = begin
@@ -109,11 +123,19 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<DocAssociation>) {
 
     // Recurse regardless: nested `macro` envs surface as their own (flat)
     // associations, and a non-ltxdoc environment is transparent.
-    collect(env, out);
+    collect(env, out, operands);
 }
 
 /// Emit an association for a `\DescribeMacro`/`\DescribeEnv` command.
-fn collect_command(command: &SyntaxNode, out: &mut Vec<DocAssociation>) {
+fn collect_command(
+    command: &SyntaxNode,
+    out: &mut Vec<DocAssociation>,
+    operands: &PrimitiveOperandContexts,
+) {
+    if operands.contains_head(command) {
+        collect(command, out, operands);
+        return;
+    }
     let Some(cmd) = command_name(command) else {
         return;
     };

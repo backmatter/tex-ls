@@ -13,7 +13,7 @@ use rowan::{TextRange, TextSize};
 
 use crate::ast::{AstNode, AstToken, ControlWord, Environment, child_token};
 use crate::project::{ResolvedCitations, ResolvedLabels, ResolvedPackageOptions};
-use crate::semantic::define::scan_definitions;
+use crate::semantic::define::scan_definitions_with_operands;
 use crate::semantic::signature::SignatureDb;
 use crate::semantic::{Mode, ModeIndex, SemanticModel};
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
@@ -131,13 +131,19 @@ pub struct RuleContext<'a> {
     /// delimiters are rare, so — unlike `math_regions` — it is computed *lazily*
     /// on first [`RuleContext::in_expl3`] call rather than for every lint.
     expl3_regions: OnceLock<Vec<TextRange>>,
-    /// The document's user command/environment definitions ([`scan_definitions`]),
+    /// The document's user command/environment definitions
+    /// ([`scan_definitions_with_operands`]),
     /// shared by the rules that must not flag a name the file itself redefines
     /// (`missing-required-argument`, `deprecated-command`, `primitive-command`).
     /// Same lazy posture as `expl3_regions`: scanned once, on the first
     /// [`RuleContext::user_definitions`] call, so a lint that never asks (the common
     /// case, since these rules ask only after matching a curated name) pays nothing.
     user_definitions: OnceLock<SignatureDb>,
+    operand_contexts: OnceLock<tex_ls_parser::semantic::context::PrimitiveOperandContexts>,
+    definition_sites: OnceLock<Vec<crate::semantic::DefSite>>,
+    shared_sites: Option<&'a [crate::semantic::DefSite]>,
+    shared_operands: Option<&'a tex_ls_parser::semantic::context::PrimitiveOperandContexts>,
+    file_roles: OnceLock<crate::external::links::FileRoleContext>,
     /// Parsed suppression directives and their resolved ranges, computed once for
     /// both meta rules and the driver's post-filter.
     pub(crate) suppressions: crate::directives::Suppressions,
@@ -167,8 +173,23 @@ impl<'a> RuleContext<'a> {
             conditionals: OnceLock::new(),
             expl3_regions: OnceLock::new(),
             user_definitions: OnceLock::new(),
+            operand_contexts: OnceLock::new(),
+            definition_sites: OnceLock::new(),
+            shared_sites: None,
+            shared_operands: None,
+            file_roles: OnceLock::new(),
             suppressions: crate::directives::Suppressions::build(root),
         }
+    }
+
+    pub(crate) fn with_source_facts(
+        mut self,
+        sites: &'a [crate::semantic::DefSite],
+        operands: &'a tex_ls_parser::semantic::context::PrimitiveOperandContexts,
+    ) -> Self {
+        self.shared_sites = Some(sites);
+        self.shared_operands = Some(operands);
+        self
     }
 
     /// The conditional branch path in effect at byte `offset` — empty when the
@@ -177,13 +198,24 @@ impl<'a> RuleContext<'a> {
     /// [`RuleContext::in_math`]) so `Frame` stays out of the crate's public API.
     pub(crate) fn conditional_path_at(&self, offset: usize) -> &[super::conditional::Frame] {
         self.conditionals
-            .get_or_init(|| super::conditional::ConditionalIndex::compute(self.root))
+            .get_or_init(|| {
+                super::conditional::ConditionalIndex::compute_with_context(
+                    self.root,
+                    self.operand_contexts(),
+                )
+            })
             .path_at(offset)
     }
 
     pub fn mode_at(&self, offset: usize) -> Mode {
         self.mode_index
-            .get_or_init(|| ModeIndex::build(self.root))
+            .get_or_init(|| {
+                ModeIndex::build_with_signatures_and_operands(
+                    self.root,
+                    &crate::semantic::Signatures::new(self.user_definitions()),
+                    self.operand_contexts(),
+                )
+            })
             .mode_at(offset)
     }
 
@@ -222,7 +254,53 @@ impl<'a> RuleContext<'a> {
     /// [`SignatureDb::command`]/[`SignatureDb::environment`].
     pub(crate) fn user_definitions(&self) -> &SignatureDb {
         self.user_definitions
-            .get_or_init(|| scan_definitions(self.root))
+            .get_or_init(|| scan_definitions_with_operands(self.root, self.operand_contexts()))
+    }
+
+    pub(crate) fn is_operand_head(&self, element: &SyntaxElement) -> bool {
+        if !matches!(
+            element.kind(),
+            SyntaxKind::COMMAND | SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+        ) {
+            return false;
+        }
+        let operands = self.operand_contexts();
+        match element {
+            rowan::NodeOrToken::Node(node) => operands.contains_head(node),
+            rowan::NodeOrToken::Token(token) => operands.contains_token(token.text_range()),
+        }
+    }
+
+    pub(crate) fn operand_contexts(
+        &self,
+    ) -> &tex_ls_parser::semantic::context::PrimitiveOperandContexts {
+        if let Some(operands) = self.shared_operands {
+            return operands;
+        }
+        self.operand_contexts.get_or_init(|| {
+            tex_ls_parser::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+                self.root,
+                self.definition_sites(),
+            )
+        })
+    }
+
+    pub(crate) fn definition_sites(&self) -> &[crate::semantic::DefSite] {
+        if let Some(sites) = self.shared_sites {
+            return sites;
+        }
+        self.definition_sites
+            .get_or_init(|| crate::semantic::scan_definition_sites(self.root))
+    }
+
+    pub(crate) fn file_roles(&self) -> &crate::external::links::FileRoleContext {
+        self.file_roles.get_or_init(|| {
+            crate::external::links::FileRoleContext::from_definition_sites_and_operands(
+                self.root,
+                self.definition_sites(),
+                self.operand_contexts(),
+            )
+        })
     }
 }
 

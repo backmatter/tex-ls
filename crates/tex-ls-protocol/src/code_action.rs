@@ -14,6 +14,7 @@
 //! never *how* to lay it out (tenet 1).
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::PathBuf;
 
 use super::*;
@@ -50,29 +51,57 @@ pub fn code_actions_for_range(
     let req_start = idx.offset_at(request_range.start.line, request_range.start.character);
     let req_end = idx.offset_at(request_range.end.line, request_range.end.character);
 
-    findings
+    let offered: Vec<_> = findings
         .iter()
-        .filter_map(|d| {
-            let fix = d.fix.as_ref()?;
-            // Offer the action only when the finding's caret touches the request.
-            if !byte_ranges_overlap(d.start, d.end, req_start, req_end) {
-                return None;
-            }
-            if !fix_all::valid(fix, text, self_path, resolve) {
-                return None;
-            }
-            let changes = workspace_changes(fix, uri, &idx, enc, resolve)?;
+        .enumerate()
+        .filter(|(_, d)| {
+            byte_ranges_overlap(d.start, d.end, req_start, req_end)
+                && d.fix
+                    .as_ref()
+                    .is_some_and(|fix| fix_all::valid(fix, text, self_path, resolve))
+        })
+        .collect();
+    let preferred = (offered
+        .iter()
+        .filter(|(_, d)| {
+            d.fix.as_ref().unwrap().applicability
+                == tex_ls_analysis::linter::diagnostic::Applicability::Safe
+        })
+        .count()
+        > 1)
+    .then(|| fix_all::preferred_all(findings, self_path));
+    let edits: Vec<_> = offered
+        .iter()
+        .flat_map(|(_, d)| d.fix.as_ref().unwrap().edits.iter())
+        .collect();
+    let mut converted = workspace_edits(&edits, uri, &idx, enc, resolve).into_iter();
+    let ranges = byte_ranges_to_lsp(&idx, offered.iter().map(|(_, d)| (d.start, d.end)));
+    offered
+        .into_iter()
+        .zip(ranges)
+        .filter_map(|((slot, d), range)| {
+            let fix = d.fix.as_ref().unwrap();
+            let changes = changes_for_edits(converted.by_ref().take(fix.edits.len()))?;
             Some(CodeActionResponse::CodeAction(CodeAction {
                 title: fix.description.clone(),
                 kind: Some(CodeActionKind::QuickFix),
                 // Link the action to the finding it fixes, so the client can dim it
                 // once the diagnostic clears.
-                diagnostics: Some(vec![lint_to_lsp(&idx, d.clone(), latex_rules, self_path)]),
+                diagnostics: Some(vec![diagnostics::lint_to_lsp_with_range(
+                    &idx,
+                    d.clone(),
+                    latex_rules,
+                    self_path,
+                    range,
+                )]),
                 edit: Some(WorkspaceEdit {
                     changes: Some(changes),
                     ..Default::default()
                 }),
-                is_preferred: Some(fix_all::preferred(d, findings, self_path)),
+                is_preferred: Some(preferred.as_ref().map_or_else(
+                    || fix_all::preferred(d, findings, self_path),
+                    |flags| flags[slot],
+                )),
                 ..Default::default()
             }))
         })
@@ -81,6 +110,7 @@ pub fn code_actions_for_range(
 
 /// Suppression is an explicit user choice, never a preferred correction or Fix All.
 /// Check the inserted directive against the parser's actual suppression ranges.
+/// Offer up to eight construct choices and one file-wide choice per request.
 pub fn unknown_command_ignore_actions(
     snapshot: &Analysis,
     path: &Path,
@@ -94,31 +124,42 @@ pub fn unknown_command_ignore_actions(
     let end = idx.offset_at(range.end.line, range.end.character);
     let mut actions = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    let mut positions = idx.position_cursor();
+    let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut construct_attempts = 0;
+    let mut file_attempted = false;
     for finding in findings
         .iter()
         .filter(|d| d.rule == "unknown-command" && byte_ranges_overlap(d.start, d.end, start, end))
     {
-        let line_start = text[..finding.start].rfind('\n').map_or(0, |at| at + 1);
+        if construct_attempts == 8 && file_attempted {
+            break;
+        }
+        snapshot.check_cancelled();
+        let (line, _) = positions.position(finding.start);
+        let line_start = idx.line_start(line as usize);
         let indent_end = text[line_start..]
             .find(|ch| ch != ' ' && ch != '\t')
             .map_or(text.len(), |at| line_start + at);
         let indent = &text[line_start..indent_end];
-        let newline = if text[line_start..]
-            .split_once('\n')
-            .is_some_and(|(line, _)| line.ends_with('\r'))
-            || text.contains("\r\n")
-        {
-            "\r\n"
-        } else {
-            "\n"
-        };
         for (verb, scope) in [
             ("skip", "for this construct"),
             ("skip-file", "in this file"),
         ] {
+            if (verb == "skip" && construct_attempts == 8)
+                || (verb == "skip-file" && file_attempted)
+            {
+                continue;
+            }
             if !seen.insert((line_start, verb)) {
                 continue;
             }
+            if verb == "skip" {
+                construct_attempts += 1;
+            } else {
+                file_attempted = true;
+            }
+            snapshot.check_cancelled();
             let insert = format!("{indent}% tex-ls {verb} unknown-command{newline}");
             let mut proposed = text.to_string();
             proposed.insert_str(line_start, &insert);
@@ -172,19 +213,33 @@ pub fn table_column_actions(
     uri: &Uri,
     request_range: Range,
 ) -> Vec<lsp_types::CodeActionResponse> {
+    let definitions = std::cell::LazyCell::new(|| tex_ls_parser::semantic::scan_definitions(root));
+    table_column_actions_with_definitions(root, text, uri, request_range, || &definitions)
+}
+
+/// Request source signatures only when a built-in table surrounds the cursor.
+pub fn table_column_actions_with_definitions<'a>(
+    root: &SyntaxNode,
+    text: &TextBuffer,
+    uri: &Uri,
+    request_range: Range,
+    definitions: impl FnOnce() -> &'a SignatureDb,
+) -> Vec<lsp_types::CodeActionResponse> {
     let idx = text.line_index();
     let offset = idx.offset_at(request_range.start.line, request_range.start.character);
-    let Some((spec_insert, row_inserts)) = table_column_insertions(root, text, offset) else {
+    let Some((spec_insert, row_inserts)) = table_column_insertions(root, text, offset, definitions)
+    else {
         return Vec::new();
     };
 
     let mut edits = Vec::with_capacity(row_inserts.len() + 1);
+    let mut positions = idx.position_cursor();
     edits.push(TextEdit {
-        range: byte_range_to_lsp(&idx, spec_insert, spec_insert),
+        range: byte_range_to_lsp_with_cursor(&mut positions, spec_insert, spec_insert),
         new_text: "c".to_string(),
     });
     edits.extend(row_inserts.into_iter().map(|(at, content)| TextEdit {
-        range: byte_range_to_lsp(&idx, at, at),
+        range: byte_range_to_lsp_with_cursor(&mut positions, at, at),
         new_text: content,
     }));
 
@@ -201,13 +256,14 @@ pub fn table_column_actions(
     .collect()
 }
 
-fn table_column_insertions(
+fn table_column_insertions<'a>(
     root: &SyntaxNode,
     text: &str,
     offset: usize,
+    definitions: impl FnOnce() -> &'a SignatureDb,
 ) -> Option<(usize, Vec<(usize, String)>)> {
     let offset = TextSize::try_from(offset).ok()?;
-    let definitions = tex_ls_parser::semantic::scan_definitions(root);
+    let definitions = std::cell::LazyCell::new(definitions);
     let env = root
         .descendants()
         .filter_map(Environment::cast)
@@ -382,40 +438,68 @@ pub(crate) fn workspace_changes(
     enc: PositionEncoding,
     resolve: &dyn Fn(&Path) -> Option<(Uri, String)>,
 ) -> Option<HashMap<Uri, Vec<TextEdit>>> {
-    // Per-request cache of resolved foreign files: path -> (uri, text, table).
-    // The text is kept beside its table because an index borrows what it
-    // indexes, and here that is the entry's own field.
-    let mut foreign: HashMap<PathBuf, (Uri, String, LineTable)> = HashMap::new();
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for e in &fix.edits {
-        let (target_uri, edit) = match &e.path {
-            None => (
-                self_uri.clone(),
-                TextEdit {
-                    range: byte_range_to_lsp(self_idx, e.start, e.end),
-                    new_text: e.content.clone(),
-                },
-            ),
-            Some(p) => {
-                if !foreign.contains_key(p) {
-                    let (u, txt) = resolve(p)?;
-                    let table = LineTable::new(&txt);
-                    foreign.insert(p.clone(), (u, txt, table));
-                }
-                let (u, txt, table) = &foreign[p];
-                let fidx = LineIndex::with_table(txt, table, enc);
-                (
-                    u.clone(),
+    let edits: Vec<_> = fix.edits.iter().collect();
+    changes_for_edits(workspace_edits(&edits, self_uri, self_idx, enc, resolve).into_iter())
+}
+
+fn workspace_edits(
+    edits: &[&tex_ls_analysis::linter::diagnostic::Edit],
+    self_uri: &Uri,
+    self_idx: &LineIndex,
+    enc: PositionEncoding,
+    resolve: &dyn Fn(&Path) -> Option<(Uri, String)>,
+) -> Vec<Option<(Uri, TextEdit)>> {
+    let mut groups: HashMap<Option<&Path>, Vec<usize>> = HashMap::new();
+    for (slot, edit) in edits.iter().enumerate() {
+        groups.entry(edit.path.as_deref()).or_default().push(slot);
+    }
+    let mut converted = vec![None; edits.len()];
+    for (path, mut slots) in groups {
+        if !slots
+            .windows(2)
+            .all(|pair| edits[pair[0]].start <= edits[pair[1]].start)
+        {
+            slots.sort_unstable_by_key(|&slot| edits[slot].start);
+        }
+        let mut convert = |uri: &Uri, idx: &LineIndex| {
+            let mut cursor = idx.position_cursor();
+            for &slot in &slots {
+                let edit = edits[slot];
+                converted[slot] = Some((
+                    uri.clone(),
                     TextEdit {
-                        range: byte_range_to_lsp(&fidx, e.start, e.end),
-                        new_text: e.content.clone(),
+                        range: byte_range_to_lsp_with_cursor(&mut cursor, edit.start, edit.end),
+                        new_text: edit.content.clone(),
                     },
-                )
+                ));
             }
         };
-        changes.entry(target_uri).or_default().push(edit);
+        if let Some(path) = path {
+            let Some((uri, text)) = resolve(path) else {
+                continue;
+            };
+            let idx = LineIndex::with_encoding(&text, enc);
+            convert(&uri, &idx);
+        } else {
+            convert(self_uri, self_idx);
+        }
     }
-    Some(changes)
+    converted
+}
+
+fn changes_for_edits(
+    edits: impl Iterator<Item = Option<(Uri, TextEdit)>>,
+) -> Option<HashMap<Uri, Vec<TextEdit>>> {
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    let mut complete = true;
+    for edit in edits {
+        if let Some((uri, edit)) = edit {
+            changes.entry(uri).or_default().push(edit);
+        } else {
+            complete = false;
+        }
+    }
+    complete.then_some(changes)
 }
 
 /// Whether two byte ranges overlap, inclusive at the edges (a zero-width cursor at a
@@ -426,9 +510,130 @@ fn byte_ranges_overlap(a_start: usize, a_end: usize, b_start: usize, b_end: usiz
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn table_refactoring_probe_without_a_table_does_not_request_signatures() {
+        let source = "ordinary prose";
+        let root = tex_ls_parser::parser::parse(source).syntax();
+        assert!(
+            table_column_actions_with_definitions(
+                &root,
+                &buf(source),
+                &uri(),
+                Range::new(Position::new(0, 3), Position::new(0, 3)),
+                || panic!("a prose action request must not scan definitions"),
+            )
+            .is_empty()
+        );
+    }
+
     use super::*;
     use tex_ls_analysis::linter::check_document;
     use tex_ls_parser::parser::LexConfig;
+
+    #[test]
+    fn batched_fix_edits_keep_interleaved_targets_and_original_order() {
+        use tex_ls_analysis::linter::diagnostic::{Edit, Fix};
+        let source = "é😀 text\r\n𝕏 tail";
+        let foreign = PathBuf::from("other.tex");
+        let foreign_uri: Uri = fixture_uri!("/other.tex").parse().unwrap();
+        let fix = Fix::safe_edits(
+            vec![
+                Edit::new(13, 17, "late"),
+                Edit::in_file(foreign.clone(), 7, 11, "remote"),
+                Edit::new(0, 6, "first"),
+                Edit::in_file(foreign.clone(), 0, 6, "again"),
+                Edit::new(13, 17, "duplicate"),
+                Edit::new(usize::MAX, usize::MAX, "clamped"),
+            ],
+            "batch",
+        );
+        for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let idx = LineIndex::with_encoding(source, enc);
+            let calls = std::cell::Cell::new(0);
+            let resolve = |path: &Path| {
+                assert_eq!(path, foreign);
+                calls.set(calls.get() + 1);
+                Some((foreign_uri.clone(), source.to_owned()))
+            };
+            let mut expected: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+            for edit in &fix.edits {
+                let uri = if edit.path.is_some() {
+                    &foreign_uri
+                } else {
+                    &uri()
+                };
+                expected.entry(uri.clone()).or_default().push(TextEdit {
+                    range: byte_range_to_lsp(&idx, edit.start, edit.end),
+                    new_text: edit.content.clone(),
+                });
+            }
+            assert_eq!(
+                workspace_changes(&fix, &uri(), &idx, enc, &resolve),
+                Some(expected)
+            );
+            assert_eq!(calls.get(), 1);
+            assert!(workspace_changes(&fix, &uri(), &idx, enc, &|_| None).is_none());
+        }
+    }
+
+    #[test]
+    fn an_unresolved_action_does_not_shift_later_batched_corrections() {
+        use tex_ls_analysis::linter::diagnostic::{Diagnostic, Edit, Fix};
+        let source = "😀 abc def gh";
+        let path = Path::new(fixture_path!("/actions/main.tex"));
+        let uri = path_to_uri(path).unwrap();
+        let fixes = [
+            Fix::safe(5, 6, "A", "first"),
+            Fix::safe_edits(
+                vec![
+                    Edit::new(9, 10, "D"),
+                    Edit::in_file(path.into(), 0, 0, "prefix"),
+                ],
+                "unresolved",
+            ),
+            Fix::safe(13, 14, "G", "last"),
+        ];
+        let findings: Vec<_> = fixes
+            .into_iter()
+            .map(|fix| Diagnostic {
+                path: path.into(),
+                rule: "synthetic",
+                severity: Severity::Warning,
+                message: "issue".into(),
+                start: fix.edits[0].start,
+                end: fix.edits[0].end,
+                fix: Some(fix),
+                related: Vec::new(),
+            })
+            .collect();
+        for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let buffer = TextBuffer::new(source, enc);
+            let idx = buffer.line_index();
+            let (line, character) = idx.position(source.len());
+            let range = Range::new(Position::default(), Position::new(line, character));
+            let actions =
+                code_actions_for_range(&findings, &buffer, &uri, path, range, enc, true, &|_| None);
+            assert_eq!(actions.len(), 2);
+            for (action, finding) in actions.iter().zip([&findings[0], &findings[2]]) {
+                let CodeActionResponse::CodeAction(action) = action else {
+                    panic!("literal correction")
+                };
+                let fix = finding.fix.as_ref().unwrap();
+                assert_eq!(action.title, fix.description);
+                assert_eq!(
+                    action.diagnostics.as_ref().unwrap()[0],
+                    lint_to_lsp(&idx, finding.clone(), true, path)
+                );
+                assert_eq!(
+                    action.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri][0],
+                    TextEdit {
+                        range: byte_range_to_lsp(&idx, fix.edits[0].start, fix.edits[0].end),
+                        new_text: fix.edits[0].content.clone(),
+                    }
+                );
+            }
+        }
+    }
 
     fn uri() -> Uri {
         fixture_uri!("/x.tex").parse().unwrap()

@@ -17,6 +17,7 @@ use smol_str::SmolStr;
 
 use crate::project::{PackageGraph, ResolvedLabels};
 use tex_ls_parser::ast::{environment_name, environment_name_range};
+use tex_ls_parser::semantic::context::TokenListContexts;
 use tex_ls_parser::semantic::{DefSite, DefSiteKind};
 use tex_ls_parser::syntax::{SyntaxKind, SyntaxNode};
 
@@ -62,7 +63,11 @@ pub fn name_target_under_cursor(
         rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
     };
-    let tokens: Vec<_> = [left, right].into_iter().flatten().collect();
+    let tokens: Vec<_> = [left, right]
+        .into_iter()
+        .flatten()
+        .filter(|token| !tex_ls_parser::semantic::context::in_token_list(token))
+        .collect();
 
     for token in &tokens {
         if let Some(delimiter) = token
@@ -115,7 +120,10 @@ pub fn navigation_target_under_cursor(
     sites: &[DefSite],
 ) -> Option<NameTarget> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    for token in root.token_at_offset(at) {
+    for token in root
+        .token_at_offset(at)
+        .filter(|token| !tex_ls_parser::semantic::context::in_token_list(token))
+    {
         if token.kind() == SyntaxKind::VERB && token.text().starts_with("\\verb") {
             let head = TextRange::at(token.text_range().start(), TextSize::new(5));
             if head.contains(at) {
@@ -161,11 +169,13 @@ pub fn navigation_target_under_cursor(
 /// (`\newcommand{\name}`, `\def\name`) are themselves `CONTROL_WORD` tokens, so
 /// the walk finds them too.
 pub fn command_occurrences(root: &SyntaxNode, name: &str) -> Vec<TextRange> {
+    let contexts = TokenListContexts::new(root);
     root.descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| {
             token.kind() == SyntaxKind::CONTROL_WORD
                 && token.text().strip_prefix('\\') == Some(name)
+                && !contexts.contains(token.text_range())
         })
         .map(|token| token.text_range())
         .collect()
@@ -179,8 +189,10 @@ pub fn command_occurrences(root: &SyntaxNode, name: &str) -> Vec<TextRange> {
 ///
 /// [`scan_definition_sites`]: tex_ls_parser::semantic::scan_definition_sites
 pub fn environment_occurrences(root: &SyntaxNode, name: &str) -> Vec<TextRange> {
+    let contexts = TokenListContexts::new(root);
     root.descendants()
         .filter(|node| matches!(node.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
+        .filter(|node| !contexts.contains(node.text_range()))
         .filter(|node| environment_name(node).as_deref().map(str::trim) == Some(name))
         .filter_map(|node| environment_name_range(&node))
         .collect()
@@ -345,6 +357,45 @@ mod tests {
     }
 
     #[test]
+    fn printed_token_lists_are_absent_from_name_navigation_and_occurrences() {
+        let src = r"\newcommand{\foo}{x}\detokenize{\foo\begin{myenv}x\end{myenv}}\foo\begin{myenv}x\end{myenv}";
+        let root = root_of(src);
+        let sites = scan_definition_sites(&root);
+        let printed_command = src.find(r"\detokenize{\foo").unwrap() + r"\detokenize{\".len();
+        let printed_environment = src.find("myenv").unwrap();
+        for offset in [printed_command, printed_environment] {
+            assert!(name_target_under_cursor(&root, offset, &sites).is_none());
+            assert!(navigation_target_under_cursor(&root, offset, &sites).is_none());
+        }
+        assert_eq!(command_occurrences(&root, "foo").len(), 2);
+        assert_eq!(environment_occurrences(&root, "myenv").len(), 2);
+        let names = NameOccurrences::build(&root);
+        assert_eq!(names.commands("foo").len(), 2);
+        assert_eq!(names.environments("myenv").len(), 2);
+    }
+
+    #[test]
+    fn locally_overridden_detokenize_retains_name_navigation() {
+        let src = r"\renewcommand{\detokenize}[1]{#1}\detokenize{\foo}";
+        let root = root_of(src);
+        let sites = scan_definition_sites(&root);
+        let offset = src.find("foo").unwrap();
+        assert_eq!(
+            name_target_under_cursor(&root, offset, &sites)
+                .unwrap()
+                .name,
+            "foo"
+        );
+        assert_eq!(
+            navigation_target_under_cursor(&root, offset, &sites)
+                .unwrap()
+                .name,
+            "foo"
+        );
+        assert_eq!(NameOccurrences::build(&root).commands("foo").len(), 1);
+    }
+
+    #[test]
     fn environment_occurrences_are_name_based() {
         // Unbalanced: two begins, one end — all three collected independently.
         let src = "\\begin{myenv}\n\\begin{myenv}\nx\n\\end{myenv}\n";
@@ -363,7 +414,11 @@ pub struct NameOccurrences {
 impl NameOccurrences {
     pub fn build(root: &SyntaxNode) -> Self {
         let mut result = Self::default();
+        let contexts = TokenListContexts::new(root);
         for element in root.descendants_with_tokens() {
+            if contexts.contains(element.text_range()) {
+                continue;
+            }
             match element {
                 rowan::NodeOrToken::Token(token) if token.kind() == SyntaxKind::CONTROL_WORD => {
                     if let Some(name) = token.text().strip_prefix('\\') {

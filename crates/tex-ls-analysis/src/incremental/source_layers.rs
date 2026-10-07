@@ -51,8 +51,8 @@ impl IncrementalDatabase {
         Ok(self.read.inner.files.get(&normalize_path(path)).copied())
     }
 
-    /// Publish backing observations together, rebuilding storage at most once
-    /// when the batch removes project memberships. The last value for a path wins.
+    /// Publish backing observations together, sorting membership once per changed
+    /// project or rebuilding storage once after removals. The last path value wins.
     pub fn set_backing_batch(
         &mut self,
         project: ProjectId,
@@ -64,6 +64,7 @@ impl IncrementalDatabase {
             .map(|(path, text)| (normalize_path(&path), text))
             .collect();
         let mut removed = HashSet::new();
+        let mut changed_projects = HashSet::new();
         for (path, text) in updates {
             let mut layers = self.layers_for(&path);
             if let Some(text) = text {
@@ -75,10 +76,14 @@ impl IncrementalDatabase {
                     layers.backing = None;
                 }
             }
-            self.stage_layers(&path, layers, &mut removed);
+            self.stage_layers(&path, layers, &mut removed, &mut changed_projects);
         }
         if !removed.is_empty() {
             self.read.inner.rebuild(&removed, None);
+        } else {
+            for project in changed_projects {
+                self.read.inner.sync_project_files(project);
+            }
         }
         Ok(())
     }
@@ -168,9 +173,14 @@ impl IncrementalDatabase {
 
     fn publish_layers(&mut self, path: &Path, layers: SourceLayers) -> Option<SourceId> {
         let mut removed = HashSet::new();
-        self.stage_layers(path, layers, &mut removed);
+        let mut changed_projects = HashSet::new();
+        self.stage_layers(path, layers, &mut removed, &mut changed_projects);
         if !removed.is_empty() {
             self.read.inner.rebuild(&removed, None);
+        } else {
+            for project in changed_projects {
+                self.read.inner.sync_project_files(project);
+            }
         }
         self.read.inner.files.get(&normalize_path(path)).copied()
     }
@@ -180,6 +190,7 @@ impl IncrementalDatabase {
         path: &Path,
         layers: SourceLayers,
         removed: &mut HashSet<(ProjectId, PathBuf)>,
+        changed_projects: &mut HashSet<ProjectId>,
     ) {
         let path = normalize_path(path);
         let db = &mut self.read.inner;
@@ -208,7 +219,12 @@ impl IncrementalDatabase {
             let mut projects: Vec<_> = retained.into_iter().collect();
             projects.sort_unstable();
             for project in projects {
-                db.upsert_file_in(project, &path, text.clone());
+                if db
+                    .upsert_file_in_unpublished(project, &path, text.clone())
+                    .1
+                {
+                    changed_projects.insert(project);
+                }
             }
             let source = db.files[&path];
             let old_overlays = db

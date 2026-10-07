@@ -82,7 +82,20 @@ pub(crate) fn mutually_exclusive(a: &[Frame], b: &[Frame]) -> bool {
 impl ConditionalIndex {
     /// Walk `root`'s `COMMAND` nodes in preorder (document order) and record a
     /// path snapshot at every conditional state change.
+    #[cfg(test)]
     pub(crate) fn compute(root: &SyntaxNode) -> Self {
+        let operands =
+            tex_ls_parser::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+                root,
+                &crate::semantic::scan_definition_sites(root),
+            );
+        Self::compute_with_context(root, &operands)
+    }
+
+    pub(crate) fn compute_with_context(
+        root: &SyntaxNode,
+        operands: &tex_ls_parser::semantic::context::PrimitiveOperandContexts,
+    ) -> Self {
         let mut stack: Vec<Frame> = Vec::new();
         let mut next_id = 0u32;
         let mut snapshots: Vec<(TextSize, Vec<Frame>)> = Vec::new();
@@ -100,7 +113,7 @@ impl ConditionalIndex {
             let Some(name) = command_name(&node) else {
                 continue;
             };
-            if is_definition_command(&name) {
+            if is_definition_command(&name) && !operands.contains_head(&node) {
                 suppress_until = suppress_until.max(definition_span_end(&node));
                 continue;
             }
@@ -347,6 +360,18 @@ mod tests {
         assert_eq!(idx.path_at(offset(src, " y", 0)).len(), 1);
         // …and the real `\fi` closes it.
         assert!(idx.path_at(offset(src, "done", 0)).is_empty());
+    }
+
+    #[test]
+    fn copied_definer_does_not_hide_active_branches_in_leftover_groups() {
+        let source = r"\meaning\newcommand{\iftrue first\else second\fi} after";
+        let idx = index(source);
+        let first = idx.path_at(offset(source, "first", 0));
+        let second = idx.path_at(offset(source, "second", 0));
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(mutually_exclusive(first, second));
+        assert!(idx.path_at(offset(source, "after", 0)).is_empty());
     }
 
     #[test]

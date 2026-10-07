@@ -25,7 +25,7 @@ pub fn compute_completion(
     } else {
         compute_tex_completion_inner(snapshot, uri, path, offset, true)
     };
-    let (query, relevance, recompute) =
+    let (query, relevance, recompute, deferred_label_details) =
         completion_context::prepare(snapshot, path, offset, &mut items);
     let mut list = completion_rank::rank(
         items,
@@ -34,6 +34,9 @@ pub fn compute_completion(
         completion_rank::RESULT_LIMIT,
         recompute,
     );
+    if deferred_label_details {
+        completion_context::enrich_label_details(snapshot, path, &mut list.items);
+    }
     let revision = snapshot
         .source_version(file)
         .expect("captured source")
@@ -127,7 +130,13 @@ fn compute_tex_completion_inner(
     let root = snapshot.parsed_tree(file);
     let declared = snapshot.declarations_for(path);
     let mut ctx =
-        tex_ls_analysis::completion::classify_context_with_declarations(&root, offset, declared);
+        tex_ls_analysis::completion::classify_context_with_roles(&root, offset, declared, || {
+            tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
+                &root,
+                snapshot.definition_sites(file),
+                snapshot.file_operand_contexts(file),
+            )
+        });
     let query = completion_context::prefix(&ctx).to_owned();
     completion_context::clear_prefix(&mut ctx);
     let matcher =
@@ -699,6 +708,140 @@ pub fn has_extension(name: &str, exts: &[&str]) -> bool {
 mod tests {
     use super::*;
     use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn deferred_label_details_match_eager_full_responses_with_long_titles_and_eqref() {
+        use tex_ls_analysis::external::{
+            CompilerArtifact, ExternalInputKind, ExternalInputs, Observation,
+        };
+        let path = Path::new(fixture_path!("/project/deferred-labels.tex"));
+        let uri = path_to_uri(path).unwrap();
+        let title = "長い heading ".repeat(2_800);
+        let mut body = format!("\\documentclass{{article}}\n\\section{{FIRST {title}}}\n");
+        for index in 0..256 {
+            body.push_str(&format!("\\label{{a:first{index:03}}}\n"));
+        }
+        body.push_str(&format!("\\section{{SECOND MATCH {title}}}\n"));
+        for index in 0..256 {
+            body.push_str(&format!("\\label{{b:second{index:03}}}\n"));
+        }
+        for index in 0..128 {
+            body.push_str(&format!(
+                "\\begin{{equation}}x\\label{{z:eq{index:03}}}\\end{{equation}}\n"
+            ));
+        }
+        for (command, query) in [("ref", ""), ("eqref", ""), ("ref", "SECOND MATCH")] {
+            let source = format!("{body}\\{command}{{{query}}}");
+            let offset = source.len() - 1;
+            let mut db = tex_ls_analysis::incremental::IncrementalDatabase::default();
+            let file = db.apply_change(path, source.as_str(), None);
+            let token = db
+                .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
+                .unwrap();
+            db.apply_external_inputs(token, ExternalInputs::Compiler(vec![(path.with_extension("aux"),
+                Observation::Present(CompilerArtifact::from_text(&path.with_extension("aux"),
+                    "\\newlabel{a:first000}{{7}{1}}\n\\newlabel{b:second000}{{8}{1}}\n\\newlabel{z:eq000}{{99}{1}}", "build".into())))]))
+                .unwrap();
+            let snapshot = db.snapshot();
+            assert!(std::ptr::eq(
+                snapshot.label_context_ref(path, "a:first000").unwrap(),
+                snapshot.label_context_ref(path, "a:first001").unwrap()
+            ));
+            let mut eager = compute_tex_completion(&snapshot, &uri, path, offset);
+            let (prepared_query, relevance, recompute, deferred) =
+                completion_context::prepare(&snapshot, path, offset, &mut eager);
+            assert_eq!(deferred, query.is_empty());
+            if deferred {
+                assert!(
+                    eager
+                        .iter()
+                        .all(|item| item.detail.is_none() && item.filter_text.is_none())
+                );
+                completion_context::enrich_label_details(&snapshot, path, &mut eager);
+            }
+            for item in &eager {
+                let number = match item.label.as_str() {
+                    "a:first000" => Some("7"),
+                    "b:second000" => Some("8"),
+                    "z:eq000" => Some("99"),
+                    _ => None,
+                };
+                assert_eq!(
+                    snapshot.label_context_ref(path, &item.label).cloned(),
+                    snapshot.label_context(path, &item.label)
+                );
+                assert_eq!(
+                    item.detail,
+                    super::super::hover::render_label_markdown(
+                        snapshot.label_context(path, &item.label).as_ref(),
+                        number
+                    )
+                );
+            }
+            let mut expected = completion_rank::rank(
+                eager,
+                &prepared_query,
+                &relevance,
+                completion_rank::RESULT_LIMIT,
+                recompute,
+            );
+            let revision = snapshot.source_version(file).unwrap().revision;
+            for item in &mut expected.items {
+                if let Some(serde_json::Value::Object(data)) = &mut item.data {
+                    data.insert("sourceRevision".into(), revision.into());
+                    data.insert("storageEpoch".into(), snapshot.epoch().into());
+                }
+            }
+            completion_edits::attach(
+                &snapshot,
+                path,
+                offset,
+                PositionEncoding::Utf16,
+                &mut expected.items,
+            );
+            let position = snapshot
+                .file_line_index(file, PositionEncoding::Utf16)
+                .position(offset);
+            let actual = compute_completion(
+                &snapshot,
+                &uri,
+                path,
+                PositionEncoding::Utf16,
+                Position::new(position.0, position.1),
+            );
+            assert_eq!(actual, expected, "{command} query {query:?}");
+            assert_eq!(actual.items.len(), completion_rank::RESULT_LIMIT);
+            assert!(actual.is_incomplete);
+            if command == "eqref" {
+                assert!(
+                    actual
+                        .items
+                        .iter()
+                        .all(|item| item.kind == Some(CompletionItemKind::Value))
+                );
+            } else if !query.is_empty() {
+                assert!(
+                    actual
+                        .items
+                        .iter()
+                        .all(|item| item.label.starts_with("b:second"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inspected_definitions_cannot_add_command_completion_candidates() {
+        let source = r"\meaning\newcommand{\ghost}[1]{#1}\newcommand{\real}[1]{#1}\gh";
+        let path = Path::new(fixture_path!("/completion/main.tex"));
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(path, source, None);
+        let snapshot = db.snapshot();
+        let items =
+            compute_tex_completion(&snapshot, &path_to_uri(path).unwrap(), path, source.len());
+        assert!(items.iter().all(|item| item.label != "ghost"));
+        assert!(items.iter().any(|item| item.label == "real"));
+    }
 
     #[test]
     fn unknown_arity_overrides_metadata_without_losing_known_signatures() {

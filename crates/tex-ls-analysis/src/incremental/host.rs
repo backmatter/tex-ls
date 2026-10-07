@@ -1,5 +1,6 @@
 //! Analysis writer and immutable read contexts. Salsa handles stay private.
 use super::*;
+use std::collections::HashSet;
 use std::ops::Deref;
 
 #[path = "external_inputs.rs"]
@@ -460,6 +461,14 @@ impl Analysis {
         self.check_cancelled();
         name_occurrences(&self.inner, self.inner.input(file, self.project))
     }
+    pub fn file_operand_contexts(
+        &self,
+        file: SourceId,
+    ) -> &tex_ls_parser::semantic::context::PrimitiveOperandContexts {
+        self.check_cancelled();
+        file_operand_contexts(&self.inner, self.inner.input(file, self.project))
+    }
+
     pub fn definition_sites(&self, file: SourceId) -> &[crate::semantic::DefSite] {
         self.check_cancelled();
         definition_sites(&self.inner, self.inner.input(file, self.project))
@@ -476,6 +485,11 @@ impl Analysis {
         self.check_cancelled();
         crate::selection::selection_chain(&self.parsed_tree(file), offset)
     }
+    pub fn file_label_contexts(&self, file: SourceId) -> &FileLabelContexts {
+        self.check_cancelled();
+        file_label_contexts(&self.inner, self.inner.input(file, self.project))
+    }
+
     pub fn file_outline(&self, file: SourceId) -> &[crate::semantic::OutlineItem] {
         self.check_cancelled();
         file_outline(&self.inner, self.inner.input(file, self.project))
@@ -578,6 +592,11 @@ impl Analysis {
         self.check_cancelled();
         let file = self.inner.input(file, self.project);
         self.inner.document_signatures(file)
+    }
+
+    pub fn file_modes(&self, file: SourceId) -> &tex_ls_parser::semantic::mode::ModeIndex {
+        self.check_cancelled();
+        file_modes(&self.inner, self.inner.input(file, self.project))
     }
     pub fn file_glossary_keys(&self, file: SourceId) -> &[SmolStr] {
         self.check_cancelled();
@@ -849,17 +868,27 @@ impl Analysis {
             let occurrences = self.name_occurrences(file);
             match target.kind {
                 crate::name_refs::NameKind::Command => {
+                    let occurrences = occurrences.commands(&target.name);
+                    if occurrences.is_empty() {
+                        continue;
+                    }
+                    let definition_ranges: HashSet<_> = if include_declaration {
+                        HashSet::new()
+                    } else {
+                        definitions
+                            .iter()
+                            .filter(|site| {
+                                site.kind == crate::semantic::DefSiteKind::Command
+                                    && site.name == target.name
+                            })
+                            .map(|site| site.name_range)
+                            .collect()
+                    };
                     result.extend(
                         occurrences
-                            .commands(&target.name)
                             .iter()
                             .filter(|range| {
-                                include_declaration
-                                    || !definitions.iter().any(|site| {
-                                        site.kind == crate::semantic::DefSiteKind::Command
-                                            && site.name == target.name
-                                            && site.name_range == **range
-                                    })
+                                include_declaration || !definition_ranges.contains(*range)
                             })
                             .map(|range| (file, *range)),
                     );

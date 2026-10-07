@@ -36,7 +36,7 @@ pub struct Document {
 pub const DOCUMENTS: [Document; 4] = [
     Document {
         name: "small.tex",
-        bytes: 1233,
+        bytes: 1232,
     },
     Document {
         name: "cv.tex",
@@ -145,7 +145,7 @@ impl Site {
     pub fn expected_leaf(self) -> SyntaxKind {
         match self {
             Self::Word | Self::Decline => SyntaxKind::WORD,
-            Self::Verbatim => SyntaxKind::VERBATIM_BODY,
+            Self::Verbatim => SyntaxKind::DELEGATED_CODE,
         }
     }
 }
@@ -175,7 +175,7 @@ pub fn prepare(text: &str, site: Site) -> (String, usize) {
             let block =
                 format!("\n\\begin{{lstlisting}}[language=C]\n{body}\\end{{lstlisting}}\n\n");
             // Halfway down the body, inside a code line rather than at its edge, so
-            // the edit is unambiguously interior to the one `VERBATIM_BODY` leaf.
+            // the edit is unambiguously interior to the one `DELEGATED_CODE` leaf.
             let into_body = "\n\\begin{lstlisting}[language=C]\n".len()
                 + LISTING_LINE.len() * (LISTING_LINES / 2)
                 + LISTING_LINE.len() / 2;

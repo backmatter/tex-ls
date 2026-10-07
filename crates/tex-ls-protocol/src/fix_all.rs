@@ -80,27 +80,61 @@ pub fn preferred(
             })
 }
 
-pub fn action(
-    findings: &[tex_ls_analysis::linter::Diagnostic],
-    text: &TextBuffer,
-    uri: &Uri,
-    origin: &Path,
-    enc: PositionEncoding,
-    resolve: &dyn Fn(&Path) -> Option<(Uri, String)>,
-) -> Option<lsp_types::CodeActionResponse> {
-    let mut candidates: Vec<&Fix> = Vec::new();
-    for fix in findings.iter().filter_map(|finding| finding.fix.as_ref()) {
-        if fix.applicability == Applicability::Safe
-            && valid(fix, text, origin, resolve)
-            && !candidates
-                .iter()
-                .any(|candidate| candidate.edits == fix.edits)
-        {
-            candidates.push(fix);
-        }
+type EditKey<'a> = (Option<&'a Path>, usize, usize, &'a str);
+
+fn edit_key(fix: &Fix) -> Vec<EditKey<'_>> {
+    fix.edits
+        .iter()
+        .map(|edit| {
+            (
+                edit.path.as_deref(),
+                edit.start,
+                edit.end,
+                edit.content.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Compare competing safe edits once when a request offers many corrections.
+/// Invalid competitors still count, matching the single-finding policy.
+pub fn preferred_all(findings: &[tex_ls_analysis::linter::Diagnostic], origin: &Path) -> Vec<bool> {
+    let mut unique = HashMap::new();
+    let mut fixes = Vec::new();
+    let mut groups = Vec::with_capacity(findings.len());
+    for finding in findings {
+        let group = finding
+            .fix
+            .as_ref()
+            .filter(|fix| fix.applicability == Applicability::Safe)
+            .map(|fix| {
+                *unique.entry(edit_key(fix)).or_insert_with(|| {
+                    fixes.push(fix);
+                    fixes.len() - 1
+                })
+            });
+        groups.push(group);
     }
+    let rejected = conflicting_fixes(&fixes, origin);
+    findings
+        .iter()
+        .zip(groups)
+        .map(|(finding, group)| {
+            group.is_some_and(|group| {
+                !rejected.contains(&group)
+                    && finding.fix.as_ref().unwrap().edits.iter().any(|edit| {
+                        edit.path.as_deref().is_none_or(|path| path == origin)
+                            && edit.start <= finding.end
+                            && finding.start <= edit.end
+                    })
+            })
+        })
+        .collect()
+}
+
+fn conflicting_fixes(fixes: &[&Fix], origin: &Path) -> HashSet<usize> {
     let mut spans = Vec::new();
-    for (index, fix) in candidates.iter().enumerate() {
+    for (index, fix) in fixes.iter().enumerate() {
         for edit in &fix.edits {
             spans.push((
                 edit.path.as_deref().unwrap_or(origin),
@@ -114,15 +148,37 @@ pub fn action(
     let mut rejected = HashSet::new();
     let mut active = Vec::new();
     for (path, start, end, index) in spans {
-        active.retain(|&(old_path, old_end, _)| old_path == path && old_end >= start);
-        for &(_, _, other) in &active {
-            if other != index {
+        active.retain(|&(old_path, _, old_end, _)| old_path == path && old_end >= start);
+        for &(_, old_start, _, other) in &active {
+            if old_start <= end && other != index {
                 rejected.insert(index);
                 rejected.insert(other);
             }
         }
-        active.push((path, end, index));
+        active.push((path, start, end, index));
     }
+    rejected
+}
+
+pub fn action(
+    findings: &[tex_ls_analysis::linter::Diagnostic],
+    text: &TextBuffer,
+    uri: &Uri,
+    origin: &Path,
+    enc: PositionEncoding,
+    resolve: &dyn Fn(&Path) -> Option<(Uri, String)>,
+) -> Option<lsp_types::CodeActionResponse> {
+    let mut candidates: Vec<&Fix> = Vec::new();
+    let mut seen = HashSet::new();
+    for fix in findings.iter().filter_map(|finding| finding.fix.as_ref()) {
+        if fix.applicability == Applicability::Safe
+            && valid(fix, text, origin, resolve)
+            && seen.insert(edit_key(fix))
+        {
+            candidates.push(fix);
+        }
+    }
+    let rejected = conflicting_fixes(&candidates, origin);
     let edits = candidates
         .into_iter()
         .enumerate()
@@ -162,6 +218,43 @@ mod tests {
             end: 2,
             fix: Some(fix),
             related: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn batched_preferences_match_pairwise_policy_for_every_competitor_subset() {
+        let origin = Path::new(fixture_path!("/p/a.tex"));
+        let other = PathBuf::from(fixture_path!("/p/b.tex"));
+        let fixes = [
+            Fix::safe(0, 2, "a", "first"),
+            Fix::safe(0, 2, "a", "duplicate with different title"),
+            Fix::safe(2, 2, "b", "touching"),
+            Fix::safe(3, 4, "c", "separate"),
+            Fix::safe_edits(
+                vec![Edit::new(8, 10, "x"), Edit::in_file(other, 0, 2, "y")],
+                "atomic",
+            ),
+            Fix::safe_edits(
+                vec![Edit::in_file(origin.into(), 0, 2, "a")],
+                "explicit origin",
+            ),
+            Fix::unsafe_(0, 10, "u", "unsafe competitor"),
+            Fix::safe(5, 1, "r", "reversed invalid competitor"),
+        ];
+        for mask in 0..1 << fixes.len() {
+            let findings: Vec<_> = fixes
+                .iter()
+                .enumerate()
+                .filter(|(slot, _)| mask & (1 << slot) != 0)
+                .map(|(_, fix)| finding(fix.clone()))
+                .collect();
+            for findings in [findings.clone(), findings.into_iter().rev().collect()] {
+                let expected: Vec<_> = findings
+                    .iter()
+                    .map(|finding| preferred(finding, &findings, origin))
+                    .collect();
+                assert_eq!(preferred_all(&findings, origin), expected);
+            }
         }
     }
     #[test]

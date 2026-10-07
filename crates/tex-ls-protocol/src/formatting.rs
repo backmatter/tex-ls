@@ -58,6 +58,7 @@ pub fn compute_range_format(
         let idx = snapshot.file_line_index(file, encoding);
         let start = idx.offset_at(sel_range.start.line, sel_range.start.character);
         let end = idx.offset_at(sel_range.end.line, sel_range.end.character);
+        let mut positions = idx.position_cursor();
         let mut edits = Vec::new();
         for node in snapshot.parsed_bib_tree(file).children().filter(|node| {
             matches!(
@@ -79,7 +80,7 @@ pub fn compute_range_format(
             let formatted = formatted.trim_end_matches(['\r', '\n']);
             if formatted != original {
                 edits.push(TextEdit {
-                    range: lsp_range(&idx, range),
+                    range: lsp_range_with_cursor(&mut positions, range),
                     new_text: formatted.into(),
                 });
             }

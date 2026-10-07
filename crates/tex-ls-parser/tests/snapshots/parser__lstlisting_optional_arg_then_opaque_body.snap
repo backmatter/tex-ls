@@ -1,5 +1,5 @@
 ---
-source: tests/parser.rs
+source: crates/tex-ls-parser/tests/parser.rs
 expression: "tree(\"\\\\begin{lstlisting}[language=Python]\\nif x: pass  # $not math$\\n\\\\end{lstlisting}\")"
 ---
 ROOT@0..77
@@ -14,7 +14,17 @@ ROOT@0..77
         L_BRACKET@18..19 "["
         WORD@19..34 "language=Python"
         R_BRACKET@34..35 "]"
-    VERBATIM_BODY@35..61 "\nif x: pass  # $not math$\n"
+    FOREIGN_TEXT@35..36 "\n"
+    FOREIGN_KEYWORD@36..38 "if"
+    FOREIGN_TEXT@38..39 " "
+    FOREIGN_TEXT@39..40 "x"
+    FOREIGN_TEXT@40..41 ":"
+    FOREIGN_TEXT@41..42 " "
+    FOREIGN_KEYWORD@42..46 "pass"
+    FOREIGN_TEXT@46..47 " "
+    FOREIGN_TEXT@47..48 " "
+    FOREIGN_COMMENT@48..60 "# $not math$"
+    FOREIGN_TEXT@60..61 "\n"
     END@61..77
       CONTROL_WORD@61..65 "\\end"
       NAME_GROUP@65..77

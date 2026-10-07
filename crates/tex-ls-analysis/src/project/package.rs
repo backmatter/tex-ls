@@ -25,7 +25,7 @@ use rowan::TextRange;
 use smol_str::SmolStr;
 
 use crate::ast::{AstNode, Optional, child, command_name};
-use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::syntax::{SyntaxKind, SyntaxNode};
 
 /// Which load command produced an edge. Kept distinct even where resolution is
 /// currently identical, so later passes can honor the differences
@@ -101,8 +101,18 @@ impl PackageEdge {
 /// `\RequirePackage` is valid anywhere in a `.sty`/`.cls`, not just the preamble —
 /// so any recognized command in the CST is a candidate edge.
 pub fn collect_package_edges(root: &SyntaxNode, base_dir: Option<&Path>) -> Vec<PackageEdge> {
+    let roles = crate::external::links::FileRoleContext::new(root);
+    collect_package_edges_with_roles(root, base_dir, &roles)
+}
+
+pub fn collect_package_edges_with_roles(
+    root: &SyntaxNode,
+    base_dir: Option<&Path>,
+    roles: &crate::external::links::FileRoleContext,
+) -> Vec<PackageEdge> {
     root.descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| roles.allows(node))
         .flat_map(|node| package_edges_of(&node, base_dir))
         .collect()
 }
@@ -113,9 +123,8 @@ pub fn collect_package_edge_keys(
     root: &SyntaxNode,
     base_dir: Option<&Path>,
 ) -> Vec<PackageEdgeKey> {
-    root.descendants()
-        .filter(|node| node.kind() == SyntaxKind::COMMAND)
-        .flat_map(|node| package_edges_of(&node, base_dir))
+    collect_package_edges(root, base_dir)
+        .into_iter()
         .map(|edge| edge.key())
         .collect()
 }
@@ -128,13 +137,6 @@ fn package_edges_of(command: &SyntaxNode, base_dir: Option<&Path>) -> Vec<Packag
     let Some(kind) = command_name(command).and_then(|name| package_kind(&name)) else {
         return Vec::new();
     };
-    // `\string\usepackage{tikz}` (typically inside a `\message`/`\typeout` string)
-    // names the load command as *text* — `\string` renders the next control word
-    // literally, expanding nothing — so it pulls in no package. Suppress the edge so
-    // it cannot masquerade as a real (or duplicate) load.
-    if preceded_by_string(command) {
-        return Vec::new();
-    }
     let range = command.text_range();
     let ext = kind.extension();
 
@@ -161,31 +163,6 @@ fn package_edges_of(command: &SyntaxNode, base_dir: Option<&Path>) -> Vec<Packag
     // An all-blank list (`\usepackage{}` / `\usepackage{ , }`) resolves to
     // nothing literal; report it as one dynamic edge, mirroring `\bibliography`.
     if edges.is_empty() { dynamic() } else { edges }
-}
-
-/// Whether `command`'s control word is the token immediately following a `\string`
-/// (across only trivia). `\string\usepackage` makes the load a printed name, not a
-/// real load; `\string` affects exactly the next token, so only intervening
-/// whitespace/comments — never other content — count as "immediately after".
-fn preceded_by_string(command: &SyntaxNode) -> bool {
-    let Some(first) = command.first_token() else {
-        return false;
-    };
-    let mut prev = first.prev_token();
-    while let Some(token) = prev {
-        match token.kind() {
-            SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT => {
-                prev = token.prev_token();
-            }
-            _ => return is_string_control_word(&token),
-        }
-    }
-    false
-}
-
-/// Whether `token` is the `\string` control word.
-fn is_string_control_word(token: &SyntaxToken) -> bool {
-    token.kind() == SyntaxKind::CONTROL_WORD && token.text() == "\\string"
 }
 
 /// One literal option inside a load command's `[...]`: its whitespace-trimmed

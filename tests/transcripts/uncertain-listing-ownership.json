@@ -1,0 +1,317 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "semanticTokens": {
+          "requests": {
+            "full": true
+          },
+          "tokenTypes": [
+            "macro",
+            "type",
+            "variable",
+            "property",
+            "keyword",
+            "string",
+            "number",
+            "namespace",
+            "texText",
+            "texLiteral",
+            "texPath",
+            "texMath",
+            "comment"
+          ],
+          "tokenModifiers": [
+            "declaration",
+            "texBold",
+            "texItalic"
+          ],
+          "formats": [
+            "relative"
+          ]
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-0.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\iffalse\\lstset{language=Python,mathescape=true}\\fi\n\\begin{lstlisting}\nx=$\\ref{fake}$\n\\end{lstlisting}\n\\label{real}\\ref{real}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-0.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-0.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-1.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\lstset{language=Python,mathescape=true}\\lstset{\\options}\n\\begin{lstlisting}\nx=$\\ref{fake}$\n\\end{lstlisting}\n\\label{real}\\ref{real}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-1.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-1.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-2.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{Verbatim}[commentchar=!]\rkept ! discard\rnext line\r\\end{Verbatim}\r\\label{real}\\ref{real}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-2.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-2.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-3.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\renewcommand{\\includeonly}[1]{#1}\\includeonly{a}\\input{a}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-3.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-3.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/a.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "Child text"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\label{key}\\let\\copy\\ref{key}\\ref{key}\\meaning\\ref{\\ref{key}}\\meaning\\input{a}\\input{a}\\let\\copy\\ensuremath{a_b}$\\let\\copy\\text{a_b}$\\meaning\\newcommand{\\fake}[1]{#1}\\meaning\\section{printed}\\section{Live}\\meaning\\definecolor{printed}{HTML}{FF0000}\\definecolor{real}{HTML}{00FF00}\\meaning\\DescribeMacro{\\fake}\\ifdefined\\input{printed}\\fi"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentLink",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/rename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 7
+        },
+        "newName": "renamed"
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentColor",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/case-5.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 27
+        }
+      }
+    },
+    {
+      "method": "workspace/willRenameFiles",
+      "request": true,
+      "params": {
+        "files": [
+          {
+            "oldUri": "file:///ownership/a.tex",
+            "newUri": "file:///ownership/b.tex"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/overridden-factory.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\renewcommand{\\newmintinline}[1]{#1}\n\\newmintinline[meaning]{python}{}\n\\meaning\\newcommand{\\bad}[1]{#1}\n\\bad{x}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/overridden-factory.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 2
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/overridden-factory.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/overridden-factory.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/inspected-definition.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\meaning\\newcommand{\\ghost}[1]{#1}\\newcommand{\\real}[1]{#1}\\gh"
+        }
+      }
+    },
+    {
+      "method": "textDocument/completion",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///ownership/inspected-definition.tex"
+        },
+        "position": {
+          "line": 0,
+          "character": 62
+        }
+      }
+    }
+  ]
+}

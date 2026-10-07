@@ -62,6 +62,14 @@ exports.run = async function run() {
   const extension = vscode.extensions.getExtension('backmatter.tex-ls');
   assert.ok(extension, 'extension is installed');
   await extension.activate();
+  const typography = vscode.workspace.getConfiguration('editor').get('semanticTokenColorCustomizations').rules;
+  assert.equal(typography['texText:latex'].bold, false);
+  assert.equal(typography['texText:latex'].italic, false);
+  for (const language of ['latex', 'bibtex']) {
+    assert.equal(typography[`*.texBold:${language}`].bold, true);
+    assert.equal(typography[`*.texItalic:${language}`].italic, true);
+    assert.equal(typography[`*.declaration:${language}`].bold, true);
+  }
 
   const symbols = await eventually('document symbols', async () => {
     const result = await vscode.commands.executeCommand('vscode.executeDocumentSymbolProvider', document.uri);
@@ -123,6 +131,8 @@ $\alpha+\unknown$ \% % \commenthidden
   const colorDocument = await vscode.workspace.openTextDocument(colorUri);
   const legend = await eventually('semantic token legend', () =>
     vscode.commands.executeCommand('vscode.provideDocumentSemanticTokensLegend', colorUri));
+  for (const type of ['texText', 'texLiteral', 'texPath', 'texMath']) assert.ok(legend.tokenTypes.includes(type), `custom purpose ${type} was not negotiated`);
+  for (const modifier of ['declaration', 'texBold', 'texItalic']) assert.ok(legend.tokenModifiers.includes(modifier));
   const colorTokens = await eventually('semantic command tokens', async () => {
     const result = await vscode.commands.executeCommand('vscode.provideDocumentSemanticTokens', colorUri);
     return result?.data?.length && result;
@@ -141,13 +151,13 @@ $\alpha+\unknown$ \% % \commenthidden
     if (legend.tokenTypes[type] === 'macro') {
       commands.push(colorDocument.lineAt(tokenLine).text.slice(tokenColumn, tokenColumn + length));
     }
-    if (legend.tokenTypes[type] === 'string') {
+    if (legend.tokenTypes[type] === 'texLiteral') {
       printed.push(colorDocument.lineAt(tokenLine).text.slice(tokenColumn, tokenColumn + length));
     }
   }
   assert.deepEqual(commands, ['\\begin', '\\newcommand', '\\custom', '\\custom', '\\tem', '\\item',
     '\\alpha', '\\unknown', '\\%', '\\verb', '\\texttt', '\\usetheme', '\\usetikzlibrary', '\\bibliographystyle', '\\end']);
-  assert.deepEqual(printed, ['\\inlinehidden', 'chapters/intro.tex']);
+  assert.deepEqual(printed, ['\\inlinehidden']);
   assert.deepEqual(modules, ['metropolis', 'calc', 'plain']);
   for (const [name, target] of [['metropolis', 'beamerthememetropolis.sty'], ['calc', 'tikzlibrarycalc.code.tex'], ['plain', 'plain.bst']]) {
     const position = colorDocument.positionAt(colorSource.indexOf(name) + 1);

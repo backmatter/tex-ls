@@ -1,0 +1,22 @@
+\documentclass{article}
+\usepackage{listings}
+\usepackage{fancyvrb}
+\usepackage{comment}
+\excludecomment{discarded}
+\begin{document}
+\section{Ownership}\label{sec:live}
+\lstset{language=Python,escapeinside={(*@}{@*)}}
+\begin{lstlisting}
+x = 1 (*@\ref{sec:live}@*)
+x = "(*@\ref{sec:live}@*)"
+# (*@\ref{sec:live}@*)
+\end{lstlisting}
+\begin{Verbatim}[commandchars=+()]
+Literal \ref{printed}, active +ref(sec:live).
+\end{Verbatim}
+\begin{discarded}
+\ref{discarded}
+embedded \end{discarded} does not close the body
+\end{discarded}
+After \ref{sec:live}.
+\end{document}

@@ -122,9 +122,21 @@ impl IncludeEdge {
 /// `\input` is valid anywhere (inside a group, an environment, …), so any
 /// recognized command in the CST is a candidate edge.
 pub fn collect_include_edges(root: &SyntaxNode, base_dir: Option<&Path>) -> Vec<IncludeEdge> {
-    let filter = tex_ls_parser::semantic::roles::include_only(root);
+    let roles = crate::external::links::FileRoleContext::new(root);
+    collect_include_edges_with_roles(root, base_dir, &roles)
+}
+
+pub fn collect_include_edges_with_roles(
+    root: &SyntaxNode,
+    base_dir: Option<&Path>,
+    roles: &crate::external::links::FileRoleContext,
+) -> Vec<IncludeEdge> {
+    let filter = tex_ls_parser::semantic::roles::include_only_with_ownership(root, |command| {
+        roles.allows(command)
+    });
     root.descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| roles.allows(node))
         .filter_map(|node| {
             let mut edge = include_edge(&node, base_dir)?;
             if edge.kind == IncludeKind::Include {
@@ -350,10 +362,20 @@ pub enum BibTarget {
 /// resolver consumes these. Out of scope (per the include-module docs): these are
 /// *not* source includes.
 pub fn collect_bib_resource_targets(root: &SyntaxNode, base_dir: Option<&Path>) -> Vec<BibTarget> {
+    let roles = crate::external::links::FileRoleContext::new(root);
+    collect_bib_resource_targets_with_roles(root, base_dir, &roles)
+}
+
+pub fn collect_bib_resource_targets_with_roles(
+    root: &SyntaxNode,
+    base_dir: Option<&Path>,
+    roles: &crate::external::links::FileRoleContext,
+) -> Vec<BibTarget> {
     let mut targets = Vec::new();
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| roles.allows(node))
     {
         let Some(name) = command_name(&command) else {
             continue;
@@ -433,6 +455,40 @@ mod tests {
         let e = edges("\\include{body}\n", None);
         assert_eq!(e[0].kind, IncludeKind::Include);
         assert_eq!(e[0].target, IncludeTarget::Path(PathBuf::from("body.tex")));
+    }
+
+    #[test]
+    fn locally_overridden_includeonly_does_not_change_build_participation() {
+        for (preamble, expected) in [
+            (
+                r"\renewcommand{\includeonly}[1]{#1}\includeonly{printed}",
+                [Some(true), Some(true)],
+            ),
+            (
+                r"\let\includeonly\relax\includeonly{printed}",
+                [Some(true), Some(true)],
+            ),
+            (
+                r"\includeonly{kept}\renewcommand{\includeonly}[1]{#1}\includeonly{printed}",
+                [Some(true), Some(false)],
+            ),
+            (
+                r"\detokenize{\renewcommand{\includeonly}[1]{#1}}\includeonly{kept}",
+                [Some(true), Some(false)],
+            ),
+        ] {
+            let source = format!("{preamble}\\include{{kept}}\\include{{other}}");
+            let includes = edges(&source, None);
+            assert_eq!(includes.len(), 2, "{source}");
+            assert_eq!(
+                includes
+                    .iter()
+                    .map(|edge| edge.build_participation)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{source}"
+            );
+        }
     }
 
     #[test]

@@ -230,7 +230,56 @@ pub struct LineIndex<'a> {
     encoding: PositionEncoding,
 }
 
+/// Position conversion for a batch of offsets, reusing the counted prefix of
+/// a Unicode line. Increasing character-boundary offsets scan each character at most once;
+/// backwards offsets and offsets inside a code point use the ordinary query.
+#[derive(Clone)]
+pub struct PositionCursor<'index, 'text> {
+    index: &'index LineIndex<'text>,
+    offset: usize,
+    position: (u32, u32),
+}
+
+impl PositionCursor<'_, '_> {
+    /// Convert an offset with the same clamping and encoding as
+    /// [`LineIndex::position`]. Queries need not be ordered.
+    pub fn position(&mut self, offset: usize) -> (u32, u32) {
+        let index = self.index;
+        let offset = offset.min(index.text.len());
+        let line = index.line_of(offset);
+        let position = if index.encoding == PositionEncoding::Utf8 || !index.table.wide_lines[line]
+        {
+            (line as u32, (offset - index.table.line_starts[line]) as u32)
+        } else if line == self.position.0 as usize
+            && offset >= self.offset
+            && index.text.is_char_boundary(self.offset)
+            && index.text.is_char_boundary(offset)
+        {
+            let units = index.text[self.offset..offset]
+                .chars()
+                .map(char::len_utf16)
+                .sum::<usize>();
+            (line as u32, self.position.1 + units as u32)
+        } else {
+            index.position(offset)
+        };
+        self.offset = offset;
+        self.position = position;
+        position
+    }
+}
+
 impl<'a> LineIndex<'a> {
+    /// Convert many positions without recounting Unicode prefixes for every
+    /// offset. The cursor owns no tables and does not change the index.
+    pub fn position_cursor(&self) -> PositionCursor<'_, 'a> {
+        PositionCursor {
+            index: self,
+            offset: 0,
+            position: (0, 0),
+        }
+    }
+
     /// An index converting positions in the LSP-default **UTF-16** encoding,
     /// scanning `text` for its table. CLI diagnostics (which only use
     /// [`line_col`](Self::line_col)) use this too; LSP code should build with
@@ -375,7 +424,7 @@ impl<'a> LineIndex<'a> {
         let content_end = self.line_content_end(line);
         let character = character as usize;
         if !self.table.wide_lines[line] {
-            return content_end.min(start + character);
+            return content_end.min(start.saturating_add(character));
         }
         let mut units = 0usize;
         for (at, ch) in self.text[start..content_end].char_indices() {
@@ -391,11 +440,126 @@ impl<'a> LineIndex<'a> {
         }
         content_end
     }
+
+    /// Convert a batch of positions in source order, preserving input order and
+    /// duplicates. Each requested Unicode line is walked only once, including
+    /// UTF-8 positions inside a code point and UTF-16 surrogate interiors.
+    pub fn offsets_at(&self, positions: &[(u32, u32)]) -> Vec<usize> {
+        if positions.len() <= 1 {
+            return positions
+                .iter()
+                .map(|&(l, c)| self.offset_at(l, c))
+                .collect();
+        }
+        let mut order: Vec<_> = (0..positions.len()).collect();
+        if !positions.windows(2).all(|pair| pair[0] <= pair[1]) {
+            order.sort_unstable_by_key(|&slot| positions[slot]);
+        }
+        let mut offsets = vec![self.text.len(); positions.len()];
+        let mut pending = order.as_slice();
+        while let Some(&first) = pending.first() {
+            let line = positions[first].0 as usize;
+            let count = pending.partition_point(|&slot| positions[slot].0 as usize == line);
+            let (slots, rest) = pending.split_at(count);
+            pending = rest;
+            let Some(&start) = self.table.line_starts.get(line) else {
+                continue;
+            };
+            let end = self.line_content_end(line);
+            if !self.table.wide_lines[line] {
+                for &slot in slots {
+                    offsets[slot] = end.min(start.saturating_add(positions[slot].1 as usize));
+                }
+                continue;
+            }
+            let mut chars = self.text[start..end].chars();
+            let mut offset = start;
+            let mut units = 0;
+            for &slot in slots {
+                while units < positions[slot].1 as usize {
+                    let Some(ch) = chars.next() else { break };
+                    offset += ch.len_utf8();
+                    units += match self.encoding {
+                        PositionEncoding::Utf8 => ch.len_utf8(),
+                        PositionEncoding::Utf16 => ch.len_utf16(),
+                    };
+                }
+                offsets[slot] = offset;
+            }
+        }
+        offsets
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn batched_offsets_match_independent_queries_after_edits() {
+        let mut text = String::from("ascii\r\naé😀z\rα𝕏\n\nlast😀");
+        let mut table = LineTable::new(&text);
+        for insert in ["", "😀\r", "\n", "é", "ascii"] {
+            let end = text.chars().next().map_or(0, char::len_utf8);
+            text.replace_range(..end, insert);
+            table.patch(0..end, insert.len(), &text);
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let index = LineIndex::with_table(&text, &table, encoding);
+                let positions: Vec<_> = (0..=index.table.line_starts.len() as u32 + 1)
+                    .flat_map(|line| (0..=20).map(move |character| (line, character)))
+                    .chain([(0, u32::MAX), (u32::MAX, u32::MAX)])
+                    .collect();
+                for positions in [
+                    positions.clone(),
+                    positions
+                        .iter()
+                        .rev()
+                        .copied()
+                        .chain(positions.iter().copied())
+                        .collect(),
+                ] {
+                    let expected: Vec<_> = positions
+                        .iter()
+                        .map(|&(l, c)| index.offset_at(l, c))
+                        .collect();
+                    assert_eq!(index.offsets_at(&positions), expected);
+                    for position in positions {
+                        assert_eq!(
+                            index.offsets_at(&[position]),
+                            [index.offset_at(position.0, position.1)]
+                        );
+                    }
+                }
+                assert!(index.offsets_at(&[]).is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn position_cursor_matches_independent_queries_after_edits() {
+        let mut text = String::from("a£b€c𝕏d\r\nα\\beta 42\ré\n\nlast😀");
+        let mut table = LineTable::new(&text);
+        for insert in ["", "𝕏\r", "\n", "α", "ascii"] {
+            let end = text.chars().next().map_or(0, char::len_utf8);
+            text.replace_range(..end, insert);
+            table.patch(0..end, insert.len(), &text);
+            assert_eq!(table, LineTable::new(&text));
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let index = LineIndex::with_table(&text, &table, encoding);
+                let mut cursor = index.position_cursor();
+                // Include interior byte offsets, repeated offsets, backwards
+                // queries, line terminators, EOF and clamping beyond EOF.
+                for offset in (0..=text.len() + 2)
+                    .chain((0..=text.len() + 2).rev())
+                    .chain([0, 0, text.len(), text.len(), 1, 0, 2])
+                    .chain(text.char_indices().map(|(offset, _)| offset))
+                    .chain([text.len()])
+                {
+                    assert_eq!(cursor.position(offset), index.position(offset));
+                }
+            }
+        }
+    }
 
     #[test]
     fn line_col_basic() {

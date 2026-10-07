@@ -3,6 +3,503 @@ use crate::test_host::TestHost;
 use tex_ls_analysis::linter::lint_document;
 
 #[test]
+fn overridden_listing_factory_cannot_invent_a_reader_or_definition() {
+    let source = "é😀 \\renewcommand{\\newmintinline}[1]{#1}\n\\newmintinline[meaning]{python}{}\n\\meaning\\newcommand{\\bad}[1]{#1}\n\\bad{x}";
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    let mut db = IncrementalDatabase::default();
+    db.apply_change(&path, source, None);
+    let snapshot = db.snapshot();
+    for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        assert!(
+            compute_goto_definition(&snapshot, &path, Position::new(3, 2), encoding,).is_empty()
+        );
+    }
+}
+
+#[test]
+fn selection_batches_match_independent_chains_at_all_encoded_positions() {
+    for (source, kind) in [
+        ("", FileKind::Tex),
+        (
+            "é😀 \\textbf{words} % comment\r\n$x^{2}$\r\\begin{itemize}\\item x\\end{itemize}",
+            FileKind::Tex,
+        ),
+        ("{é😀 \\textbf{unclosed", FileKind::Tex),
+        ("", FileKind::Bib),
+        (
+            "@string{brand=\"é😀\"}\r\n@book{k,title=brand,note={é😀}}",
+            FileKind::Bib,
+        ),
+        ("@book{k,title={é😀", FileKind::Bib),
+    ] {
+        let path = Path::new(if kind == FileKind::Bib {
+            fixture_path!("/selection/main.bib")
+        } else {
+            fixture_path!("/selection/main.tex")
+        });
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(path, source, None);
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(path).unwrap();
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let idx = snapshot.file_line_index(file, encoding);
+            let positions: Vec<_> = (0..=4)
+                .flat_map(|line| {
+                    (0..=source.len() as u32 + 2).map(move |column| Position::new(line, column))
+                })
+                .chain([
+                    Position::new(1, u32::MAX),
+                    Position::new(u32::MAX, u32::MAX),
+                ])
+                .collect();
+            let positions: Vec<_> = positions
+                .iter()
+                .rev()
+                .copied()
+                .chain(positions.iter().copied().take(16))
+                .collect();
+            let expected: Vec<_> = positions
+                .iter()
+                .map(|pos| {
+                    let at = TextSize::from(idx.offset_at(pos.line, pos.character) as u32);
+                    let mut ranges = if kind == FileKind::Bib {
+                        let root = snapshot.parsed_bib_tree(file);
+                        root.token_at_offset(at).right_biased().map_or_else(
+                            || vec![root.text_range()],
+                            |token| {
+                                std::iter::once(token.text_range())
+                                    .chain(token.parent_ancestors().map(|n| n.text_range()))
+                                    .collect()
+                            },
+                        )
+                    } else {
+                        let root = snapshot.parsed_tree(file);
+                        let token = match root.token_at_offset(at) {
+                            rowan::TokenAtOffset::Single(token) => Some(token),
+                            rowan::TokenAtOffset::Between(left, right) => {
+                                let trivia = |token: &tex_ls_parser::syntax::SyntaxToken| {
+                                    matches!(
+                                        token.kind(),
+                                        SyntaxKind::WHITESPACE
+                                            | SyntaxKind::NEWLINE
+                                            | SyntaxKind::COMMENT
+                                    )
+                                };
+                                Some(if trivia(&right) && !trivia(&left) {
+                                    left
+                                } else {
+                                    right
+                                })
+                            }
+                            rowan::TokenAtOffset::None => None,
+                        };
+                        token.map_or_else(
+                            || vec![root.text_range()],
+                            |token| {
+                                std::iter::once(token.text_range())
+                                    .chain(token.parent_ancestors().map(|n| n.text_range()))
+                                    .collect()
+                            },
+                        )
+                    };
+                    ranges.dedup();
+                    let mut parent = None;
+                    for range in ranges.into_iter().rev() {
+                        parent = Some(Box::new(SelectionRange {
+                            range: lsp_range(&idx, range),
+                            parent,
+                        }));
+                    }
+                    *parent.unwrap()
+                })
+                .collect();
+            assert_eq!(
+                compute_selection_range(&snapshot, path, encoding, kind, &positions),
+                expected,
+                "{kind:?} {encoding:?} {source}"
+            );
+            assert!(compute_selection_range(&snapshot, path, encoding, kind, &[]).is_empty());
+        }
+    }
+}
+
+#[test]
+fn location_batches_preserve_interleaved_files_duplicates_and_missing_locations() {
+    let source = "é😀 text\\label{clé}\r\n𝕏\ré\n";
+    let main = PathBuf::from(fixture_path!("/project/main.tex"));
+    let child = main.with_file_name("child.tex");
+    let missing = main.with_file_name("missing.tex");
+    let relative = PathBuf::from("relative.tex");
+    let mut db = IncrementalDatabase::default();
+    for path in [&main, &child, &relative] {
+        db.apply_change(path, source, None);
+    }
+    let snapshot = db.snapshot();
+    let range = |start, end| TextRange::new(TextSize::new(start), TextSize::new(end));
+    let sites = [
+        (&main, range(10, 24)),
+        (&child, range(0, 6)),
+        (&main, range(0, 24)),
+        (&missing, range(0, 1)),
+        (&relative, range(0, 6)),
+        (&child, range(7, 9)),
+        (&main, range(10, 24)),
+        (&main, range(3, 4)),
+    ];
+    for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let expected: Vec<_> = sites
+            .iter()
+            .map(|(path, range)| {
+                let file = snapshot.lookup_file(path)?;
+                location_for(path, &snapshot.file_line_index(file, encoding), *range)
+            })
+            .collect();
+        assert_eq!(
+            locations_for_ranges(
+                &snapshot,
+                sites.iter().map(|(path, range)| (path.as_path(), *range)),
+                encoding
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+fn unicode_navigation_batches_match_independent_conversion_across_identities() {
+    for (kind, usage, definition, bib) in [
+        ("label", "\\ref{demo}", "\\label{demo}", false),
+        ("citation", "\\cite{demo}", "\\bibitem{demo} Example", false),
+        (
+            "command",
+            "\\demo{}",
+            "\\newcommand{\\demo}{Example}",
+            false,
+        ),
+        (
+            "environment",
+            "\\begin{demo}x\\end{demo}",
+            "\\newenvironment{demo}{}{}",
+            false,
+        ),
+        (
+            "glossary",
+            "\\gls{demo}",
+            "\\newglossaryentry{demo}{name=Example,description=Example}",
+            false,
+        ),
+        (
+            "string",
+            "@article{x,title=demo,note={é😀}}",
+            "@string{demo={Example}}",
+            true,
+        ),
+    ] {
+        let path = PathBuf::from(fixture_path!("/project")).join(if bib {
+            "refs.bib"
+        } else {
+            "main.tex"
+        });
+        let child = path.with_file_name("child.tex");
+        let unrelated = if kind == "command" {
+            (0..128)
+                .map(|index| {
+                    format!(
+                        "\\newcommand{{\\other{}{}}}{{Example}}",
+                        char::from(b'a' + index / 26),
+                        char::from(b'a' + index % 26)
+                    )
+                })
+                .collect::<String>()
+        } else {
+            String::new()
+        };
+        let body = if bib {
+            usage.repeat(32)
+        } else {
+            format!("é😀 {usage}").repeat(32)
+        };
+        let source = if bib {
+            format!("{body}{definition}")
+        } else {
+            format!(
+                "\\begin{{document}}\\input{{child}}{unrelated}{body}{definition}\\end{{document}}"
+            )
+        };
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(&path, source.as_str(), None);
+        if !bib {
+            db.apply_change(&child, format!("é😀 {usage}").as_str(), None);
+        }
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(&path).unwrap();
+        let offset = source.find(usage).unwrap() + usage.find("demo").unwrap();
+        let target = NameTarget {
+            kind: if kind == "environment" {
+                NameKind::Environment
+            } else {
+                NameKind::Command
+            },
+            name: "demo".into(),
+            span: TextRange::empty(0.into()),
+        };
+        let sites: Vec<(PathBuf, TextRange, bool)> = match kind {
+            "label" => snapshot
+                .label_occurrences(&path, &["demo".into()])
+                .into_iter()
+                .map(|site| (site.path, site.key_range, site.definition))
+                .collect(),
+            "citation" => snapshot
+                .citation_occurrences(&path, &["demo".into()])
+                .into_iter()
+                .map(|site| (site.path, site.key_range, site.definition))
+                .collect(),
+            "glossary" => glossary::occurrences(&snapshot, &path, "demo"),
+            "string" => bib_strings::occurrences(snapshot.bib_semantic_model(file), "demo")
+                .into_iter()
+                .map(|(range, definition)| (path.clone(), range, definition))
+                .collect(),
+            _ => snapshot
+                .name_references(&path, &target, true)
+                .into_iter()
+                .map(|(source, range)| {
+                    (
+                        snapshot.file_path(source).to_path_buf(),
+                        range,
+                        snapshot
+                            .definition_sites(source)
+                            .iter()
+                            .any(|site| site.name_range == range),
+                    )
+                })
+                .collect(),
+        };
+        assert!(sites.len() >= 33, "{kind}: {sites:?}");
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = snapshot.file_line_index(file, encoding);
+            let (line, column) = index.position(offset);
+            let position = Position::new(line, column);
+            for include in [false, true] {
+                let expected: Vec<_> = sites
+                    .iter()
+                    .filter(|(_, _, definition)| include || !definition)
+                    .map(|(path, range, _)| {
+                        let source = snapshot.lookup_file(path).unwrap();
+                        location_for(path, &snapshot.file_line_index(source, encoding), *range)
+                    })
+                    .collect();
+                assert_eq!(
+                    compute_references(&snapshot, &path, position, include, encoding),
+                    dedup_locations(expected),
+                    "{kind}, {encoding:?}, include={include}"
+                );
+            }
+            let mut expected = HashMap::new();
+            for (path, range, _) in &sites {
+                let source = snapshot.lookup_file(path).unwrap();
+                push_edit(
+                    &mut expected,
+                    &path_to_uri(path).unwrap(),
+                    &snapshot.file_line_index(source, encoding),
+                    if kind == "command" {
+                        name_refs::strip_backslash(*range)
+                    } else {
+                        *range
+                    },
+                    "replacement",
+                );
+            }
+            assert_eq!(
+                compute_rename(&snapshot, &path, position, "replacement", encoding),
+                finalize_rename(expected),
+                "{kind}, {encoding:?}"
+            );
+            let highlights = compute_document_highlight(&snapshot, &path, encoding, position);
+            assert!(!highlights.is_empty());
+            let expected_ranges: HashSet<_> = sites
+                .iter()
+                .filter(|(source, _, _)| source == &path)
+                .map(|(_, range, _)| {
+                    lsp_range(
+                        &index,
+                        if kind == "command" {
+                            name_refs::strip_backslash(*range)
+                        } else {
+                            *range
+                        },
+                    )
+                })
+                .collect();
+            for highlight in &highlights {
+                assert!(
+                    expected_ranges.contains(&highlight.range),
+                    "{kind}: {highlight:?}"
+                );
+            }
+            assert_eq!(
+                highlights.len(),
+                if kind == "environment" {
+                    2
+                } else {
+                    expected_ranges.len()
+                },
+                "{kind}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unicode_diagnostic_batches_match_independent_range_conversion() {
+    let bib = (0..32)
+        .map(|index| format!("@article{{k{index},title={{é 😀}},author={{A}},year={{2026}}}} "))
+        .collect::<String>();
+    let tex = format!(
+        "\\documentclass{{article}}\\begin{{document}}{}\\end{{document}}",
+        "é 😀 \\bf text \\ref{missing} ".repeat(32)
+    );
+    let mut db = IncrementalDatabase::default();
+    for (name, source) in [("main.tex", tex), ("refs.bib", bib)] {
+        let path = PathBuf::from(fixture_path!("/project")).join(name);
+        let file = db.apply_change(&path, source.as_str(), None);
+        let snapshot = db.snapshot();
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = snapshot.file_line_index(file, encoding);
+            let rules = RuleSelection::all();
+            let (actual, findings) = if name.ends_with("bib") {
+                (
+                    analyze_bib(&snapshot, &path, &rules, encoding).unwrap(),
+                    snapshot.bib_lint_findings(file),
+                )
+            } else {
+                (
+                    analyze_tex(&snapshot, &path, &rules, encoding).unwrap(),
+                    snapshot.latex_lint_findings(file),
+                )
+            };
+            let expected: Vec<_> = findings
+                .iter()
+                .map(|finding| lint_to_lsp(&index, finding.clone(), name.ends_with("tex"), &path))
+                .collect();
+            assert!(!expected.is_empty());
+            assert_eq!(actual, expected);
+        }
+    }
+}
+
+#[test]
+fn unicode_links_folds_and_hints_match_independent_positions() {
+    use tex_ls_analysis::external::*;
+    let mut db = IncrementalDatabase::default();
+    let path = PathBuf::from(fixture_path!("/project/main.tex"));
+    let child = path.with_file_name("child.tex");
+    let bib_path = path.with_file_name("refs.bib");
+    let source = format!(
+        "{}\\label{{demo}}",
+        "é😀 \\input{child}\\ref{demo}".repeat(32)
+    );
+    let bib = format!(
+        "{}@article{{last,\n title={{é😀}},url={{https://example.org/last}}\n}}",
+        (0..32)
+            .map(|i| format!("@article{{k{i},title={{é😀}},url={{https://example.org/{i}}}}}"))
+            .collect::<String>()
+    );
+    db.apply_change(&path, source.as_str(), None);
+    db.apply_change(&child, "Child", None);
+    db.apply_change(&bib_path, bib.as_str(), None);
+    let token = db
+        .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
+        .unwrap();
+    db.apply_external_inputs(
+        token,
+        ExternalInputs::Compiler(vec![(
+            path.with_extension("aux"),
+            Observation::Present(CompilerArtifact::from_text(
+                &path.with_extension("aux"),
+                "\\newlabel{demo}{{42}{1}}",
+                "build".into(),
+            )),
+        )]),
+    )
+    .unwrap();
+    let snapshot = db.snapshot();
+    for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        for (path, kind) in [(&path, FileKind::Tex), (&bib_path, FileKind::Bib)] {
+            let file = snapshot.lookup_file(path).unwrap();
+            let index = snapshot.file_line_index(file, encoding);
+            let targets: Vec<_> = if kind == FileKind::Bib {
+                tex_ls_analysis::bib::document_link::document_links(&snapshot.parsed_bib_tree(file))
+                    .into_iter()
+                    .map(|link| (link.range, link.target.parse().unwrap()))
+                    .collect()
+            } else {
+                snapshot
+                    .document_links(file)
+                    .into_iter()
+                    .map(|link| (link.range, path_to_uri(&link.target).unwrap()))
+                    .collect()
+            };
+            let expected: Vec<_> = targets
+                .into_iter()
+                .map(|(range, uri)| DocumentLink {
+                    range: lsp_range(&index, range),
+                    target: Some(uri),
+                    tooltip: None,
+                    data: None,
+                })
+                .collect();
+            assert_eq!(
+                compute_document_link(&snapshot, path, encoding, kind),
+                expected
+            );
+            assert_eq!(expected.len(), if kind == FileKind::Bib { 33 } else { 32 });
+        }
+        let file = snapshot.lookup_file(&bib_path).unwrap();
+        let index = snapshot.file_line_index(file, encoding);
+        let start = bib.rfind("@article{last,").unwrap() + "@article{".len();
+        let end = bib.len() - 1;
+        let expected = byte_range_to_lsp(&index, start, end);
+        assert_eq!(
+            compute_folding(&snapshot, &bib_path, encoding, FileKind::Bib),
+            vec![FoldingRange {
+                start_line: expected.start.line,
+                start_character: Some(expected.start.character),
+                end_line: expected.end.line,
+                end_character: Some(expected.end.character),
+                kind: None,
+                collapsed_text: None
+            }]
+        );
+        let file = snapshot.lookup_file(&path).unwrap();
+        let index = snapshot.file_line_index(file, encoding);
+        let hints = hints::compute(
+            &snapshot,
+            &path,
+            Range::new(Position::new(0, 0), Position::new(2, 0)),
+            encoding,
+            &Default::default(),
+        );
+        let model = snapshot.semantic_model(file);
+        let mut offsets: Vec<_> = model
+            .labels()
+            .iter()
+            .map(|site| site.key_range.end())
+            .chain(model.refs().iter().map(|site| site.key_range.end()))
+            .collect();
+        offsets.sort_unstable();
+        assert_eq!(hints.as_array().unwrap().len(), 33);
+        for (hint, at) in hints.as_array().unwrap().iter().zip(offsets) {
+            let (line, column) = index.position(usize::from(at));
+            assert_eq!(
+                hint["position"],
+                serde_json::json!({"line": line,"character":column})
+            );
+            assert_eq!(hint["label"], "42");
+        }
+    }
+}
+
+#[test]
 fn builtin_environment_names_navigate_to_the_opposite_delimiter() {
     let mut db = IncrementalDatabase::default();
     let path = PathBuf::from(fixture_path!("/project/main.tex"));
@@ -1455,7 +1952,8 @@ fn completion_relevance_uses_loaded_packages_and_glyphs_without_signature_change
     db.apply_change(path, source, None);
     let uri = path_to_uri(path).unwrap();
     let mut candidates = compute_tex_completion(&db, &uri, path, source.len());
-    let (_, relevance, _) = completion_context::prepare(&db, path, source.len(), &mut candidates);
+    let (_, relevance, _, _) =
+        completion_context::prepare(&db, path, source.len(), &mut candidates);
     assert_eq!(relevance["numberwithin"], 0);
     assert_eq!(relevance["myCommand"], 0);
     let unrelated = tex_ls_parser::semantic::signature::cwl()

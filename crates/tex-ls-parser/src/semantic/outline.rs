@@ -1,7 +1,7 @@
 //! Build a document-symbol outline from the CST: the sectioning hierarchy
 //! (`\part` … `\subparagraph`), with titled Beamer frames, float/theorem
 //! environments, `\label`s, and a `.dtx`'s documented macros/environments (via
-//! [`doc_associations`]) as leaves.
+//! [`super::doc::doc_associations`]) as leaves.
 //! LSP-agnostic by design (byte ranges, no `lsp_types`) so it is
 //! unit-testable without the language server; the `lsp` module converts the
 //! [`OutlineItem`] tree into `lsp_types::DocumentSymbol`.
@@ -23,13 +23,14 @@
 //! level, not tree shape), attaching each non-section item to the deepest open
 //! section and stretching each section's range to where it closes.
 
+use super::context::PrimitiveOperandContexts;
 use rowan::{TextRange, TextSize};
 
 use crate::ast::{
     AstNode, Begin, Environment, Optional, child, command_name, first_group_range,
     group_inner_source, nth_group, nth_group_text,
 };
-use crate::semantic::doc::{DocAssociation, DocKind, doc_associations};
+use crate::semantic::doc::{DocAssociation, DocKind};
 use crate::semantic::signature::{self, OutlineKind};
 use crate::syntax::{SyntaxKind, SyntaxNode};
 
@@ -73,15 +74,31 @@ pub struct OutlineItem {
 /// Build the outline tree for `root`.
 ///
 /// The sectioning/float/label stream from `collect` is merged with the `.dtx`
-/// documentation constructs from [`doc_associations`], re-sorted into document
+/// documentation constructs from [`super::doc::doc_associations`], re-sorted into document
 /// order, then folded into the hierarchy by `nest_sections` — so a documented
 /// macro nests under its enclosing section like any other leaf. (A doc construct
 /// nested *inside* a float surfaces as a top-level sibling rather than under that
 /// float, since `collect_environment` pre-nests float children from its own walk;
 /// real `.dtx` files don't put doc constructs inside floats.)
 pub fn outline(root: &SyntaxNode) -> Vec<OutlineItem> {
-    let mut raws = collect(root);
-    raws.extend(doc_associations(root).into_iter().map(doc_raw));
+    outline_with_sites(root, &super::scan_definition_sites(root))
+}
+
+pub fn outline_with_sites(root: &SyntaxNode, sites: &[super::DefSite]) -> Vec<OutlineItem> {
+    let operands = PrimitiveOperandContexts::from_definition_sites(root, sites);
+    outline_with_operands(root, &operands)
+}
+
+pub fn outline_with_operands(
+    root: &SyntaxNode,
+    operands: &PrimitiveOperandContexts,
+) -> Vec<OutlineItem> {
+    let mut raws = collect(root, operands);
+    raws.extend(
+        super::doc::doc_associations_with_context(root, operands)
+            .into_iter()
+            .map(doc_raw),
+    );
     // Stable sort keeps co-located items (e.g. a section and a label at the same
     // offset) in their original relative order.
     raws.sort_by_key(|raw| raw.item.range.start());
@@ -118,24 +135,34 @@ struct Raw {
 /// stream. Recurses into transparent environments and other container nodes so
 /// nested labels/floats/sections surface; outline environments (float/theorem)
 /// become a single item whose own children are nested independently.
-fn collect(node: &SyntaxNode) -> Vec<Raw> {
+fn collect(node: &SyntaxNode, operands: &PrimitiveOperandContexts) -> Vec<Raw> {
     let mut out = Vec::new();
     for child in node.children() {
         match child.kind() {
-            SyntaxKind::COMMAND => collect_command(&child, &mut out),
-            SyntaxKind::ENVIRONMENT => collect_environment(&child, &mut out),
-            SyntaxKind::DISPLAY_MATH => collect_equation(&child, None, &mut out),
+            SyntaxKind::TOKEN_LIST => {}
+            SyntaxKind::COMMAND => collect_command(&child, &mut out, operands),
+            SyntaxKind::ENVIRONMENT => collect_environment(&child, &mut out, operands),
+            SyntaxKind::DISPLAY_MATH => collect_equation(&child, None, &mut out, operands),
             // Any other container (PARAGRAPH, GROUP, BEGIN, END, …): recurse so a
             // command or environment nested inside still reaches the stream.
-            _ => out.extend(collect(&child)),
+            _ => out.extend(collect(&child, operands)),
         }
     }
     out
 }
 
+fn outside_token_list(node: &SyntaxNode) -> bool {
+    node.ancestors()
+        .all(|ancestor| ancestor.kind() != SyntaxKind::TOKEN_LIST)
+}
+
 /// Emit a sectioning, command-form Beamer frame, or `\label` item for a `COMMAND`
 /// node, if it is one.
-fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>) {
+fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>, operands: &PrimitiveOperandContexts) {
+    if operands.contains_head(command) {
+        out.extend(collect(command, operands));
+        return;
+    }
     let Some(name) = command_name(command) else {
         return;
     };
@@ -143,7 +170,7 @@ fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>) {
     // `\frame{\frametitle{…} …}` is Beamer's command form. Requiring the nested
     // title keeps LaTeX's unrelated box-drawing `\frame{…}` command out.
     if name == "frame"
-        && let Some((title, selection_range)) = frametitle_command(command)
+        && let Some((title, selection_range)) = frametitle_command(command, operands)
     {
         out.push(Raw {
             level: None,
@@ -153,7 +180,7 @@ fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>) {
                 kind: OutlineSymbol::Frame,
                 range: command.text_range(),
                 selection_range,
-                children: nest_sections(collect(command), command.text_range().end()),
+                children: nest_sections(collect(command, operands), command.text_range().end()),
             },
         });
         return;
@@ -205,7 +232,7 @@ fn collect_command(command: &SyntaxNode, out: &mut Vec<Raw>) {
 
 /// Emit a frame/float/theorem item for an `ENVIRONMENT` node, or splice its
 /// contents in transparently when it is not outline-worthy.
-fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
+fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>, operands: &PrimitiveOperandContexts) {
     // The name lives in the `\begin{name}` (`BEGIN` node), not on `ENVIRONMENT`.
     let begin = Environment::cast(env.clone()).and_then(|e| e.begin());
     let name = begin.as_ref().and_then(Begin::name);
@@ -213,7 +240,7 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
         name.as_deref(),
         Some("enumerate" | "itemize" | "description")
     ) {
-        collect_items(env, name.as_deref().unwrap(), out);
+        collect_items(env, name.as_deref().unwrap(), out, operands);
         return;
     }
     if name.as_deref().is_some_and(|name| {
@@ -226,7 +253,7 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
         .skip(1)
         .any(|parent| matches!(parent.kind(), SyntaxKind::MATH | SyntaxKind::DISPLAY_MATH))
     {
-        collect_equation(env, name.as_deref(), out);
+        collect_equation(env, name.as_deref(), out, operands);
         return;
     }
     let kind = name.as_deref().and_then(|name| {
@@ -237,7 +264,7 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
 
     let Some(kind) = kind else {
         if matches!(name.as_deref(), Some("macro" | "environment")) {
-            out.extend(collect(env));
+            out.extend(collect(env, operands));
             return;
         }
         out.push(Raw {
@@ -250,7 +277,7 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
                 selection_range: begin
                     .as_ref()
                     .map_or(env.text_range(), |begin| begin.syntax().text_range()),
-                children: nest_sections(collect(env), env.text_range().end()),
+                children: nest_sections(collect(env, operands), env.text_range().end()),
             },
         });
         return;
@@ -265,10 +292,10 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
         OutlineKind::Float => (name, OutlineSymbol::Float, begin_selection),
         OutlineKind::Theorem => (name, OutlineSymbol::Theorem, begin_selection),
         OutlineKind::Frame => {
-            let Some((title, selection)) = frame_title(env, begin.as_ref()) else {
+            let Some((title, selection)) = frame_title(env, begin.as_ref(), operands) else {
                 // An untitled frame contributes no useful navigation target, but
                 // its labels and other outline constructs must still surface.
-                out.extend(collect(env));
+                out.extend(collect(env, operands));
                 return;
             };
             (title, OutlineSymbol::Frame, selection)
@@ -284,7 +311,7 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
             selection_range: selection,
             // Inner labels and nested outline environments belong to this
             // container; nest its body independently against the environment's end.
-            children: nest_sections(collect(env), env.text_range().end()),
+            children: nest_sections(collect(env, operands), env.text_range().end()),
         },
     });
 }
@@ -292,16 +319,25 @@ fn collect_environment(env: &SyntaxNode, out: &mut Vec<Raw>) {
 /// A Beamer frame's long title and its source range. The environment shorthand
 /// (`\begin{frame}[opts]{Title}`) is checked first; an absent or empty shorthand
 /// falls through to an explicit `\frametitle[short]{Long}` in the body.
-fn frame_title(env: &SyntaxNode, begin: Option<&Begin>) -> Option<(String, TextRange)> {
+fn frame_title(
+    env: &SyntaxNode,
+    begin: Option<&Begin>,
+    operands: &PrimitiveOperandContexts,
+) -> Option<(String, TextRange)> {
     begin
         .and_then(|begin| title_argument(begin.syntax(), 0))
-        .or_else(|| frametitle_command(env))
+        .or_else(|| frametitle_command(env, operands))
 }
 
 /// Find the first `\frametitle` below `node` and return its long-title argument.
-fn frametitle_command(node: &SyntaxNode) -> Option<(String, TextRange)> {
+fn frametitle_command(
+    node: &SyntaxNode,
+    operands: &PrimitiveOperandContexts,
+) -> Option<(String, TextRange)> {
     node.descendants()
         .filter(|descendant| descendant.kind() == SyntaxKind::COMMAND)
+        .filter(outside_token_list)
+        .filter(|node| !operands.contains_head(node))
         .find(|command| command_name(command).as_deref() == Some("frametitle"))
         .and_then(|command| title_argument(&command, 0))
 }
@@ -392,11 +428,146 @@ pub enum LabelContext {
     Item,
 }
 
+/// Section and caption facts shared by every label classification in a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelContextIndex {
+    sections: Vec<(TextSize, String)>,
+    captions: Vec<(TextSize, Option<String>)>,
+}
+
+impl LabelContextIndex {
+    pub fn build_with_sites(root: &SyntaxNode, sites: &[super::DefSite]) -> Self {
+        let operands = PrimitiveOperandContexts::from_definition_sites(root, sites);
+        Self::build_with_operands(root, &operands)
+    }
+
+    pub fn build_with_operands(root: &SyntaxNode, operands: &PrimitiveOperandContexts) -> Self {
+        let protected = super::context::TokenListContexts::new(root);
+        let mut sections = Vec::new();
+        let mut captions = Vec::new();
+        for command in root.descendants().filter(|node| {
+            node.kind() == SyntaxKind::COMMAND
+                && !protected.contains(node.text_range())
+                && !operands.contains_head(node)
+        }) {
+            let Some(name) = command_name(&command) else {
+                continue;
+            };
+            let start = command.text_range().start();
+            if signature::builtin()
+                .command(&name)
+                .and_then(|sig| sig.sectioning)
+                .is_some()
+            {
+                sections.push((
+                    start,
+                    section_title(&command).unwrap_or_else(|| name.to_string()),
+                ));
+            } else if name == "caption" {
+                // Keep a missing/empty first caption. It must not fall through to
+                // a later caption in the same float.
+                captions.push((start, section_title(&command)));
+            }
+        }
+        Self { sections, captions }
+    }
+
+    /// The source construct that owns a label's display context. Labels with
+    /// the same source key share their heading, caption, or ancestor context.
+    pub fn context_source_at(
+        &self,
+        root: &SyntaxNode,
+        offset: TextSize,
+    ) -> Option<(SyntaxKind, TextSize)> {
+        if let Some(owner) = label_context_owner(root, offset) {
+            return Some((owner.kind(), owner.text_range().start()));
+        }
+        let index = self.sections.partition_point(|(start, _)| *start <= offset);
+        index
+            .checked_sub(1)
+            .map(|index| (SyntaxKind::COMMAND, self.sections[index].0))
+    }
+
+    /// Classify a label using the innermost classifying ancestor, then the
+    /// nearest preceding section. Captions include nested float descendants.
+    pub fn context_at(&self, root: &SyntaxNode, offset: TextSize) -> Option<LabelContext> {
+        if let Some(owner) = label_context_owner(root, offset) {
+            if owner.kind() != SyntaxKind::ENVIRONMENT {
+                return Some(LabelContext::Equation);
+            }
+            let begin = Environment::cast(owner.clone()).and_then(|env| env.begin());
+            let name = begin.as_ref().and_then(Begin::name)?;
+            let sig = signature::builtin().environment(&name)?;
+            return match sig.outline {
+                Some(OutlineKind::Float) => {
+                    let range = owner.text_range();
+                    let index = self
+                        .captions
+                        .partition_point(|(start, _)| *start < range.start());
+                    let caption = self
+                        .captions
+                        .get(index)
+                        .filter(|(start, _)| *start < range.end())
+                        .and_then(|(_, title)| title.clone());
+                    Some(LabelContext::Float { caption, env: name })
+                }
+                Some(OutlineKind::Theorem) => Some(LabelContext::Theorem {
+                    description: begin.as_ref().and_then(optional_text),
+                    env: name,
+                }),
+                None if sig.math => Some(LabelContext::Equation),
+                None if sig.list => Some(LabelContext::Item),
+                _ => None,
+            };
+        }
+        let index = self.sections.partition_point(|(start, _)| *start <= offset);
+        index.checked_sub(1).map(|index| LabelContext::Section {
+            title: self.sections[index].1.clone(),
+        })
+    }
+}
+
+fn label_context_owner(root: &SyntaxNode, offset: TextSize) -> Option<SyntaxNode> {
+    let element = root.covering_element(TextRange::empty(offset));
+    let mut node = match element {
+        rowan::NodeOrToken::Node(node) => Some(node),
+        rowan::NodeOrToken::Token(token) => token.parent(),
+    };
+    while let Some(current) = node {
+        match current.kind() {
+            SyntaxKind::MATH | SyntaxKind::INLINE_MATH | SyntaxKind::DISPLAY_MATH => {
+                return Some(current);
+            }
+            SyntaxKind::ENVIRONMENT => {
+                let begin = Environment::cast(current.clone()).and_then(|env| env.begin());
+                if let Some(name) = begin.as_ref().and_then(Begin::name)
+                    && let Some(sig) = signature::builtin().environment(&name)
+                    && (matches!(sig.outline, Some(OutlineKind::Float | OutlineKind::Theorem))
+                        || sig.outline.is_none() && (sig.math || sig.list))
+                {
+                    return Some(current);
+                }
+            }
+            _ => {}
+        }
+        node = current.parent();
+    }
+    None
+}
+
 /// Classify the `\label` whose key sits at `offset`: the innermost classifying
 /// ancestor wins (float/theorem/math/list environment), matching how the label
 /// resolves in TeX; a label in plain prose falls back to the nearest *preceding*
 /// sectioning command. `None` in unclassifiable plain text before any section.
 pub fn label_context(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext> {
+    LabelContextIndex::build_with_sites(root, &super::scan_definition_sites(root))
+        .context_at(root, offset)
+}
+
+#[cfg(test)]
+fn label_context_reference(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext> {
+    let operands =
+        PrimitiveOperandContexts::from_definition_sites(root, &super::scan_definition_sites(root));
     let element = root.covering_element(TextRange::empty(offset));
     let mut node = match element {
         rowan::NodeOrToken::Node(n) => Some(n),
@@ -415,7 +586,7 @@ pub fn label_context(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext
                     match sig.outline {
                         Some(OutlineKind::Float) => {
                             return Some(LabelContext::Float {
-                                caption: caption_text(&current),
+                                caption: caption_text(&current, &operands),
                                 env: name,
                             });
                         }
@@ -448,6 +619,8 @@ pub fn label_context(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext
     for command in root
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::COMMAND)
+        .filter(outside_token_list)
+        .filter(|node| !operands.contains_head(node))
     {
         if command.text_range().start() > offset {
             break;
@@ -472,9 +645,12 @@ pub fn label_context(root: &SyntaxNode, offset: TextSize) -> Option<LabelContext
 
 /// The text of the first `\caption` inside `env`, via the same first-group
 /// extraction as [`section_title`].
-fn caption_text(env: &SyntaxNode) -> Option<String> {
+#[cfg(test)]
+fn caption_text(env: &SyntaxNode, operands: &PrimitiveOperandContexts) -> Option<String> {
     env.descendants()
         .filter(|n| n.kind() == SyntaxKind::COMMAND)
+        .filter(outside_token_list)
+        .filter(|node| !operands.contains_head(node))
         .find(|c| command_name(c).as_deref() == Some("caption"))
         .and_then(|caption| section_title(&caption))
 }
@@ -493,8 +669,13 @@ fn optional_text(begin: &Begin) -> Option<String> {
     (!inner.is_empty()).then_some(inner)
 }
 
-fn collect_equation(node: &SyntaxNode, environment: Option<&str>, out: &mut Vec<Raw>) {
-    let children = nest_sections(collect(node), node.text_range().end());
+fn collect_equation(
+    node: &SyntaxNode,
+    environment: Option<&str>,
+    out: &mut Vec<Raw>,
+    operands: &PrimitiveOperandContexts,
+) {
+    let children = nest_sections(collect(node, operands), node.text_range().end());
     let label = children
         .iter()
         .find(|child| child.kind == OutlineSymbol::Label);
@@ -511,12 +692,19 @@ fn collect_equation(node: &SyntaxNode, environment: Option<&str>, out: &mut Vec<
     });
 }
 
-fn collect_items(env: &SyntaxNode, environment: &str, out: &mut Vec<Raw>) {
+fn collect_items(
+    env: &SyntaxNode,
+    environment: &str,
+    out: &mut Vec<Raw>,
+    operands: &PrimitiveOperandContexts,
+) {
     let items = env
         .descendants()
         .filter(|node| {
             node.kind() == SyntaxKind::COMMAND && command_name(node).as_deref() == Some("item")
         })
+        .filter(outside_token_list)
+        .filter(|node| !operands.contains_head(node))
         .filter(|node| {
             node.ancestors()
                 .skip(1)
@@ -526,10 +714,10 @@ fn collect_items(env: &SyntaxNode, environment: &str, out: &mut Vec<Raw>) {
         })
         .collect::<Vec<_>>();
     if items.is_empty() {
-        out.extend(collect(env));
+        out.extend(collect(env, operands));
         return;
     }
-    let mut inner = collect(env);
+    let mut inner = collect(env, operands);
     let mut collected = Vec::new();
     let end = Environment::cast(env.clone())
         .and_then(|env| env.end())
@@ -601,6 +789,104 @@ mod tests {
         let parsed = parse_with_flavor(src, config);
         assert_eq!(parsed.syntax().to_string(), src, "losslessness violated");
         outline(&parsed.syntax())
+    }
+
+    #[test]
+    fn operand_sections_titles_items_and_captions_have_no_outline_roles() {
+        let docs = outline_of(r"\meaning\DescribeMacro{\fake}\meaning\ref{\DescribeMacro{\real}}");
+        assert_eq!(docs.len(), 1);
+        assert_eq!(docs[0].name, r"\real");
+        let sections =
+            outline_of(r"\meaning\section{Fake}\section{Live}\meaning\ref{\label{nested}}");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].name, "Live");
+        assert_eq!(sections[0].children[0].name, "nested");
+        let frames =
+            outline_of(r"\begin{frame}\meaning\frametitle{Fake}\frametitle{Live}\end{frame}");
+        assert_eq!(frames[0].name, "Live");
+        let source = r"\begin{itemize}\meaning\item Fake\item Live\end{itemize}";
+        let items = outline_of(source);
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            usize::from(items[0].selection_range.start()),
+            source.find(r"\item Live").unwrap()
+        );
+        let source =
+            r"\begin{figure}\meaning\caption{Fake}\caption{Live}\label{actual}\end{figure}";
+        assert_eq!(
+            label_context(
+                &parse(source).syntax(),
+                TextSize::try_from(source.find("actual").unwrap()).unwrap()
+            ),
+            Some(LabelContext::Float {
+                caption: Some("Live".into()),
+                env: "figure".into()
+            })
+        );
+        let source = r"\section{Live}\meaning\section{Fake}\label{actual}";
+        assert_eq!(
+            label_context(
+                &parse(source).syntax(),
+                TextSize::try_from(source.find("actual").unwrap()).unwrap()
+            ),
+            Some(LabelContext::Section {
+                title: "Live".into()
+            })
+        );
+    }
+
+    #[test]
+    fn printed_frame_titles_and_items_do_not_create_outline_targets() {
+        assert!(
+            outline_of(r"\begin{frame}\detokenize{\frametitle{Printed}}\end{frame}").is_empty()
+        );
+        let frames = outline_of(
+            r"\begin{frame}\detokenize{\frametitle{Printed}}\frametitle{Live}\end{frame}",
+        );
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].name, "Live");
+        let source = r"\begin{itemize}\detokenize{\item Printed}\item Live\end{itemize}";
+        let items = outline_of(source);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, OutlineSymbol::Item);
+        assert_eq!(
+            usize::from(items[0].selection_range.start()),
+            source.find(r"\item Live").unwrap()
+        );
+        let frames = outline_of(
+            r"\renewcommand{\detokenize}[1]{#1}\begin{frame}\detokenize{\frametitle{Active}}\end{frame}",
+        );
+        assert_eq!(frames[0].name, "Active");
+    }
+
+    #[test]
+    fn printed_sections_and_captions_do_not_change_live_label_context() {
+        let source = r"\section{Live}\detokenize{\section{Printed}}\label{actual}";
+        let root = parse(source).syntax();
+        let context = label_context(
+            &root,
+            TextSize::try_from(source.find("actual").unwrap()).unwrap(),
+        );
+        assert_eq!(
+            context,
+            Some(LabelContext::Section {
+                title: "Live".into()
+            })
+        );
+        let source =
+            r"\begin{figure}\detokenize{\caption{Printed}}\caption{Live}\label{actual}\end{figure}";
+        let root = parse(source).syntax();
+        let context = label_context(
+            &root,
+            TextSize::try_from(source.find("actual").unwrap()).unwrap(),
+        );
+        assert_eq!(
+            context,
+            Some(LabelContext::Float {
+                env: "figure".into(),
+                caption: Some("Live".into())
+            })
+        );
     }
 
     #[test]
@@ -762,6 +1048,66 @@ mod tests {
         let offset = src.find("\\label").expect("marker") + "\\label{".len();
         let root = SyntaxNode::new_root(parse(src).green);
         label_context(&root, TextSize::new(offset as u32))
+    }
+
+    #[test]
+    fn label_context_index_matches_the_previous_classifier() {
+        for source in [
+            r"\label{none}\section{}\label{fallback}\section{\textsc{Nested}}\label{section}",
+            r"\section{Live}\meaning\section{Copied}\label{live}\meaning\ref{\section{Nested}\label{nested}}",
+            r"\section{Live}\detokenize{\section{Printed}\caption{Printed}}\label{live}",
+            r"\begin{figure}\caption{}\caption{Later}\label{empty-first}\end{figure}",
+            r"\begin{figure}\label{before}\begin{table}\caption{Nested caption}\label{inner}\end{table}\label{outer}\end{figure}",
+            r"\begin{figure}\meaning\caption{Copied}\caption{Live}\label{float}\end{figure}\label{outside}",
+            r"\begin{figure}$\label{math}$\label{float}\end{figure}",
+            r"\begin{theorem}[Euler]\label{theorem}\begin{itemize}\item\label{item}\end{itemize}\end{theorem}",
+            r"\begin{frame}\section{Inside frame}\label{frame}\end{frame}\label{after}",
+            r"\renewcommand{\meaning}[1]{#1}\meaning\section{Active}\label{active}",
+            "\\section{CR title}\r\\label{cr}\r\n\\begin{table}\n\\caption{Caption}\n\\label{table}\n\\end{table}",
+            r"\section{Broken}\begin{figure}\label{unclosed}",
+        ] {
+            let root = parse(source).syntax();
+            let sites = super::super::scan_definition_sites(&root);
+            let index = LabelContextIndex::build_with_sites(&root, &sites);
+            let model = super::super::SemanticModel::build(&root);
+            assert!(!model.labels().is_empty(), "{source}");
+            for label in model.labels() {
+                assert_eq!(
+                    index.context_at(&root, label.key_range.start()),
+                    label_context_reference(&root, label.key_range.start()),
+                    "{source}: {}",
+                    label.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn label_context_index_keeps_first_empty_and_nested_caption_semantics() {
+        let source = r"\begin{figure}\caption{}\begin{table}\caption{Inner}\label{inner}\end{table}\label{outer}\end{figure}";
+        let root = parse(source).syntax();
+        let index =
+            LabelContextIndex::build_with_sites(&root, &super::super::scan_definition_sites(&root));
+        assert_eq!(
+            index.context_at(
+                &root,
+                TextSize::try_from(source.find("{inner}").unwrap() + 1).unwrap()
+            ),
+            Some(LabelContext::Float {
+                env: "table".into(),
+                caption: Some("Inner".into())
+            })
+        );
+        assert_eq!(
+            index.context_at(
+                &root,
+                TextSize::try_from(source.find("{outer}").unwrap() + 1).unwrap()
+            ),
+            Some(LabelContext::Float {
+                env: "figure".into(),
+                caption: None
+            })
+        );
     }
 
     #[test]

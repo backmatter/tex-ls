@@ -106,7 +106,7 @@ impl LinkField {
 /// byte range (delimiters excluded, leading/trailing whitespace trimmed). `None` for
 /// a bare macro/number piece, a multi-piece (`#`-concatenated) value, or an
 /// all-whitespace body—none of which yield a stable link.
-fn single_delimited_value(value: &SyntaxNode) -> Option<(String, TextRange)> {
+pub fn single_delimited_value(value: &SyntaxNode) -> Option<(String, TextRange)> {
     let mut pieces = value.children();
     let piece = pieces.next()?;
     if pieces.next().is_some() {

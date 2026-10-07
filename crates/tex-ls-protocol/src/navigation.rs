@@ -92,65 +92,208 @@ pub fn compute_goto_definition(
             })
     }
     .map(|range| lsp_range(&index, range));
-    definition_locations(snapshot, path, position, enc)
-        .into_iter()
-        .filter_map(|location| {
-            let target = uri_to_fs_path(&location.uri)?;
-            let file = snapshot.lookup_file(&target);
-            let container = file
-                .and_then(|file| {
-                    let index = snapshot.file_line_index(file, enc);
-                    let at = TextSize::new(
-                        index.offset_at(location.range.start.line, location.range.start.character)
-                            as u32,
-                    );
-                    let range = if file_kind_for(&target) == FileKind::Bib {
-                        use tex_ls_parser::bib::syntax::SyntaxKind as Kind;
-                        snapshot
-                            .parsed_bib_tree(file)
-                            .token_at_offset(at)
-                            .right_biased()?
-                            .parent_ancestors()
-                            .find(|node| matches!(node.kind(), Kind::ENTRY | Kind::STRING_ENTRY))
-                            .map(|node| node.text_range())
-                    } else {
-                        let model = snapshot.semantic_model(file);
-                        model
-                            .labels()
-                            .iter()
-                            .map(|item| (item.key_range, item.range))
-                            .chain(
-                                model
-                                    .glossary_defs()
-                                    .iter()
-                                    .map(|item| (item.key_range, item.range)),
-                            )
-                            .chain(
-                                model
-                                    .bibitems()
-                                    .iter()
-                                    .map(|item| (item.key_range, item.range)),
-                            )
-                            .chain(
-                                snapshot
-                                    .definition_sites(file)
-                                    .iter()
-                                    .map(|item| (item.name_range, item.range)),
-                            )
-                            .find(|(selection, _)| selection.contains_inclusive(at))
-                            .map(|(_, range)| range)
-                    }?;
-                    Some(lsp_range(&index, range))
+    definition_links(
+        snapshot,
+        definition_locations(snapshot, path, position, enc),
+        origin,
+        enc,
+    )
+}
+
+// Keep the byte span through wire conversion instead of decoding each result again.
+type DefinitionLocation = (Location, Option<TextRange>);
+
+fn definition_links(
+    snapshot: &Analysis,
+    locations: Vec<DefinitionLocation>,
+    origin: Option<Range>,
+    enc: PositionEncoding,
+) -> Vec<lsp_types::LocationLink> {
+    let mut files: HashMap<&Uri, Vec<usize>> = HashMap::new();
+    for (slot, (location, _)) in locations.iter().enumerate() {
+        files.entry(&location.uri).or_default().push(slot);
+    }
+    let mut links = vec![None; locations.len()];
+    for (uri, slots) in files {
+        let Some(path) = uri_to_fs_path(uri) else {
+            continue;
+        };
+        let containers: Vec<_> = if let Some(file) = snapshot.lookup_file(&path) {
+            let index = snapshot.file_line_index(file, enc);
+            let mut starts: Vec<_> = slots
+                .iter()
+                .map(|&slot| {
+                    let (location, range) = &locations[slot];
+                    let at =
+                        range.map(|range| range.start()).unwrap_or_else(|| {
+                            TextSize::new(index.offset_at(
+                                location.range.start.line,
+                                location.range.start.character,
+                            ) as u32)
+                        });
+                    (slot, at)
                 })
-                .unwrap_or(location.range);
-            Some(lsp_types::LocationLink {
+                .collect();
+            starts.sort_unstable_by_key(|(_, at)| *at);
+            let ranges = if file_kind_for(&path) == FileKind::Bib {
+                use tex_ls_parser::bib::syntax::SyntaxKind as Kind;
+                let root = snapshot.parsed_bib_tree(file);
+                starts
+                    .iter()
+                    .map(|(_, at)| {
+                        root.token_at_offset(*at)
+                            .right_biased()
+                            .and_then(|token| {
+                                token.parent_ancestors().find(|node| {
+                                    matches!(node.kind(), Kind::ENTRY | Kind::STRING_ENTRY)
+                                })
+                            })
+                            .map(|node| node.text_range())
+                    })
+                    .collect()
+            } else {
+                let model = snapshot.semantic_model(file);
+                let mut facts = model
+                    .labels()
+                    .iter()
+                    .map(|item| (item.key_range, item.range))
+                    .chain(
+                        model
+                            .glossary_defs()
+                            .iter()
+                            .map(|item| (item.key_range, item.range)),
+                    )
+                    .chain(
+                        model
+                            .bibitems()
+                            .iter()
+                            .map(|item| (item.key_range, item.range)),
+                    )
+                    .chain(
+                        snapshot
+                            .definition_sites(file)
+                            .iter()
+                            .map(|item| (item.name_range, item.range)),
+                    );
+                if starts.len() == 1 {
+                    vec![
+                        facts
+                            .find(|(range, _)| range.contains_inclusive(starts[0].1))
+                            .map(|(_, container)| container),
+                    ]
+                } else {
+                    definition_containers(
+                        &facts.collect::<Vec<_>>(),
+                        &starts.iter().map(|(_, at)| *at).collect::<Vec<_>>(),
+                    )
+                }
+            };
+            let mut cursor = index.position_cursor();
+            starts
+                .into_iter()
+                .zip(ranges)
+                .map(|((slot, _), range)| {
+                    (
+                        slot,
+                        range.map(|range| lsp_range_with_cursor(&mut cursor, range)),
+                    )
+                })
+                .collect()
+        } else {
+            slots.into_iter().map(|slot| (slot, None)).collect()
+        };
+        for (slot, container) in containers {
+            let location = &locations[slot].0;
+            links[slot] = Some(lsp_types::LocationLink {
                 origin_selection_range: origin,
-                target_uri: location.uri,
-                target_range: container,
+                target_uri: location.uri.clone(),
+                target_range: container.unwrap_or(location.range),
                 target_selection_range: location.range,
+            });
+        }
+    }
+    links.into_iter().flatten().collect()
+}
+
+/// Match the original fact precedence, including inclusive endpoints and overlaps.
+fn definition_containers(
+    facts: &[(TextRange, TextRange)],
+    starts: &[TextSize],
+) -> Vec<Option<TextRange>> {
+    if starts.len() <= 1 {
+        return starts
+            .iter()
+            .map(|&at| {
+                facts
+                    .iter()
+                    .find(|(range, _)| range.contains_inclusive(at))
+                    .map(|(_, container)| *container)
             })
+            .collect();
+    }
+    let mut events: Vec<_> = facts.iter().enumerate().collect();
+    events.sort_unstable_by_key(|(_, (range, _))| range.start());
+    let mut next = 0;
+    let mut active = std::collections::BTreeMap::new();
+    let mut ends = std::collections::BinaryHeap::new();
+    starts
+        .iter()
+        .map(|&at| {
+            while let Some(&(priority, (range, container))) = events
+                .get(next)
+                .filter(|(_, (range, _))| range.start() <= at)
+            {
+                active.insert(priority, *container);
+                ends.push(std::cmp::Reverse((range.end(), priority)));
+                next += 1;
+            }
+            while let Some(&std::cmp::Reverse((_, priority))) =
+                ends.peek().filter(|std::cmp::Reverse((end, _))| *end < at)
+            {
+                ends.pop();
+                active.remove(&priority);
+            }
+            active.first_key_value().map(|(_, range)| *range)
         })
         .collect()
+}
+
+fn definition_range_locations<'a>(
+    snapshot: &Analysis,
+    ranges: impl IntoIterator<Item = (&'a Path, TextRange)>,
+    enc: PositionEncoding,
+) -> Vec<DefinitionLocation> {
+    let ranges: Vec<_> = ranges.into_iter().collect();
+    locations_for_ranges(snapshot, ranges.iter().copied(), enc)
+        .into_iter()
+        .zip(ranges)
+        .filter_map(|(location, (_, range))| Some((location?, Some(range))))
+        .collect()
+}
+
+fn definition_occurrence_locations(
+    snapshot: &Analysis,
+    sites: Vec<tex_ls_analysis::navigation::KeyOccurrence>,
+    enc: PositionEncoding,
+) -> Vec<DefinitionLocation> {
+    let mut seen = HashSet::new();
+    definition_range_locations(
+        snapshot,
+        sites
+            .iter()
+            .filter(|site| site.definition)
+            .map(|site| (site.path.as_path(), site.key_range)),
+        enc,
+    )
+    .into_iter()
+    .filter(|(location, _)| {
+        seen.insert((
+            location.uri.as_str().to_owned(),
+            location.range.start,
+            location.range.end,
+        ))
+    })
+    .collect()
 }
 
 /// Resolve the construct at `position` using the snapshot's source and project namespaces.
@@ -159,7 +302,7 @@ fn definition_locations(
     path: &Path,
     position: Position,
     enc: PositionEncoding,
-) -> Vec<Location> {
+) -> Vec<DefinitionLocation> {
     let Some(file) = snapshot.lookup_file(path) else {
         return Vec::new();
     };
@@ -169,17 +312,28 @@ fn definition_locations(
         let model = snapshot.bib_semantic_model(file);
         return bib_strings::target(model, offset)
             .map(|(key, _)| {
-                bib_strings::occurrences(model, &key)
-                    .into_iter()
-                    .filter(|(_, definition)| *definition)
-                    .filter_map(|(range, _)| location_for(path, &idx, range))
-                    .collect()
+                definition_range_locations(
+                    snapshot,
+                    bib_strings::occurrences(model, &key)
+                        .into_iter()
+                        .filter(|(_, definition)| *definition)
+                        .map(|(range, _)| (path, range)),
+                    enc,
+                )
             })
             .unwrap_or_default();
     }
 
     if let Some((key, _)) = glossary::target(snapshot.semantic_model(file), offset) {
-        return glossary::locations(snapshot, path, &key, true, true, enc);
+        let sites = glossary::occurrences(snapshot, path, &key);
+        return definition_range_locations(
+            snapshot,
+            sites
+                .iter()
+                .filter(|(_, _, definition)| *definition)
+                .map(|(path, range, _)| (path.as_path(), *range)),
+            enc,
+        );
     }
 
     // Resolve the reference under the cursor. Keep the tree for name and file targets.
@@ -189,14 +343,17 @@ fn definition_locations(
         snapshot.file_path(file).to_path_buf(),
     );
     if let Some(target) = target {
-        let (resolution, citations) = snapshot.resolve_project();
         return match target {
-            CursorTarget::Labels(names) => {
-                resolve_label_locations(snapshot, resolution, &lint_path, &names, enc)
-            }
-            CursorTarget::Citations(names) => {
-                resolve_citation_locations(snapshot, citations, &lint_path, &names, enc)
-            }
+            CursorTarget::Labels(names) => definition_occurrence_locations(
+                snapshot,
+                snapshot.label_occurrences(&lint_path, &names),
+                enc,
+            ),
+            CursorTarget::Citations(names) => definition_occurrence_locations(
+                snapshot,
+                snapshot.citation_occurrences(&lint_path, &names),
+                enc,
+            ),
         };
     }
     // A command/environment name jumps to static definitions in the project,
@@ -206,21 +363,17 @@ fn definition_locations(
     if let Some(target) = name_refs::navigation_target_under_cursor(&root, offset, sites) {
         let defs = snapshot.navigation_definitions(&lint_path, &target);
         if !defs.is_empty() {
-            return defs
-                .into_iter()
-                .filter_map(|(file, range)| {
-                    let def_path = snapshot.file_path(file);
-                    let idx = snapshot.file_line_index(file, enc);
-                    location_for(def_path, &idx, range)
-                })
-                .collect();
+            return definition_range_locations(
+                snapshot,
+                defs.into_iter()
+                    .map(|(file, range)| (snapshot.file_path(file), range)),
+                enc,
+            );
         }
         if target.kind == NameKind::Environment
             && let Some(pair) = matching_environment_delimiter(&root, offset)
         {
-            return location_for(path, &idx, pair.match_range)
-                .into_iter()
-                .collect();
+            return definition_range_locations(snapshot, [(path, pair.match_range)], enc);
         }
     }
     // Fall back to a file-referencing argument
@@ -228,6 +381,9 @@ fn definition_locations(
     // resolved on-disk target — the same resolution the document-link path uses,
     // so a system package resolves through the TEXMF index too.
     file_target_under_cursor(snapshot, file, offset)
+        .into_iter()
+        .map(|location| (location, None))
+        .collect()
 }
 
 /// The go-to-definition file target under `offset`: the document link whose argument
@@ -298,11 +454,18 @@ pub fn compute_references(
     if file_kind_for(path) == FileKind::Bib
         && let Some((key, _)) = bib_strings::target(snapshot.bib_semantic_model(file), offset)
     {
-        return bib_strings::occurrences(snapshot.bib_semantic_model(file), &key)
-            .into_iter()
-            .filter(|(_, definition)| include_declaration || !definition)
-            .filter_map(|(range, _)| location_for(path, &idx, range))
-            .collect();
+        let sites = bib_strings::occurrences(snapshot.bib_semantic_model(file), &key);
+        return locations_for_ranges(
+            snapshot,
+            sites
+                .into_iter()
+                .filter(|(_, definition)| include_declaration || !definition)
+                .map(|(range, _)| (path, range)),
+            enc,
+        )
+        .into_iter()
+        .flatten()
+        .collect();
     }
 
     if file_kind_for(path) != FileKind::Bib
@@ -396,18 +559,14 @@ pub fn name_reference_locations(
     include_declaration: bool,
     enc: PositionEncoding,
 ) -> Vec<Location> {
-    let locations = snapshot
-        .name_references(origin, target, include_declaration)
-        .into_iter()
-        .map(|(file, range)| {
-            location_for(
-                snapshot.file_path(file),
-                &snapshot.file_line_index(file, enc),
-                range,
-            )
-        })
-        .collect();
-    dedup_locations(locations)
+    dedup_locations(locations_for_ranges(
+        snapshot,
+        snapshot
+            .name_references(origin, target, include_declaration)
+            .into_iter()
+            .map(|(file, range)| (snapshot.file_path(file), range)),
+        enc,
+    ))
 }
 
 /// The matching [`DefSite`]s of `target` across `origin`'s macro namespace, as
@@ -525,11 +684,19 @@ pub fn environment_pair_ranges(root: &SyntaxNode, offset: usize) -> Vec<TextRang
         rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
     };
-    let delimiter = [left, right].into_iter().flatten().find_map(|token| {
-        token
-            .parent_ancestors()
-            .find(|n| matches!(n.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
-    });
+    let delimiter = [left, right]
+        .into_iter()
+        .flatten()
+        .filter(|token| {
+            !token
+                .parent_ancestors()
+                .any(|node| node.kind() == SyntaxKind::TOKEN_LIST)
+        })
+        .find_map(|token| {
+            token
+                .parent_ancestors()
+                .find(|n| matches!(n.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
+        });
     let Some(delimiter) = delimiter else {
         return Vec::new();
     };
@@ -560,15 +727,22 @@ pub(crate) fn matching_environment_delimiter(
     offset: usize,
 ) -> Option<MatchingEnvironmentDelimiter> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let delimiter = root.token_at_offset(at).find_map(|token| {
-        token
-            .parent_ancestors()
-            .find(|node| matches!(node.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
-            .filter(|node| {
-                tex_ls_parser::ast::environment_name_range(node)
-                    .is_some_and(|range| range.contains(at))
-            })
-    })?;
+    let delimiter = root
+        .token_at_offset(at)
+        .filter(|token| {
+            !token
+                .parent_ancestors()
+                .any(|node| node.kind() == SyntaxKind::TOKEN_LIST)
+        })
+        .find_map(|token| {
+            token
+                .parent_ancestors()
+                .find(|node| matches!(node.kind(), SyntaxKind::BEGIN | SyntaxKind::END))
+                .filter(|node| {
+                    tex_ls_parser::ast::environment_name_range(node)
+                        .is_some_and(|range| range.contains(at))
+                })
+        })?;
     let environment = delimiter
         .parent()
         .filter(|node| node.kind() == SyntaxKind::ENVIRONMENT)?;
@@ -604,11 +778,19 @@ pub fn proved_environment_pair(
         rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
     };
-    let env = [left, right].into_iter().flatten().find_map(|token| {
-        token
-            .parent_ancestors()
-            .find_map(tex_ls_parser::ast::Environment::cast)
-    })?;
+    let env = [left, right]
+        .into_iter()
+        .flatten()
+        .filter(|token| {
+            !token
+                .parent_ancestors()
+                .any(|node| node.kind() == SyntaxKind::TOKEN_LIST)
+        })
+        .find_map(|token| {
+            token
+                .parent_ancestors()
+                .find_map(tex_ls_parser::ast::Environment::cast)
+        })?;
     let begin = env.begin()?;
     let old_name = begin.name()?;
     let end = env.end()?;
@@ -633,9 +815,6 @@ pub fn proved_environment_pair(
         .then_some((old_name, ranges))
 }
 
-/// Compute the `prepareRename` range + placeholder at `position`: the key-token span
-/// under the cursor in the snapshot. A `.bib` cursor resolves
-/// to its `@entry` key. `None` when the cursor isn't on a renameable key.
 /// Compute the document highlights for `position`. Two cases, tried in order:
 ///
 /// - **Cross-reference key** under the cursor (a `\ref`/`\cite` use or a `\label`
@@ -651,7 +830,8 @@ pub fn proved_environment_pair(
 ///
 /// The two positions are disjoint (a key sits in a command `GROUP`, a name in a
 /// `BEGIN`/`END` `NAME_GROUP`), so key-first ordering is behavior-preserving.
-/// `.bib` buffers yield no highlights (an `@entry` key has no in-file uses).
+/// Glossary keys and BibTeX string names highlight their definitions and uses.
+/// An ordinary bibliography entry key has no in-file uses and yields no highlights.
 pub fn compute_document_highlight(
     snapshot: &Analysis,
     path: &Path,
@@ -666,95 +846,13 @@ pub fn compute_document_highlight(
     if file_kind_for(path) == FileKind::Bib
         && let Some((key, _)) = bib_strings::target(snapshot.bib_semantic_model(file), offset)
     {
-        return bib_strings::occurrences(snapshot.bib_semantic_model(file), &key)
-            .into_iter()
-            .map(|(range, definition)| DocumentHighlight {
-                range: lsp_range(&idx, range),
-                kind: Some(if definition {
-                    DocumentHighlightKind::Write
-                } else {
-                    DocumentHighlightKind::Read
-                }),
-            })
-            .collect();
-    }
-
-    if file_kind_for(path) != FileKind::Bib
-        && let Some((key, _)) = glossary::target(snapshot.semantic_model(file), offset)
-    {
-        return glossary::occurrences(snapshot, path, &key)
-            .into_iter()
-            .filter(|(source, _, _)| source == path)
-            .map(|(_, range, definition)| DocumentHighlight {
-                range: lsp_range(&idx, range),
-                kind: Some(if definition {
-                    DocumentHighlightKind::Write
-                } else {
-                    DocumentHighlightKind::Read
-                }),
-            })
-            .collect();
-    }
-
-    if file_kind_for(path) == FileKind::Bib {
-        return Vec::new();
-    }
-    let highlight = |range: TextRange, kind: DocumentHighlightKind| DocumentHighlight {
-        range: lsp_range(&idx, range),
-        kind: Some(kind),
-    };
-    let collect = |root: &SyntaxNode, model: &SemanticModel| -> Vec<DocumentHighlight> {
-        // A cross-reference key takes precedence when the cursor is on one.
-        if let Some(target) = rename_target_under_cursor(model, offset) {
-            return match &target.target {
-                CursorTarget::Labels(_) => {
-                    let name = &target.placeholder;
-                    let defs = model
-                        .labels()
-                        .iter()
-                        .filter(|l| &l.name == name)
-                        .map(|l| highlight(l.key_range, DocumentHighlightKind::Write));
-                    let uses = model
-                        .refs()
-                        .iter()
-                        .filter(|r| &r.name == name)
-                        .map(|r| highlight(r.key_range, DocumentHighlightKind::Read));
-                    defs.chain(uses).collect()
-                }
-                CursorTarget::Citations(_) => {
-                    let name = &target.placeholder;
-                    model
-                        .citations()
-                        .iter()
-                        .filter(|c| &c.name == name)
-                        .map(|c| highlight(c.key_range, DocumentHighlightKind::Read))
-                        .chain(
-                            model
-                                .bibitems()
-                                .iter()
-                                .filter(|item| &item.name == name)
-                                .map(|item| {
-                                    highlight(item.key_range, DocumentHighlightKind::Write)
-                                }),
-                        )
-                        .collect()
-                }
-            };
-        }
-        if let Some(target) =
-            name_refs::name_target_under_cursor(root, offset, snapshot.definition_sites(file))
-            && target.kind == NameKind::Command
-            && name_rename_allowed(snapshot, path, snapshot.definition_sites(file), &target)
-        {
-            return name_refs::command_occurrences(root, &target.name)
+        return document_highlights(
+            &idx,
+            bib_strings::occurrences(snapshot.bib_semantic_model(file), &key)
                 .into_iter()
-                .map(|range| {
-                    let definition = snapshot
-                        .definition_sites(file)
-                        .iter()
-                        .any(|site| site.name_range == range);
-                    highlight(
-                        name_refs::strip_backslash(range),
+                .map(|(range, definition)| {
+                    (
+                        range,
                         if definition {
                             DocumentHighlightKind::Write
                         } else {
@@ -762,15 +860,125 @@ pub fn compute_document_highlight(
                         },
                     )
                 })
-                .collect();
-        }
-        // Otherwise, a `\begin`/`\end` delimiter pair.
-        environment_pair_ranges(root, offset)
-            .into_iter()
-            .map(|range| highlight(range, DocumentHighlightKind::Text))
-            .collect()
-    };
-    collect(&snapshot.parsed_tree(file), snapshot.semantic_model(file))
+                .collect(),
+        );
+    }
+
+    if file_kind_for(path) != FileKind::Bib
+        && let Some((key, _)) = glossary::target(snapshot.semantic_model(file), offset)
+    {
+        return document_highlights(
+            &idx,
+            glossary::occurrences(snapshot, path, &key)
+                .into_iter()
+                .filter(|(source, _, _)| source == path)
+                .map(|(_, range, definition)| {
+                    (
+                        range,
+                        if definition {
+                            DocumentHighlightKind::Write
+                        } else {
+                            DocumentHighlightKind::Read
+                        },
+                    )
+                })
+                .collect(),
+        );
+    }
+
+    if file_kind_for(path) == FileKind::Bib {
+        return Vec::new();
+    }
+    let highlight = |range: TextRange, kind: DocumentHighlightKind| (range, kind);
+    let collect =
+        |root: &SyntaxNode, model: &SemanticModel| -> Vec<(TextRange, DocumentHighlightKind)> {
+            // A cross-reference key takes precedence when the cursor is on one.
+            if let Some(target) = rename_target_under_cursor(model, offset) {
+                return match &target.target {
+                    CursorTarget::Labels(_) => {
+                        let name = &target.placeholder;
+                        let defs = model
+                            .labels()
+                            .iter()
+                            .filter(|l| &l.name == name)
+                            .map(|l| highlight(l.key_range, DocumentHighlightKind::Write));
+                        let uses = model
+                            .refs()
+                            .iter()
+                            .filter(|r| &r.name == name)
+                            .map(|r| highlight(r.key_range, DocumentHighlightKind::Read));
+                        defs.chain(uses).collect()
+                    }
+                    CursorTarget::Citations(_) => {
+                        let name = &target.placeholder;
+                        model
+                            .citations()
+                            .iter()
+                            .filter(|c| &c.name == name)
+                            .map(|c| highlight(c.key_range, DocumentHighlightKind::Read))
+                            .chain(
+                                model
+                                    .bibitems()
+                                    .iter()
+                                    .filter(|item| &item.name == name)
+                                    .map(|item| {
+                                        highlight(item.key_range, DocumentHighlightKind::Write)
+                                    }),
+                            )
+                            .collect()
+                    }
+                };
+            }
+            if let Some(target) =
+                name_refs::name_target_under_cursor(root, offset, snapshot.definition_sites(file))
+                && target.kind == NameKind::Command
+                && name_rename_allowed(snapshot, path, snapshot.definition_sites(file), &target)
+            {
+                let definition_ranges: HashSet<_> = snapshot
+                    .definition_sites(file)
+                    .iter()
+                    .map(|site| site.name_range)
+                    .collect();
+                return name_refs::command_occurrences(root, &target.name)
+                    .into_iter()
+                    .map(|range| {
+                        let definition = definition_ranges.contains(&range);
+                        highlight(
+                            name_refs::strip_backslash(range),
+                            if definition {
+                                DocumentHighlightKind::Write
+                            } else {
+                                DocumentHighlightKind::Read
+                            },
+                        )
+                    })
+                    .collect();
+            }
+            // Otherwise, a `\begin`/`\end` delimiter pair.
+            environment_pair_ranges(root, offset)
+                .into_iter()
+                .map(|range| highlight(range, DocumentHighlightKind::Text))
+                .collect()
+        };
+    document_highlights(
+        &idx,
+        collect(&snapshot.parsed_tree(file), snapshot.semantic_model(file)),
+    )
+}
+
+fn document_highlights(
+    idx: &LineIndex,
+    sites: Vec<(TextRange, DocumentHighlightKind)>,
+) -> Vec<DocumentHighlight> {
+    let ranges: Vec<_> = sites.iter().map(|(range, _)| *range).collect();
+    sites
+        .into_iter()
+        .zip(lsp_ranges(idx, &ranges))
+        .map(|((_, kind), range)| DocumentHighlight {
+            range,
+            kind: Some(kind),
+        })
+        .collect()
 }
 
 fn key_rename_allowed(
@@ -1296,21 +1504,19 @@ pub fn rename_command_edits(
         name: name.into(),
         span: TextRange::empty(TextSize::new(0)),
     };
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (file, range) in snapshot.name_references(origin, &target, true) {
-        let Some(uri) = path_to_uri(snapshot.file_path(file)) else {
-            continue;
-        };
-        let idx = snapshot.file_line_index(file, enc);
-        push_edit(
-            &mut changes,
-            &uri,
-            &idx,
-            name_refs::strip_backslash(range),
-            new_name,
-        );
-    }
-    changes
+    edits_for_locations(
+        locations_for_ranges(
+            snapshot,
+            snapshot
+                .name_references(origin, &target, true)
+                .into_iter()
+                .map(|(file, range)| (snapshot.file_path(file), name_refs::strip_backslash(range))),
+            enc,
+        )
+        .into_iter()
+        .flatten(),
+        new_name,
+    )
 }
 
 /// Every `\begin{name}`/`\end{name}` occurrence across `origin`'s macro namespace,
@@ -1326,15 +1532,19 @@ pub fn rename_environment_edits(
     new_name: &str,
     enc: PositionEncoding,
 ) -> HashMap<Uri, Vec<TextEdit>> {
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for (file, range) in snapshot.name_references(origin, target, true) {
-        let Some(uri) = path_to_uri(snapshot.file_path(file)) else {
-            continue;
-        };
-        let idx = snapshot.file_line_index(file, enc);
-        push_edit(&mut changes, &uri, &idx, range, new_name);
-    }
-    changes
+    edits_for_locations(
+        locations_for_ranges(
+            snapshot,
+            snapshot
+                .name_references(origin, target, true)
+                .into_iter()
+                .map(|(file, range)| (snapshot.file_path(file), range)),
+            enc,
+        )
+        .into_iter()
+        .flatten(),
+        new_name,
+    )
 }
 
 /// Convert a semantics-preserving byte edit to the requested position encoding.
@@ -1400,19 +1610,14 @@ fn occurrence_locations(
     occurrences: impl IntoIterator<Item = tex_ls_analysis::navigation::KeyOccurrence>,
     encoding: PositionEncoding,
 ) -> Vec<Location> {
-    dedup_locations(
+    let occurrences: Vec<_> = occurrences.into_iter().collect();
+    dedup_locations(locations_for_ranges(
+        snapshot,
         occurrences
-            .into_iter()
-            .map(|item| {
-                let file = snapshot.lookup_file(&item.path)?;
-                location_for(
-                    &item.path,
-                    &snapshot.file_line_index(file, encoding),
-                    item.key_range,
-                )
-            })
-            .collect(),
-    )
+            .iter()
+            .map(|item| (item.path.as_path(), item.key_range)),
+        encoding,
+    ))
 }
 fn occurrence_edits(
     snapshot: &Analysis,
@@ -1420,21 +1625,271 @@ fn occurrence_edits(
     new_name: &str,
     encoding: PositionEncoding,
 ) -> HashMap<Uri, Vec<TextEdit>> {
-    let mut changes = HashMap::new();
-    for item in occurrences {
-        let Some(file) = snapshot.lookup_file(&item.path) else {
+    edits_for_locations(
+        locations_for_ranges(
+            snapshot,
+            occurrences
+                .iter()
+                .map(|item| (item.path.as_path(), item.key_range)),
+            encoding,
+        )
+        .into_iter()
+        .flatten(),
+        new_name,
+    )
+}
+
+/// Group conversion by requested path, preserving alias URIs and response order.
+pub(crate) fn locations_for_ranges<'a>(
+    snapshot: &Analysis,
+    ranges: impl IntoIterator<Item = (&'a Path, TextRange)>,
+    encoding: PositionEncoding,
+) -> Vec<Option<Location>> {
+    let mut files: HashMap<&Path, Vec<(usize, TextRange)>> = HashMap::new();
+    let mut locations = Vec::new();
+    for (path, range) in ranges {
+        files
+            .entry(path)
+            .or_default()
+            .push((locations.len(), range));
+        locations.push(None);
+    }
+    for (path, mut ranges) in files {
+        let Some(file) = snapshot.lookup_file(path) else {
             continue;
         };
-        let Some(uri) = path_to_uri(&item.path) else {
+        let Some(uri) = path_to_uri(path) else {
             continue;
         };
-        push_edit(
-            &mut changes,
-            &uri,
-            &snapshot.file_line_index(file, encoding),
-            item.key_range,
-            new_name,
-        );
+        let index = snapshot.file_line_index(file, encoding);
+        let mut cursor = index.position_cursor();
+        if !ranges
+            .windows(2)
+            .all(|pair| pair[0].1.start() <= pair[1].1.start())
+        {
+            ranges.sort_unstable_by_key(|(_, range)| range.start());
+        }
+        for (slot, range) in ranges {
+            locations[slot] = Some(Location {
+                uri: uri.clone(),
+                range: lsp_range_with_cursor(&mut cursor, range),
+            });
+        }
+    }
+    locations
+}
+
+pub(crate) fn edits_for_locations(
+    locations: impl IntoIterator<Item = Location>,
+    new_name: &str,
+) -> HashMap<Uri, Vec<TextEdit>> {
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for location in locations {
+        changes.entry(location.uri).or_default().push(TextEdit {
+            range: location.range,
+            new_text: new_name.to_owned(),
+        });
     }
     changes
+}
+
+#[cfg(test)]
+mod batch_definition_tests {
+    use super::*;
+    use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn container_sweep_matches_first_match_precedence_and_inclusive_endpoints() {
+        let range = |start, end| TextRange::new(TextSize::new(start), TextSize::new(end));
+        let choices = [
+            range(0, 0),
+            range(0, 4),
+            range(2, 3),
+            range(3, 8),
+            range(8, 8),
+        ];
+        let starts: Vec<_> = [0, 0, 1, 2, 3, 4, 5, 8, 8, 9]
+            .into_iter()
+            .map(TextSize::new)
+            .collect();
+        for first in choices {
+            for second in choices {
+                for third in choices {
+                    let facts = [
+                        (first, range(10, 11)),
+                        (second, range(12, 13)),
+                        (third, range(14, 15)),
+                    ];
+                    for starts in [&starts[..], &starts[..1], &starts[..0]] {
+                        let expected: Vec<_> = starts
+                            .iter()
+                            .map(|&at| {
+                                facts
+                                    .iter()
+                                    .find(|(range, _)| range.contains_inclusive(at))
+                                    .map(|(_, container)| *container)
+                            })
+                            .collect();
+                        assert_eq!(
+                            definition_containers(&facts, starts),
+                            expected,
+                            "{facts:?}, {starts:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn definition_batches_match_independent_uri_position_and_container_resolution() {
+        let main = PathBuf::from(fixture_path!("/project/main.tex"));
+        let child = main.with_file_name("child.tex");
+        let bib = main.with_file_name("refs.bib");
+        let missing = main.with_file_name("missing.tex");
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(
+            &main,
+            "é😀 \\newcommand{\\demo}{Example} \\label{demo}"
+                .repeat(32)
+                .as_str(),
+            None,
+        );
+        db.apply_change(
+            &child,
+            "é😀 \\label{demo} \\newglossaryentry{term}{name=Term,description=Term}"
+                .repeat(32)
+                .as_str(),
+            None,
+        );
+        db.apply_change(
+            &bib,
+            "@string{brand={é😀 Example}}".repeat(32).as_str(),
+            None,
+        );
+        let snapshot = db.snapshot();
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let mut locations = Vec::new();
+            for path in [&main, &child, &bib] {
+                let file = snapshot.lookup_file(path).unwrap();
+                let index = snapshot.file_line_index(file, encoding);
+                let ranges: Vec<_> = if path == &bib {
+                    snapshot
+                        .bib_semantic_model(file)
+                        .string_defs()
+                        .iter()
+                        .map(|site| site.range)
+                        .collect()
+                } else {
+                    let model = snapshot.semantic_model(file);
+                    model
+                        .labels()
+                        .iter()
+                        .map(|site| site.key_range)
+                        .chain(model.glossary_defs().iter().map(|site| site.key_range))
+                        .chain(
+                            snapshot
+                                .definition_sites(file)
+                                .iter()
+                                .map(|site| site.name_range),
+                        )
+                        .collect()
+                };
+                locations.extend(
+                    ranges
+                        .into_iter()
+                        .map(|range| (location_for(path, &index, range).unwrap(), Some(range))),
+                );
+                locations.push((
+                    Location {
+                        uri: path_to_uri(path).unwrap(),
+                        range: Range::default(),
+                    },
+                    None,
+                ));
+            }
+            locations.reverse();
+            locations.push(locations[3].clone());
+            locations.push((
+                Location {
+                    uri: path_to_uri(&missing).unwrap(),
+                    range: Range::default(),
+                },
+                None,
+            ));
+            locations.push((
+                Location {
+                    uri: "untitled:buffer".parse().unwrap(),
+                    range: Range::default(),
+                },
+                None,
+            ));
+            let origin = Some(Range::new(Position::new(0, 2), Position::new(0, 6)));
+            let expected: Vec<_> = locations
+                .iter()
+                .filter_map(|(location, _)| {
+                    let path = uri_to_fs_path(&location.uri)?;
+                    let container = snapshot
+                        .lookup_file(&path)
+                        .and_then(|file| {
+                            let index = snapshot.file_line_index(file, encoding);
+                            let at = TextSize::new(index.offset_at(
+                                location.range.start.line,
+                                location.range.start.character,
+                            ) as u32);
+                            let container = if file_kind_for(&path) == FileKind::Bib {
+                                use tex_ls_parser::bib::syntax::SyntaxKind as Kind;
+                                snapshot
+                                    .parsed_bib_tree(file)
+                                    .token_at_offset(at)
+                                    .right_biased()?
+                                    .parent_ancestors()
+                                    .find(|node| {
+                                        matches!(node.kind(), Kind::ENTRY | Kind::STRING_ENTRY)
+                                    })
+                                    .map(|node| node.text_range())
+                            } else {
+                                let model = snapshot.semantic_model(file);
+                                model
+                                    .labels()
+                                    .iter()
+                                    .map(|item| (item.key_range, item.range))
+                                    .chain(
+                                        model
+                                            .glossary_defs()
+                                            .iter()
+                                            .map(|item| (item.key_range, item.range)),
+                                    )
+                                    .chain(
+                                        model
+                                            .bibitems()
+                                            .iter()
+                                            .map(|item| (item.key_range, item.range)),
+                                    )
+                                    .chain(
+                                        snapshot
+                                            .definition_sites(file)
+                                            .iter()
+                                            .map(|item| (item.name_range, item.range)),
+                                    )
+                                    .find(|(range, _)| range.contains_inclusive(at))
+                                    .map(|(_, range)| range)
+                            }?;
+                            Some(lsp_range(&index, container))
+                        })
+                        .unwrap_or(location.range);
+                    Some(lsp_types::LocationLink {
+                        origin_selection_range: origin,
+                        target_uri: location.uri.clone(),
+                        target_range: container,
+                        target_selection_range: location.range,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                definition_links(&snapshot, locations, origin, encoding),
+                expected
+            );
+        }
+    }
 }

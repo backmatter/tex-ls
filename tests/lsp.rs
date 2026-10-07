@@ -89,6 +89,43 @@ fn recv_diagnostics(client: &Connection) -> PublishDiagnosticsParams {
     }
 }
 
+#[test]
+fn malformed_range_formatting_parameters_leave_the_server_running() {
+    let (client, server_thread) = start_server(None);
+    let mut id = 70;
+    for method in [
+        "textDocument/rangeFormatting",
+        "textDocument/rangesFormatting",
+    ] {
+        for params in [
+            serde_json::Value::Null,
+            serde_json::json!(false),
+            serde_json::json!(42),
+            serde_json::json!("invalid"),
+            serde_json::json!([]),
+            serde_json::json!([0]),
+            serde_json::json!({}),
+        ] {
+            send_request(&client, id, method, params);
+            let response = recv_response(&client);
+            assert_eq!(response.id, RequestId::from(id));
+            assert_eq!(
+                response.response_result.unwrap_err().code,
+                lsp_server::ErrorCode::InvalidParams as i32
+            );
+            id += 1;
+        }
+    }
+    send_request(
+        &client,
+        id,
+        "workspace/executeCommand",
+        serde_json::json!({"command": "tex-ls.inspectAcquisition", "arguments": []}),
+    );
+    assert!(recv_response(&client).response_result.is_ok());
+    shutdown(&client, server_thread);
+}
+
 fn send_request(client: &Connection, id: i32, method: &str, params: serde_json::Value) {
     client
         .sender

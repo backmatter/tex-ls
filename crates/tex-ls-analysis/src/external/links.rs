@@ -15,6 +15,128 @@ use crate::project::include::subfiles_parent_arg;
 use tex_ls_parser::ast::{command_name, nth_group_inner};
 use tex_ls_parser::syntax::{SyntaxKind, SyntaxNode};
 
+/// Source facts that invalidate a built-in file argument interpretation.
+/// Earlier calls retain their role; a local declaration makes later calls
+/// unproved, without assuming that its replacement preserves the built-in.
+pub struct FileRoleContext {
+    protected: tex_ls_parser::semantic::context::TokenListContexts,
+    operands: tex_ls_parser::semantic::context::PrimitiveOperandContexts,
+    overrides: std::collections::BTreeMap<String, TextSize>,
+    graphics: Vec<(TextSize, Vec<PathBuf>)>,
+}
+
+impl FileRoleContext {
+    pub fn new(root: &SyntaxNode) -> Self {
+        Self::from_definition_sites(root, &tex_ls_parser::semantic::scan_definition_sites(root))
+    }
+
+    /// Reuse definition facts already collected by a feature request.
+    pub fn from_definition_sites(
+        root: &SyntaxNode,
+        sites: &[tex_ls_parser::semantic::DefSite],
+    ) -> Self {
+        let operands =
+            tex_ls_parser::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+                root, sites,
+            );
+        Self::from_definition_sites_and_operands(root, sites, &operands)
+    }
+
+    pub fn from_definition_sites_and_operands(
+        root: &SyntaxNode,
+        sites: &[tex_ls_parser::semantic::DefSite],
+        operands: &tex_ls_parser::semantic::context::PrimitiveOperandContexts,
+    ) -> Self {
+        let mut overrides = std::collections::BTreeMap::new();
+        for site in sites {
+            if site.kind == tex_ls_parser::semantic::DefSiteKind::Command {
+                overrides
+                    .entry(site.name.to_string())
+                    .and_modify(|start: &mut TextSize| {
+                        *start = (*start).min(site.name_range.start())
+                    })
+                    .or_insert(site.name_range.start());
+            }
+        }
+        let mut result = Self {
+            protected: tex_ls_parser::semantic::context::TokenListContexts::new(root),
+            operands: operands.clone(),
+            overrides,
+            graphics: Vec::new(),
+        };
+        use tex_ls_parser::ast::{AstNode, Group, nth_group};
+        for command in root.descendants().filter(|node| {
+            node.kind() == SyntaxKind::COMMAND
+                && command_name(node).as_deref() == Some("graphicspath")
+        }) {
+            if !result.allows(&command) {
+                continue;
+            }
+            let directories = nth_group(&command, 0)
+                .into_iter()
+                .flat_map(|group| group.children().filter_map(Group::cast).collect::<Vec<_>>())
+                .filter_map(|entry| entry.inner().map(|(_, path)| PathBuf::from(path.trim())))
+                .collect();
+            result
+                .graphics
+                .push((command.text_range().start(), directories));
+        }
+        result
+    }
+
+    pub(super) fn graphics_before(&self, start: TextSize) -> Option<&[PathBuf]> {
+        let next = self.graphics.partition_point(|&(offset, _)| offset < start);
+        next.checked_sub(1)
+            .map(|index| self.graphics[index].1.as_slice())
+    }
+
+    pub fn allows(&self, command: &SyntaxNode) -> bool {
+        !self.protected.contains(command.text_range())
+            && !self.operands.contains_head(command)
+            && !self.preceded_by_string(command)
+            && command_name(command).is_some_and(|name| {
+                self.overrides
+                    .get(name.as_str())
+                    .is_none_or(|start| command.text_range().start() < *start)
+            })
+    }
+
+    pub fn is_operand_token(&self, range: TextRange) -> bool {
+        self.operands.contains_token(range)
+    }
+
+    pub fn is_operand_head(&self, command: &SyntaxNode) -> bool {
+        self.operands.contains_head(command)
+    }
+
+    fn preceded_by_string(&self, command: &SyntaxNode) -> bool {
+        let mut previous = command.first_token().and_then(|token| token.prev_token());
+        while let Some(token) = previous {
+            if matches!(
+                token.kind(),
+                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            ) {
+                previous = token.prev_token();
+                continue;
+            }
+            return token.kind() == SyntaxKind::CONTROL_WORD
+                && token.text().get(1..) == Some("string")
+                && self
+                    .overrides
+                    .get("string")
+                    .is_none_or(|start| token.text_range().start() < *start);
+        }
+        false
+    }
+
+    pub fn role(&self, command: &SyntaxNode) -> Option<tex_ls_parser::semantic::roles::FileRole> {
+        if !self.allows(command) {
+            return None;
+        }
+        command_name(command).and_then(|name| tex_ls_parser::semantic::roles::file_role(&name))
+    }
+}
+
 /// A target established by the captured observations, with its source byte span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkTarget {
@@ -59,10 +181,22 @@ pub fn file_references(
     root_dir: Option<&Path>,
     inherited_graphics: &[PathBuf],
 ) -> Vec<FileReference> {
+    let roles = FileRoleContext::new(root);
+    file_references_with_roles(root, base_dir, root_dir, inherited_graphics, &roles)
+}
+
+pub fn file_references_with_roles(
+    root: &SyntaxNode,
+    base_dir: Option<&Path>,
+    root_dir: Option<&Path>,
+    inherited_graphics: &[PathBuf],
+    roles: &FileRoleContext,
+) -> Vec<FileReference> {
     let mut links = Vec::new();
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| roles.allows(node))
     {
         let Some(name) = command_name(&command) else {
             continue;
@@ -83,12 +217,12 @@ pub fn file_references(
                 false,
                 None,
             );
-            candidates.local = crate::external::command_directories(
-                root,
+            candidates.local = super::resolution::command_directories_with_roles(
                 &command,
                 base_dir,
                 root_dir,
                 inherited_graphics,
+                roles,
             )
             .iter()
             .flat_map(|dir| {
@@ -110,18 +244,17 @@ pub fn file_references(
         if name == "documentclass" {
             collect_subfiles_parent(&command, base_dir, &mut links);
         }
-        let Some(class) = tex_ls_parser::semantic::roles::file_role(&name) else {
+        let Some(class) = roles.role(&command) else {
             continue;
         };
-        collect_command(
-            root,
+        let directories = super::resolution::command_directories_with_roles(
             &command,
-            class,
             base_dir,
             root_dir,
             inherited_graphics,
-            &mut links,
+            roles,
         );
+        collect_command(&command, class, &directories, &mut links);
     }
     links
 }
@@ -150,12 +283,9 @@ fn collect_subfiles_parent(
 
 /// Emit candidates from the same role used by completion and source edges.
 fn collect_command(
-    root: &SyntaxNode,
     command: &SyntaxNode,
     role: tex_ls_parser::semantic::roles::FileRole,
-    base_dir: Option<&Path>,
-    root_dir: Option<&Path>,
-    inherited_graphics: &[PathBuf],
+    directories: &[PathBuf],
     out: &mut Vec<FileReference>,
 ) {
     let kind = FileArgKind::from_role(role.kind);
@@ -163,8 +293,6 @@ fn collect_command(
         kind,
         FileArgKind::Package | FileArgKind::NamedFile { suffix: ".sty", .. } | FileArgKind::Class
     );
-    let directories =
-        crate::external::command_directories(root, command, base_dir, root_dir, inherited_graphics);
     let names = file_argument_spans(command, role);
     for (name, range) in names {
         let name = match kind {
@@ -324,6 +452,217 @@ pub fn comma_spans(inner: &str, inner_range: TextRange) -> Vec<(&str, TextRange)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primitive_operand_mentions_have_no_file_roles_but_following_commands_do() {
+        for prefix in [
+            r"\let\copy\input{fake}",
+            r"\let\copy=\input{fake}",
+            r"\meaning\input{fake}",
+            r"\show\input{fake}",
+            r"\noexpand\input{fake}",
+            r"\NewCommandCopy{\copy}{\input}{fake}",
+            r"\RenewCommandCopy{\copy}{\input}{fake}",
+            r"\DeclareCommandCopy{\copy}{\input}{fake}",
+            r"\ifx\relax\input{fake}\fi",
+            r"\ifx a\input{fake}\fi",
+            r"\detokenize{\meaning}",
+        ] {
+            let source = format!("{prefix}\\input{{real}}");
+            let root = crate::parser::parse(&source).syntax();
+            let references = file_references(&root, None, None, &[]);
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|reference| &source[reference.range])
+                    .collect::<Vec<_>>(),
+                ["real"],
+                "{source}"
+            );
+            let edges = crate::project::include::collect_include_edges(&root, None);
+            assert_eq!(edges.len(), 1, "{source}");
+        }
+        for source in [
+            r"\meaning\input{\input{real}}",
+            r"\let\copy\input{\input{real}}",
+            r"\ifx ab\input{real}\fi",
+            r"\meaning\input{fake}\renewcommand{\meaning}[1]{#1}\meaning\input{real}",
+        ] {
+            let root = crate::parser::parse(source).syntax();
+            let references = file_references(&root, None, None, &[]);
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|reference| &source[reference.range])
+                    .collect::<Vec<_>>(),
+                ["real"],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn indexed_graphics_paths_preserve_order_resets_and_literal_ownership() {
+        let source = concat!(
+            "\\includegraphics{first.png}\n",
+            "\\graphicspath{{old/}{old/}}\\includegraphics{second.png}\n",
+            "\\graphicspath{}\\includegraphics{reset.png}\n",
+            "\\detokenize{\\graphicspath{{printed/}}}\\includegraphics{literal.png}\n",
+            "\\graphicspath{{live/}}\\renewcommand{\\graphicspath}[1]{#1}\n",
+            "\\graphicspath{{replacement/}}\\includegraphics{final.png}\n",
+        );
+        let root = crate::parser::parse(source).syntax();
+        let inherited = [PathBuf::from("/inherited")];
+        let references = file_references(&root, Some(Path::new("/project")), None, &inherited);
+        let expected = [
+            vec!["/project/first.png", "/inherited/first.png"],
+            vec!["/project/second.png", "/project/old/second.png"],
+            vec!["/project/reset.png"],
+            vec!["/project/literal.png"],
+            vec!["/project/final.png", "/project/live/final.png"],
+        ];
+        assert_eq!(references.len(), expected.len());
+        for (reference, expected) in references.iter().zip(expected) {
+            assert_eq!(
+                reference.candidates.local,
+                expected.into_iter().map(PathBuf::from).collect::<Vec<_>>()
+            );
+        }
+        for command in root
+            .descendants()
+            .filter(|node| command_name(node).as_deref() == Some("includegraphics"))
+        {
+            let reference = references
+                .iter()
+                .find(|reference| command.text_range().contains_range(reference.range))
+                .unwrap();
+            let dirs = super::super::resolution::completion_directories(
+                &root,
+                usize::from(reference.range.start()),
+                Some(Path::new("/project")),
+                None,
+                &inherited,
+            );
+            assert_eq!(
+                dirs.iter()
+                    .map(|dir| dir.join(&source[reference.range]))
+                    .collect::<Vec<_>>(),
+                reference.candidates.local
+            );
+        }
+    }
+
+    #[test]
+    fn string_prefixed_commands_share_file_ownership_and_allow_local_overrides() {
+        for (source, expected) in [
+            (
+                r"\string\input{printed}\input{real}\string\usepackage{fake}\usepackage{valid}",
+                vec!["real", "valid"],
+            ),
+            (
+                r"\renewcommand{\string}[1]{#1}\string\usepackage{real}",
+                vec!["real"],
+            ),
+        ] {
+            let root = crate::parser::parse(source).syntax();
+            let references = file_references(&root, None, None, &[]);
+            assert_eq!(
+                references
+                    .iter()
+                    .map(|reference| &source[reference.range])
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let packages = crate::project::collect_package_edge_keys(&root, None);
+            assert_eq!(packages.len(), 1);
+            for needle in ["printed", "fake"] {
+                if let Some(at) = source.find(needle) {
+                    assert_eq!(
+                        crate::completion::classify_context(&root, at + 1),
+                        crate::completion::CompletionContext::None
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn local_overrides_share_link_edge_and_completion_ownership() {
+        let source = concat!(
+            "\\input{before} \\renewcommand{\\input}[1]{#1} \\input{after}\n",
+            "\\usepackage[style=numeric]{biblatex} \\renewcommand{\\usepackage}[1]{#1} \\usepackage[style=other]{printed}\n",
+            "\\bibliography{refs} \\renewcommand{\\bibliography}[1]{#1} \\bibliography{prose}\n",
+            "\\includegraphics{real.png} \\renewcommand{\\includegraphics}[1]{#1} \\includegraphics{printed.png}\n",
+        );
+        let root = crate::parser::parse(source).syntax();
+        let references = file_references(
+            &root,
+            Some(Path::new("/project")),
+            Some(Path::new("/project")),
+            &[],
+        );
+        let names: Vec<_> = references
+            .iter()
+            .map(|reference| &source[reference.range])
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "before", "numeric", "numeric", "biblatex", "refs", "real.png"
+            ]
+        );
+        let include_edges =
+            crate::project::collect_include_edges(&root, Some(Path::new("/project")));
+        assert_eq!(include_edges.len(), 1);
+        assert_eq!(
+            include_edges[0].literal.as_deref(),
+            Some(Path::new("before.tex"))
+        );
+        let packages =
+            crate::project::collect_package_edge_keys(&root, Some(Path::new("/project")));
+        assert_eq!(packages.len(), 1);
+        assert_eq!(
+            packages[0].target,
+            crate::project::PackageTarget::Path(PathBuf::from("/project/biblatex.sty"))
+        );
+        let bibliography =
+            crate::project::collect_bib_resource_targets(&root, Some(Path::new("/project")));
+        assert_eq!(
+            bibliography,
+            [crate::project::BibTarget::Path(PathBuf::from(
+                "/project/refs.bib"
+            ))]
+        );
+        for needle in ["after", "printed}", "prose", "printed.png", "other"] {
+            let at = source.find(needle).unwrap() + needle.len() - 1;
+            assert_eq!(
+                crate::completion::classify_context(&root, at),
+                crate::completion::CompletionContext::None,
+                "{needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn printed_package_loads_cannot_create_range_free_graph_edges() {
+        let root =
+            crate::parser::parse(r"\detokenize{\usepackage{fake}}\usepackage{real}").syntax();
+        let base = Some(Path::new("/project"));
+        let edges = crate::project::collect_package_edges(&root, base);
+        let keys = crate::project::collect_package_edge_keys(&root, base);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            keys,
+            edges
+                .iter()
+                .map(crate::project::PackageEdge::key)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            keys[0].target,
+            crate::project::PackageTarget::Path(PathBuf::from("/project/real.sty"))
+        );
+    }
 
     #[test]
     fn commented_package_names_keep_exact_literal_ranges() {

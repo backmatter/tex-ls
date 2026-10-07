@@ -1,0 +1,588 @@
+{
+  "initialize": {
+    "capabilities": {
+      "experimental": {
+        "texEmbeddedHighlighting": true
+      },
+      "textDocument": {
+        "semanticTokens": {
+          "requests": {
+            "full": true,
+            "range": true
+          },
+          "tokenTypes": [
+            "macro",
+            "type",
+            "variable",
+            "property",
+            "keyword",
+            "string",
+            "number",
+            "namespace",
+            "texText",
+            "texLiteral",
+            "texPath",
+            "texMath",
+            "comment"
+          ],
+          "tokenModifiers": [
+            "declaration",
+            "texBold",
+            "texItalic"
+          ],
+          "formats": [
+            "relative"
+          ]
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{c}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=c]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/c-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{c++}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=c++]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/cpp-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{javascript}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=javascript]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/javascript-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{typescript}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=typescript]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/typescript-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{json}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=json]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/json-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{css}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=css]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/css-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-minted.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{html}\n// \\ref{false} 42 & $\n\\end{minted}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-minted.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-minted.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-lstlisting.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=html]\n// \\ref{false} 42 & $\n\\end{lstlisting}\n\\ref{real}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-lstlisting.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///delegation/html-lstlisting.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 3,
+            "character": 10
+          }
+        }
+      }
+    }
+  ]
+}

@@ -82,12 +82,35 @@ pub struct FilePathContext {
 
 /// Literal graphics directories in the root preamble before source inclusion.
 pub fn inherited_graphics(root: &tex_ls_parser::syntax::SyntaxNode, base: &Path) -> Vec<PathBuf> {
+    // No source declaration can contribute directories without a graphicspath
+    // call. Avoid constructing definition and ownership indexes in that case.
+    if !has_graphics_path(root) {
+        return Vec::new();
+    }
+    let roles = super::links::FileRoleContext::new(root);
+    inherited_graphics_with_roles(root, base, &roles)
+}
+
+pub(crate) fn has_graphics_path(root: &tex_ls_parser::syntax::SyntaxNode) -> bool {
+    root.descendants().any(|node| {
+        node.kind() == tex_ls_parser::syntax::SyntaxKind::COMMAND
+            && tex_ls_parser::ast::command_name(&node).as_deref() == Some("graphicspath")
+    })
+}
+
+/// Reuse source ownership facts when collecting preamble graphics directories.
+pub fn inherited_graphics_with_roles(
+    root: &tex_ls_parser::syntax::SyntaxNode,
+    base: &Path,
+    roles: &super::links::FileRoleContext,
+) -> Vec<PathBuf> {
     use tex_ls_parser::ast::{AstNode, Group, command_name, nth_group};
     use tex_ls_parser::semantic::roles::{FileRoleKind, file_role};
     let mut result = Vec::new();
     for command in root
         .descendants()
         .filter(|node| node.kind() == tex_ls_parser::syntax::SyntaxKind::COMMAND)
+        .filter(|node| roles.allows(node))
     {
         let Some(name) = command_name(&command) else {
             continue;
@@ -119,10 +142,26 @@ pub fn command_directories(
     root_dir: Option<&Path>,
     inherited_graphics: &[PathBuf],
 ) -> Vec<PathBuf> {
-    use tex_ls_parser::ast::{AstNode, Group, command_name, nth_group, nth_group_text};
-    use tex_ls_parser::semantic::roles::{FileRoleKind, file_role};
-    use tex_ls_parser::syntax::SyntaxKind;
-    let Some(role) = command_name(command).and_then(|name| file_role(&name)) else {
+    command_directories_with_roles(
+        command,
+        base,
+        root_dir,
+        inherited_graphics,
+        &super::links::FileRoleContext::new(root),
+    )
+}
+
+/// Resolve directories with file-role facts already collected for this source.
+pub fn command_directories_with_roles(
+    command: &tex_ls_parser::syntax::SyntaxNode,
+    base: Option<&Path>,
+    root_dir: Option<&Path>,
+    inherited_graphics: &[PathBuf],
+    roles: &super::links::FileRoleContext,
+) -> Vec<PathBuf> {
+    use tex_ls_parser::ast::nth_group_text;
+    use tex_ls_parser::semantic::roles::FileRoleKind;
+    let Some(role) = roles.role(command) else {
         return Vec::new();
     };
     let base = if matches!(
@@ -148,14 +187,7 @@ pub fn command_directories(
         FileRoleKind::Graphics | FileRoleKind::Svg | FileRoleKind::Inkscape
     ) {
         // The latest literal declaration preceding the use supplies search paths.
-        let declaration = root
-            .descendants()
-            .filter(|node| {
-                node.kind() == SyntaxKind::COMMAND
-                    && node.text_range().start() < command.text_range().start()
-                    && command_name(node).as_deref() == Some("graphicspath")
-            })
-            .last();
+        let declaration = roles.graphics_before(command.text_range().start());
         if declaration.is_none() {
             for dir in inherited_graphics {
                 if !dirs.contains(dir) {
@@ -163,13 +195,11 @@ pub fn command_directories(
                 }
             }
         }
-        if let Some(group) = declaration.and_then(|node| nth_group(&node, 0)) {
-            for entry in group.children().filter_map(Group::cast) {
-                if let Some((_, path)) = entry.inner() {
-                    let dir = normalize_path(&base.join(path.trim()));
-                    if !dirs.contains(&dir) {
-                        dirs.push(dir);
-                    }
+        if let Some(paths) = declaration {
+            for path in paths {
+                let dir = normalize_path(&base.join(path));
+                if !dirs.contains(&dir) {
+                    dirs.push(dir);
                 }
             }
         }

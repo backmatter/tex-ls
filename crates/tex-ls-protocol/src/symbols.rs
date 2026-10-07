@@ -1,6 +1,7 @@
 //! Symbol conversion from an analysis snapshot.
 use super::*;
 use tex_ls_analysis::bib::outline::BibSymbolKind;
+use tex_ls_analysis::text::line_index::PositionCursor;
 
 /// Convert the source outline and supplied last-build numbers to LSP symbols.
 pub fn compute_symbols(
@@ -16,7 +17,13 @@ pub fn compute_symbols(
     let items = snapshot.file_outline(file);
     let aux = document_aux(snapshot, snapshot.resolve_labels(), path);
     let mut toc_cursor = 0;
-    document_symbols(items, &idx, aux.as_ref(), &mut toc_cursor, options)
+    document_symbols(
+        items,
+        &mut idx.position_cursor(),
+        aux.as_ref(),
+        &mut toc_cursor,
+        options,
+    )
 }
 
 pub fn compute_bib_symbols(
@@ -28,12 +35,13 @@ pub fn compute_bib_symbols(
         return Vec::new();
     };
     let idx = snapshot.file_line_index(file, encoding);
+    let mut cursor = idx.position_cursor();
     bib_outline(
         snapshot.bib_semantic_model(file),
         &snapshot.parsed_bib_tree(file),
     )
     .iter()
-    .map(|item| bib_to_document_symbol(item, &idx))
+    .map(|item| bib_symbol_with_cursor(item, &mut cursor))
     .collect()
 }
 
@@ -56,6 +64,7 @@ pub fn compute_bib_symbol_response(
             path_to_uri(path).or_else(|| path.to_str().and_then(|uri| uri.parse().ok()))
     {
         let idx = snapshot.file_line_index(file, encoding);
+        let mut cursor = idx.position_cursor();
         for item in bib_outline(
             snapshot.bib_semantic_model(file),
             &snapshot.parsed_bib_tree(file),
@@ -67,7 +76,7 @@ pub fn compute_bib_symbol_response(
                 item.selection_range,
                 None,
                 &uri,
-                &idx,
+                &mut cursor,
             ));
             for child in item.children {
                 symbols.push(flat_bib_symbol(
@@ -76,7 +85,7 @@ pub fn compute_bib_symbol_response(
                     child.selection_range,
                     Some(container.clone()),
                     &uri,
-                    &idx,
+                    &mut cursor,
                 ));
             }
         }
@@ -91,7 +100,7 @@ fn flat_bib_symbol(
     range: TextRange,
     container_name: Option<String>,
     uri: &Uri,
-    idx: &LineIndex,
+    cursor: &mut PositionCursor<'_, '_>,
 ) -> lsp_types::SymbolInformation {
     lsp_types::SymbolInformation {
         base_symbol_information: lsp_types::BaseSymbolInformation {
@@ -103,7 +112,7 @@ fn flat_bib_symbol(
         deprecated: None,
         location: Location {
             uri: uri.clone(),
-            range: lsp_range(idx, range),
+            range: lsp_range_with_cursor(cursor, range),
         },
     }
 }
@@ -280,14 +289,14 @@ pub fn compute_projects_workspace_symbols(
 
 fn document_symbols(
     items: &[OutlineItem],
-    idx: &LineIndex,
+    positions: &mut PositionCursor<'_, '_>,
     aux: Option<&AuxData>,
     cursor: &mut usize,
     options: &presentation::OutlineOptions,
 ) -> Vec<DocumentSymbol> {
     let mut symbols = Vec::new();
     for item in items {
-        let mut symbol = to_document_symbol(item, idx, aux, cursor, options);
+        let mut symbol = document_symbol_with_cursor(item, positions, aux, cursor, options);
         let visible = outline_visible(item, options);
         if visible {
             symbols.push(symbol);
@@ -324,10 +333,20 @@ pub fn outline_symbol_kind(kind: OutlineSymbol) -> SymbolKind {
 /// matching consumes toc entries in document order (`toc_cursor`) against
 /// whitespace-normalized titles, so a macro-heavy title that fails to match
 /// degrades to its plain, numberless name.
-#[allow(deprecated)] // `DocumentSymbol::deprecated` is a required struct field.
 pub fn to_document_symbol(
     item: &OutlineItem,
     idx: &LineIndex,
+    aux: Option<&AuxData>,
+    toc_cursor: &mut usize,
+    options: &presentation::OutlineOptions,
+) -> DocumentSymbol {
+    document_symbol_with_cursor(item, &mut idx.position_cursor(), aux, toc_cursor, options)
+}
+
+#[allow(deprecated)] // `DocumentSymbol::deprecated` is a required struct field.
+fn document_symbol_with_cursor(
+    item: &OutlineItem,
+    positions: &mut PositionCursor<'_, '_>,
     aux: Option<&AuxData>,
     toc_cursor: &mut usize,
     options: &presentation::OutlineOptions,
@@ -336,15 +355,17 @@ pub fn to_document_symbol(
     let range = item.range;
     let selection = item.selection_range;
     let (name, detail) = outline_presentation(item, aux, toc_cursor, options);
-    let children = document_symbols(&item.children, idx, aux, toc_cursor, options);
+    let range = lsp_range_with_cursor(positions, range);
+    let selection_range = lsp_range_with_cursor(positions, selection);
+    let children = document_symbols(&item.children, positions, aux, toc_cursor, options);
     DocumentSymbol {
         name,
         detail,
         kind,
         tags: None,
         deprecated: None,
-        range: byte_range_to_lsp(idx, range.start().into(), range.end().into()),
-        selection_range: byte_range_to_lsp(idx, selection.start().into(), selection.end().into()),
+        range,
+        selection_range,
         children: (!children.is_empty()).then_some(children),
     }
 }
@@ -372,8 +393,15 @@ pub fn normalize_toc_title(title: &str) -> String {
 
 /// Convert a bibliography entry and its field children into an LSP symbol.
 /// The cite key is the entry name and the entry type supplies its detail.
-#[allow(deprecated)] // `DocumentSymbol::deprecated` is a required struct field.
 pub fn bib_to_document_symbol(item: &BibOutlineItem, idx: &LineIndex) -> DocumentSymbol {
+    bib_symbol_with_cursor(item, &mut idx.position_cursor())
+}
+
+#[allow(deprecated)] // `DocumentSymbol::deprecated` is a required struct field.
+fn bib_symbol_with_cursor(
+    item: &BibOutlineItem,
+    cursor: &mut PositionCursor<'_, '_>,
+) -> DocumentSymbol {
     let range = item.range;
     let selection = item.selection_range;
     DocumentSymbol {
@@ -382,12 +410,12 @@ pub fn bib_to_document_symbol(item: &BibOutlineItem, idx: &LineIndex) -> Documen
         kind: bib_symbol_kind(item.kind),
         tags: None,
         deprecated: None,
-        range: byte_range_to_lsp(idx, range.start().into(), range.end().into()),
-        selection_range: byte_range_to_lsp(idx, selection.start().into(), selection.end().into()),
+        range: lsp_range_with_cursor(cursor, range),
+        selection_range: lsp_range_with_cursor(cursor, selection),
         children: (!item.children.is_empty()).then(|| {
             item.children
                 .iter()
-                .map(|child| bib_to_document_symbol(child, idx))
+                .map(|child| bib_symbol_with_cursor(child, cursor))
                 .collect()
         }),
     }

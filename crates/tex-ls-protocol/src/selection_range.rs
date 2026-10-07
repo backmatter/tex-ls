@@ -12,7 +12,7 @@
 //! (a `COMMAND` and its sole `ARGUMENT` often share a span) so each step strictly
 //! widens, as clients expect.
 
-use lsp_types::{Position, Range, SelectionRange};
+use lsp_types::{Position, SelectionRange};
 use rowan::TextRange;
 
 use tex_ls_analysis::text::LineIndex;
@@ -26,38 +26,35 @@ pub fn selection_ranges(
     idx: &LineIndex,
     positions: &[Position],
 ) -> Vec<SelectionRange> {
-    positions
+    let positions: Vec<_> = positions
         .iter()
-        .map(|pos| selection_range_at(root, idx, *pos))
-        .collect()
+        .map(|pos| (pos.line, pos.character))
+        .collect();
+    let chains = idx
+        .offsets_at(&positions)
+        .into_iter()
+        .map(|offset| tex_ls_analysis::selection::selection_chain(root, offset))
+        .collect();
+    from_chains(idx, chains)
 }
 
-/// The single expand-selection chain at `pos`: the leaf token's range followed by
-/// every ancestor's range up to `ROOT`, deduplicated to strictly-widening steps and
-/// folded into a `SelectionRange` linked from innermost to outermost.
-fn selection_range_at(root: &SyntaxNode, idx: &LineIndex, pos: Position) -> SelectionRange {
-    let offset = idx.offset_at(pos.line, pos.character);
-    let ranges = tex_ls_analysis::selection::selection_chain(root, offset);
-
-    let to_range = |r: TextRange| {
-        let (sl, sc) = idx.position(r.start().into());
-        let (el, ec) = idx.position(r.end().into());
-        Range {
-            start: Position::new(sl, sc),
-            end: Position::new(el, ec),
-        }
-    };
-
-    // Fold outermost -> innermost so each node's `parent` points at the wider range.
-    // `ranges` is never empty (the root always covers `at`), so `current` is `Some`.
-    let mut current: Option<Box<SelectionRange>> = None;
-    for &r in ranges.iter().rev() {
-        current = Some(Box::new(SelectionRange {
-            range: to_range(r),
-            parent: current,
-        }));
-    }
-    *current.expect("chain always contains the root range")
+/// Convert all chain endpoints together, then link each selection to its parent.
+pub(crate) fn from_chains(idx: &LineIndex, chains: Vec<Vec<TextRange>>) -> Vec<SelectionRange> {
+    let ranges: Vec<_> = chains.iter().flatten().copied().collect();
+    let converted = super::convert::lsp_nested_ranges(idx, &ranges);
+    let mut offset = 0;
+    chains
+        .into_iter()
+        .map(|chain| {
+            let end = offset + chain.len();
+            let mut parent = None;
+            for &range in converted[offset..end].iter().rev() {
+                parent = Some(Box::new(SelectionRange { range, parent }));
+            }
+            offset = end;
+            *parent.expect("selection includes root")
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -74,7 +71,7 @@ mod tests {
     fn chain(src: &str, line: u32, character: u32) -> Vec<Pair> {
         let root = SyntaxNode::new_root(parse(src).green);
         let idx = LineIndex::new(src);
-        let sr = selection_range_at(&root, &idx, Position::new(line, character));
+        let sr = selection_ranges(&root, &idx, &[Position::new(line, character)]).remove(0);
         let mut out = Vec::new();
         let mut cur = Some(Box::new(sr));
         while let Some(node) = cur {

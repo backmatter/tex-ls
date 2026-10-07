@@ -15,6 +15,17 @@
     "common": {
       "patterns": [
         {
+          "match": "(\\\\(?:char|catcode|mathcode|delcode|lccode|uccode|sfcode))[ \\t]*(`(?:\\\\.|[^\\r\\n]))",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "text.tex.character-constant.latex"
+            }
+          }
+        },
+        {
           "include": "#comment"
         },
         {
@@ -87,6 +98,21 @@
     },
     "math-content": {
       "patterns": [
+        {
+          "match": "(\\\\(?:char|catcode|mathcode|delcode|lccode|uccode|sfcode))[ \\t]*(`(?:\\\\.|[^\\r\\n]))",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "text.tex.character-constant.latex"
+            }
+          }
+        },
+        {
+          "name": "keyword.operator.math.latex",
+          "match": "[_^]"
+        },
         {
           "include": "#comment"
         },
@@ -200,16 +226,8 @@
           "match": "\\\\(?:[a-zA-Z@:_]+|[^\\r\\n])"
         },
         {
-          "name": "variable.parameter.latex",
-          "match": "#+[1-9]"
-        },
-        {
           "name": "punctuation.definition.group.latex",
           "match": "[{}\\[\\]]"
-        },
-        {
-          "name": "keyword.operator.math.latex",
-          "match": "[_^&~]"
         }
       ]
     },
@@ -237,6 +255,128 @@
     },
     "protected": {
       "patterns": [
+        {
+          "include": "#embedded"
+        },
+        {
+          "begin": "(\\\\(?:url|nolinkurl|href))[ \\t]*(\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "contentName": "string.other.path.latex",
+          "patterns": [
+            {
+              "include": "#raw-braces"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\path)[ \\t]*(\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "contentName": "markup.raw.verbatim.latex",
+          "patterns": [
+            {
+              "include": "#raw-braces"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\(?:lstinline|mintinline))(?:\\*)?[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?(?:\\{[a-zA-Z0-9_+-]+\\}[ \\t]*)?([^a-zA-Z\\s{])",
+          "end": "\\2|$",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "contentName": "markup.raw.verbatim.latex"
+        },
+        {
+          "begin": "(\\\\(?:lstinline|mintinline))(?:\\*)?[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?(?:\\{[a-zA-Z0-9_+-]+\\}[ \\t]*)?(\\{)",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "contentName": "markup.raw.verbatim.latex",
+          "patterns": [
+            {
+              "include": "#raw-braces"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(alltt)\\}",
+          "end": "(\\\\end)[ \\t]*\\{(alltt)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#tokens"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\detokenize)[ \\t]*\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            }
+          },
+          "contentName": "markup.raw.token-list.latex",
+          "patterns": [
+            {
+              "include": "#comment"
+            },
+            {
+              "include": "#detokenize-braces"
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(comment)\\}",
+          "end": "(\\\\end)[ \\t]*\\{(comment)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "comment.block.excluded.latex"
+        },
         {
           "begin": "(\\\\verb)(\\*?)([^a-zA-Z\\s])",
           "end": "\\3|$",
@@ -278,6 +418,500 @@
             }
           },
           "contentName": "string.other.verbatim.latex"
+        }
+      ]
+    },
+    "raw-braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#raw-braces"
+        }
+      ]
+    },
+    "detokenize-braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#detokenize-braces"
+        }
+      ]
+    },
+    "embedded": {
+      "patterns": [
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:c))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.c.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.c"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:c)\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.c.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.c"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:(?:c\\+\\+|cpp)))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.cpp.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.cpp"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:(?:c\\+\\+|cpp))\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.cpp.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.cpp"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:(?:javascript|js)))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.javascript.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.js"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:(?:javascript|js))\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.javascript.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.js"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:(?:typescript|ts)))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.typescript.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.ts"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:(?:typescript|ts))\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.typescript.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.ts"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:json))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.json.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.json"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:json)\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.json.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.json"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:css))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.css.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "source.css"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:css)\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.css.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "source.css"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(minted)\\}[ \\t]*(?:\\[[^\\]\\r\\n]*\\][ \\t]*)?\\{((?i:html))\\}",
+          "end": "(\\\\end)[ \\t]*\\{(minted)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            },
+            "3": {
+              "name": "entity.name.namespace.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.html.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(minted)\\})",
+              "patterns": [
+                {
+                  "include": "text.html.basic"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "begin": "(\\\\begin)[ \\t]*\\{(lstlisting)\\}[ \\t]*\\[(?=[^\\]\\r\\n]*\\blanguage[ \\t]*=[ \\t]*\\{?(?i:html)\\}?(?:[ \\t]*[,\\]]))[^\\]\\r\\n]*\\]",
+          "end": "(\\\\end)[ \\t]*\\{(lstlisting)\\}",
+          "beginCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "endCaptures": {
+            "1": {
+              "name": "entity.name.function.preprocessor.latex"
+            },
+            "2": {
+              "name": "entity.name.type.environment.latex"
+            }
+          },
+          "contentName": "meta.embedded.block.html.latex",
+          "patterns": [
+            {
+              "begin": "(?:^|\\G)(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})(?=.)",
+              "while": "^(?![^\\r\\n]*(\\\\end)[ \\t]*\\{(lstlisting)\\})",
+              "patterns": [
+                {
+                  "include": "text.html.basic"
+                }
+              ]
+            }
+          ]
         }
       ]
     }

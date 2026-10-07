@@ -77,7 +77,9 @@ pub(super) fn on_range_formatting(
             .map(|range| vec![range])
     };
     let mut params_value = req.params;
-    params_value["range"] = serde_json::json!(Range::default());
+    if let Some(params) = params_value.as_object_mut() {
+        params.insert("range".into(), serde_json::json!(Range::default()));
+    }
     let parsed = serde_json::from_value::<DocumentRangeFormattingParams>(params_value);
     let (Ok(params), Some(ranges)) = (parsed, ranges) else {
         let _ = connection.sender.send(Message::Response(Response::new_err(

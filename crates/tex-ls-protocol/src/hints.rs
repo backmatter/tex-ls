@@ -49,6 +49,7 @@ pub fn compute(
     }
     sites.sort_by_key(|(_, at)| *at);
     sites.dedup();
+    let mut positions = idx.position_cursor();
     json!(sites.into_iter().filter_map(|(name, at)| {
         let at = usize::from(at);
         if at < start || at > end { return None; }
@@ -56,7 +57,7 @@ pub fn compute(
         let number = aux.labels.get(name.as_str()).filter(|number| !number.is_empty())?;
         let max = options.max_length.clamp(1, 256);
         let label = if number.chars().count() > max { format!("{}…", number.chars().take(max-1).collect::<String>()) } else { number.clone() };
-        let (line, character) = idx.position(at);
+        let (line, character) = positions.position(at);
         Some(json!({"position":{"line":line,"character":character},"label":label,"paddingLeft":true,"tooltip":format!("Last build label number for {name}: {number}. Source freshness is unverified.")}))
     }).collect::<Vec<_>>())
 }

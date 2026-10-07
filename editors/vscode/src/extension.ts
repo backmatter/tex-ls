@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { LanguageClient, type LanguageClientOptions } from 'vscode-languageclient/node';
+import { semanticHighlighting } from './semanticHighlighting';
 import { serverCommand, serverSettings, withCurrentDocument } from './settings';
 
 let controller: Controller | undefined;
@@ -63,6 +64,7 @@ class Controller {
     };
     this.output.appendLine(`Starting ${command} lsp`);
     const client = new LanguageClient('tex-ls', 'tex-ls', { command, args: ['lsp'] }, options);
+    client.registerFeature(semanticHighlighting);
     this.client = client;
     try {
       await client.start();

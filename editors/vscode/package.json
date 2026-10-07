@@ -95,7 +95,16 @@
       {
         "language": "latex",
         "scopeName": "text.tex.latex",
-        "path": "./syntaxes/latex.tmLanguage.json"
+        "path": "./syntaxes/latex.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.c.latex": "c",
+          "meta.embedded.block.cpp.latex": "cpp",
+          "meta.embedded.block.javascript.latex": "javascript",
+          "meta.embedded.block.typescript.latex": "typescript",
+          "meta.embedded.block.json.latex": "json",
+          "meta.embedded.block.css.latex": "css",
+          "meta.embedded.block.html.latex": "html"
+        }
       },
       {
         "language": "bibtex",
@@ -111,6 +120,36 @@
       "[bibtex]": {
         "editor.tabSize": 2,
         "editor.insertSpaces": true
+      },
+      "editor.semanticTokenColorCustomizations": {
+        "rules": {
+          "texText:latex": {
+            "bold": false,
+            "italic": false
+          },
+          "*.texBold:latex": {
+            "bold": true
+          },
+          "*.texItalic:latex": {
+            "italic": true
+          },
+          "*.declaration:latex": {
+            "bold": true
+          },
+          "texText:bibtex": {
+            "bold": false,
+            "italic": false
+          },
+          "*.texBold:bibtex": {
+            "bold": true
+          },
+          "*.texItalic:bibtex": {
+            "italic": true
+          },
+          "*.declaration:bibtex": {
+            "bold": true
+          }
+        }
       }
     },
     "commands": [
@@ -283,7 +322,129 @@
           "description": "Publish compiler-log diagnostics. Disable when another build integration supplies them; source linting and AUX information remain enabled."
         }
       }
-    }
+    },
+    "semanticTokenTypes": [
+      {
+        "id": "texText",
+        "description": "Ordinary prose, math operands, and printed BibTeX values."
+      },
+      {
+        "id": "texLiteral",
+        "description": "Literal contents with inactive TeX syntax."
+      },
+      {
+        "id": "texPath",
+        "description": "A resource path, URL, or DOI."
+      },
+      {
+        "id": "texMath",
+        "description": "Proven math or alignment structure."
+      }
+    ],
+    "semanticTokenModifiers": [
+      {
+        "id": "texBold",
+        "description": "Bold prose in a heading or textbf argument."
+      },
+      {
+        "id": "texItalic",
+        "description": "Emphasized prose."
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "latex",
+        "scopes": {
+          "texText": [
+            "text.tex.latex",
+            "meta.embedded"
+          ],
+          "texLiteral": [
+            "markup.raw",
+            "meta.embedded"
+          ],
+          "texPath": [
+            "string.other.path"
+          ],
+          "texMath": [
+            "keyword.operator"
+          ],
+          "macro": [
+            "entity.name.function.preprocessor"
+          ],
+          "keyword": [
+            "keyword"
+          ],
+          "function": [
+            "entity.name.function"
+          ],
+          "type": [
+            "entity.name.type"
+          ],
+          "variable": [
+            "variable.other.readwrite"
+          ],
+          "property": [
+            "support.type.property-name"
+          ],
+          "namespace": [
+            "entity.name.type"
+          ],
+          "number": [
+            "constant.numeric"
+          ],
+          "comment": [
+            "comment"
+          ]
+        }
+      },
+      {
+        "language": "bibtex",
+        "scopes": {
+          "texText": [
+            "text.bibtex",
+            "meta.embedded"
+          ],
+          "texLiteral": [
+            "markup.raw",
+            "meta.embedded"
+          ],
+          "texPath": [
+            "string.other.path"
+          ],
+          "texMath": [
+            "keyword.operator"
+          ],
+          "macro": [
+            "entity.name.function.preprocessor"
+          ],
+          "keyword": [
+            "keyword"
+          ],
+          "function": [
+            "entity.name.function"
+          ],
+          "type": [
+            "entity.name.type"
+          ],
+          "variable": [
+            "variable.other.readwrite"
+          ],
+          "property": [
+            "support.type.property-name"
+          ],
+          "namespace": [
+            "entity.name.type"
+          ],
+          "number": [
+            "constant.numeric"
+          ],
+          "comment": [
+            "comment"
+          ]
+        }
+      }
+    ]
   },
   "texLsServerVersion": "0.1.3",
   "icon": "images/icon.png",

@@ -1,0 +1,884 @@
+{
+  "initialize": {
+    "capabilities": {
+      "general": {
+        "positionEncodings": [
+          "utf-8"
+        ]
+      },
+      "textDocument": {
+        "definition": {
+          "linkSupport": false
+        },
+        "semanticTokens": {
+          "requests": {
+            "full": true,
+            "range": true
+          },
+          "formats": [
+            "relative"
+          ],
+          "tokenTypes": [
+            "macro",
+            "type",
+            "variable",
+            "property",
+            "keyword",
+            "string",
+            "number",
+            "namespace",
+            "operator",
+            "comment",
+            "function",
+            "parameter"
+          ],
+          "tokenModifiers": [
+            "declaration"
+          ]
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/chapters/intro.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "Introductory prose without declarations or references.\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\newcommand{\\pair}[1]{#1}\n1984 #1 $x_1+42$\n\\setcounter{section}{2}\n\\begin{minted}{python}\ndef café(x):\n    return x\n# \\ref{real}\n\"\\label{fake} \\ref{real}\"\n\\end{minted}\n\\begin{tikzpicture}\n\\draw (0,0) -- (1,1) node at (2,2) {1984};\n\\end{tikzpicture}\n\\label{real}\n\\verb|\\label{fake} \\ref{real}|\n\\detokenize{\\label{fake} \\ref{real}}\n\\ref{real}\n\\ref{fake}\n\\input{chapters/intro.tex}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 11
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          0,
+          0,
+          11,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 12
+          },
+          "end": {
+            "line": 0,
+            "character": 17
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          0,
+          12,
+          5,
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 22
+          },
+          "end": {
+            "line": 0,
+            "character": 24
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          0,
+          22,
+          2,
+          11,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 0
+          },
+          "end": {
+            "line": 1,
+            "character": 4
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 5
+          },
+          "end": {
+            "line": 1,
+            "character": 7
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 13
+          },
+          "end": {
+            "line": 1,
+            "character": 15
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 1,
+            "character": 10
+          },
+          "end": {
+            "line": 1,
+            "character": 11
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          1,
+          10,
+          1,
+          8,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 2,
+            "character": 21
+          },
+          "end": {
+            "line": 2,
+            "character": 22
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          2,
+          21,
+          1,
+          6,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 4,
+            "character": 0
+          },
+          "end": {
+            "line": 4,
+            "character": 3
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          4,
+          0,
+          3,
+          4,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 4,
+            "character": 4
+          },
+          "end": {
+            "line": 4,
+            "character": 9
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          4,
+          4,
+          5,
+          10,
+          1
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 5,
+            "character": 4
+          },
+          "end": {
+            "line": 5,
+            "character": 10
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          5,
+          4,
+          6,
+          4,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 6,
+            "character": 0
+          },
+          "end": {
+            "line": 6,
+            "character": 12
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          6,
+          0,
+          12,
+          9,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 7,
+            "character": 0
+          },
+          "end": {
+            "line": 7,
+            "character": 25
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 10,
+            "character": 12
+          },
+          "end": {
+            "line": 10,
+            "character": 14
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          10,
+          12,
+          2,
+          8,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 10,
+            "character": 21
+          },
+          "end": {
+            "line": 10,
+            "character": 25
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          10,
+          21,
+          4,
+          4,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 10,
+            "character": 26
+          },
+          "end": {
+            "line": 10,
+            "character": 28
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          10,
+          26,
+          2,
+          4,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 10,
+            "character": 36
+          },
+          "end": {
+            "line": 10,
+            "character": 40
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 12,
+            "character": 7
+          },
+          "end": {
+            "line": 12,
+            "character": 11
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          12,
+          7,
+          4,
+          2,
+          1
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 13,
+            "character": 6
+          },
+          "end": {
+            "line": 13,
+            "character": 29
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 14,
+            "character": 12
+          },
+          "end": {
+            "line": 14,
+            "character": 35
+          }
+        }
+      },
+      "expected": {
+        "data": []
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 15,
+            "character": 5
+          },
+          "end": {
+            "line": 15,
+            "character": 9
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          15,
+          5,
+          4,
+          2,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/range",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 17,
+            "character": 7
+          },
+          "end": {
+            "line": 17,
+            "character": 25
+          }
+        }
+      },
+      "expected": {
+        "data": [
+          17,
+          7,
+          18,
+          5,
+          0
+        ]
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 15,
+          "character": 6
+        }
+      },
+      "expected": [
+        {
+          "uri": "file:///portable/main.tex",
+          "range": {
+            "start": {
+              "line": 12,
+              "character": 7
+            },
+            "end": {
+              "line": 12,
+              "character": 11
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "textDocument/references",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 15,
+          "character": 6
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "expected": [
+        {
+          "uri": "file:///portable/main.tex",
+          "range": {
+            "start": {
+              "line": 15,
+              "character": 5
+            },
+            "end": {
+              "line": 15,
+              "character": 9
+            }
+          }
+        },
+        {
+          "uri": "file:///portable/main.tex",
+          "range": {
+            "start": {
+              "line": 12,
+              "character": 7
+            },
+            "end": {
+              "line": 12,
+              "character": 11
+            }
+          }
+        }
+      ]
+    },
+    {
+      "method": "textDocument/rename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 15,
+          "character": 6
+        },
+        "newName": "renamed"
+      },
+      "expected": {
+        "changes": {
+          "file:///portable/main.tex": [
+            {
+              "range": {
+                "start": {
+                  "line": 12,
+                  "character": 7
+                },
+                "end": {
+                  "line": 12,
+                  "character": 11
+                }
+              },
+              "newText": "renamed"
+            },
+            {
+              "range": {
+                "start": {
+                  "line": 15,
+                  "character": 5
+                },
+                "end": {
+                  "line": 15,
+                  "character": 9
+                }
+              },
+              "newText": "renamed"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 6,
+          "character": 8
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 6,
+          "character": 8
+        }
+      },
+      "expected": null
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 20
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 7,
+          "character": 20
+        }
+      },
+      "expected": null
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 13,
+          "character": 25
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 13,
+          "character": 25
+        }
+      },
+      "expected": null
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 14,
+          "character": 31
+        }
+      },
+      "expected": []
+    },
+    {
+      "method": "textDocument/prepareRename",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 14,
+          "character": 31
+        }
+      },
+      "expected": null
+    },
+    {
+      "method": "textDocument/definition",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///portable/main.tex"
+        },
+        "position": {
+          "line": 16,
+          "character": 6
+        }
+      },
+      "expected": []
+    }
+  ]
+}

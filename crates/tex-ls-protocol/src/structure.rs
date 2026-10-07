@@ -13,6 +13,7 @@ pub fn compute_folding(
             return Vec::new();
         };
         let idx = snapshot.file_line_index(file, encoding);
+        let mut positions = idx.position_cursor();
         return snapshot
             .parsed_bib_tree(file)
             .children()
@@ -34,8 +35,8 @@ pub fn compute_folding(
                     .filter(|token| matches!(token.kind(), Kind::R_BRACE | Kind::R_PAREN))?
                     .text_range()
                     .start();
-                let (start_line, start_character) = idx.position(start.into());
-                let (end_line, end_character) = idx.position(end.into());
+                let (start_line, start_character) = positions.position(start.into());
+                let (end_line, end_character) = positions.position(end.into());
                 (start_line < end_line).then_some(FoldingRange {
                     start_line,
                     start_character: Some(start_character),
@@ -60,19 +61,23 @@ pub fn compute_selection_range(
     kind: FileKind,
     positions: &[Position],
 ) -> Vec<SelectionRange> {
+    let Some(file) = snapshot.lookup_file(path) else {
+        return Vec::new();
+    };
+    let idx = snapshot.file_line_index(file, encoding);
+    let positions: Vec<_> = positions.iter().map(|p| (p.line, p.character)).collect();
+    let offsets = idx.offsets_at(&positions);
     if kind == FileKind::Bib {
-        let Some(file) = snapshot.lookup_file(path) else {
-            return Vec::new();
-        };
-        let idx = snapshot.file_line_index(file, encoding);
         let root = snapshot.parsed_bib_tree(file);
-        return positions
-            .iter()
-            .map(|position| {
-                let offset =
-                    TextSize::from(idx.offset_at(position.line, position.character) as u32);
+        let chains = offsets
+            .into_iter()
+            .map(|offset| {
+                snapshot.check_cancelled();
+                let offset = TextSize::from(offset as u32);
                 let mut ranges = Vec::new();
-                if let Some(token) = root.token_at_offset(offset).right_biased() {
+                if let Some(token) =
+                    tex_ls_parser::syntax::token_at_offset(&root, offset).right_biased()
+                {
                     ranges.push(token.text_range());
                     ranges.extend(token.parent_ancestors().map(|node| node.text_range()));
                 }
@@ -80,35 +85,20 @@ pub fn compute_selection_range(
                     ranges.push(root.text_range());
                 }
                 ranges.dedup();
-                let mut parent = None;
-                for range in ranges.into_iter().rev() {
-                    parent = Some(Box::new(SelectionRange {
-                        range: lsp_range(&idx, range),
-                        parent,
-                    }));
-                }
-                *parent.expect("selection includes root")
+                ranges
             })
             .collect();
+        return selection_range::from_chains(&idx, chains);
     }
-    let Some(file) = snapshot.lookup_file(path) else {
-        return Vec::new();
-    };
-    let idx = snapshot.file_line_index(file, encoding);
-    positions
-        .iter()
-        .map(|pos| {
-            let ranges = snapshot.selection_chain(file, idx.offset_at(pos.line, pos.character));
-            let mut parent = None;
-            for range in ranges.into_iter().rev() {
-                parent = Some(Box::new(SelectionRange {
-                    range: lsp_range(&idx, range),
-                    parent,
-                }));
-            }
-            *parent.expect("selection includes root")
+    let root = snapshot.parsed_tree(file);
+    let chains = offsets
+        .into_iter()
+        .map(|offset| {
+            snapshot.check_cancelled();
+            tex_ls_analysis::selection::selection_chain(&root, offset)
         })
-        .collect()
+        .collect();
+    selection_range::from_chains(&idx, chains)
 }
 
 /// Resolve links using one captured source and its corresponding line table.
@@ -125,12 +115,13 @@ pub fn compute_document_link(
         return Vec::new();
     };
     let idx = snapshot.file_line_index(file, encoding);
+    let mut positions = idx.position_cursor();
     snapshot
         .document_links(file)
         .into_iter()
         .filter_map(|target| {
             Some(DocumentLink {
-                range: lsp_range(&idx, target.range),
+                range: lsp_range_with_cursor(&mut positions, target.range),
                 target: Some(path_to_uri(&target.target)?),
                 tooltip: None,
                 data: None,
@@ -148,11 +139,12 @@ pub fn compute_bib_document_link(
         return Vec::new();
     };
     let idx = snapshot.file_line_index(file, encoding);
+    let mut positions = idx.position_cursor();
     tex_ls_analysis::bib::document_link::document_links(&snapshot.parsed_bib_tree(file))
         .into_iter()
         .filter_map(|link| {
             Some(DocumentLink {
-                range: lsp_range(&idx, link.range),
+                range: lsp_range_with_cursor(&mut positions, link.range),
                 target: Some(link.target.parse::<Uri>().ok()?),
                 tooltip: None,
                 data: None,

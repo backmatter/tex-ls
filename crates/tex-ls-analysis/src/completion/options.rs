@@ -5,6 +5,7 @@ pub fn classify(
     root: &SyntaxNode,
     offset: usize,
     declared: &ResolvedDeclarations,
+    file_roles: &crate::external::links::FileRoleContext,
 ) -> Option<CompletionContext> {
     let at = TextSize::from(offset as u32);
     let group = root
@@ -72,6 +73,12 @@ pub fn classify(
     } else {
         return None;
     };
+    if owner.kind() == SyntaxKind::COMMAND
+        && !file_roles.allows(&owner)
+        && !declared.options.contains_key(&name)
+    {
+        return None;
+    }
     let end = start - 1 + raw.len() - usize::from(raw.ends_with(']'));
     if offset > end {
         return None;

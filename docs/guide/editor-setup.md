@@ -52,6 +52,42 @@ vim.lsp.buf.format({ name = "tex-ls", async = false, timeout_ms = 5000 })
 An asynchronous integration must check the buffer's changed tick before applying
 edits. Other editors can use their generic LSP integration with the same command.
 
+## Syntax colors
+
+tex-ls reports source purposes through LSP semantic tokens. Your editor and theme
+choose their colors. Commands, parameters, names, keywords, numeric settings, and
+comments use standard token types. Printed numbers in prose, math, and BibTeX
+dates remain ordinary text. A reference color does not guarantee a resolved target.
+
+Clients can advertise these additional token types for more precise styling:
+
+| Type | Purpose |
+| --- | --- |
+| `texText` | Ordinary prose, math operands, and printed values |
+| `texLiteral` | Protected literal content |
+| `texPath` | Literal resource paths and URL destinations |
+| `texMath` | Proven math boundaries, scripts, and alignment separators |
+
+The `texBold` and `texItalic` modifiers describe prose typography; the standard
+`declaration` modifier marks definitions. These roles carry no prescribed colors
+or fonts. When clients support only standard types, paths fall back to `string`
+and math structure to `operator`. Unsupported neutral and literal roles are
+omitted, leaving those spans to the editor's syntax grammar.
+
+Python listing colors come from the shared language engine. Clients with their
+own embedded grammars can opt into `experimental.texEmbeddedHighlighting` for
+explicit C, C++, JavaScript, TypeScript, JSON, CSS, and HTML headers. The server
+then leaves those foreign spans to the client grammar. This capability affects
+highlighting only; source parsing
+and navigation remain the same across editors and native/browser hosts.
+Listing settings inside conditionals, dynamic option keys, and unproved setting
+arguments keep affected bodies protected. Earlier escape settings cannot prove
+active TeX after such an assignment. Local groups restore the previous settings.
+Copied or inspected command names remain navigable as names. Their following
+groups use the surrounding text or math mode and do not inherit reference, path,
+option, or typography roles from the copied command. Real commands inside those
+groups still receive their normal roles.
+
 ## Settings
 
 Supply `initializationOptions` or `workspace/didChangeConfiguration` as a bare
@@ -246,10 +282,18 @@ unknown-command checks as `.tex` documents. See
 [lint suppression comments](linting.md#rules) for package-generated commands that the
 static checker cannot recognize.
 
+Unknown-command quick fixes can insert a suppression for one construct or the
+whole file. For a large selection, tex-ls validates up to eight construct choices
+and one file-wide choice. These are explicit ignore actions and never enter Fix All.
+
 Hover, completion details, and signature help share documentation cards. Common
 commands and environments have short descriptions and manual links. Recognized TeX
 and e-TeX primitives get reference cards without invented brace arguments. Hover
 also works on control symbols, `\begin`/`\end`, and the head of `\verb`.
+
+Label hover and completion descriptions show the surrounding section, caption,
+or equation context. tex-ls caches these descriptions per source file and refreshes
+them after edits, so a long label list does not repeatedly scan the document.
 
 Source-defined commands and environments show definition links. A unique definition
 also shows nearby comment lines and a bounded source excerpt, including comments

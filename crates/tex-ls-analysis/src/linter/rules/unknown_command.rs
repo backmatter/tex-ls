@@ -30,14 +30,20 @@ impl Rule for UnknownCommand {
         if ctx.file_kind != crate::source::FileKind::Tex {
             return;
         }
-        let sites = crate::semantic::scan_definition_sites(ctx.root);
+        let contexts = tex_ls_parser::semantic::context::TokenListContexts::new(ctx.root);
+        let sites = ctx.definition_sites();
         let commands: HashSet<_> = sites
             .iter()
             .filter(|site| site.kind == crate::semantic::DefSiteKind::Command)
             .map(|site| site.name.as_str())
             .collect();
-        let metadata =
-            CommandMetadata::from_edges(&crate::project::collect_package_edge_keys(ctx.root, None));
+        let edges = crate::project::package::collect_package_edges_with_roles(
+            ctx.root,
+            None,
+            ctx.file_roles(),
+        );
+        let keys: Vec<_> = edges.iter().map(|edge| edge.key()).collect();
+        let metadata = CommandMetadata::from_edges(&keys);
         let mut ranges: Vec<_> = sites.iter().map(|site| site.range).collect();
         ranges.sort_by_key(|range| range.start());
         let mut index = 0;
@@ -46,6 +52,8 @@ impl Rule for UnknownCommand {
             .root
             .descendants()
             .filter(|node| node.kind() == SyntaxKind::COMMAND)
+            .filter(|node| !contexts.contains(node.text_range()))
+            .filter(|node| !ctx.is_operand_head(&node.clone().into()))
         {
             let inside_definition = node.text_range().end() <= definition_end;
             while index < ranges.len() && ranges[index].start() <= node.text_range().start() {

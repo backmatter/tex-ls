@@ -1,0 +1,147 @@
+[
+  {
+    "name": "plain-python",
+    "source": "\\begin{minted}{python}\ndef square(x):\n    return x * x\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "minted-escape-code",
+    "source": "\\begin{minted}[escapeinside=||]{python}\nx = 1 |\\ref{eq:live}|\n\\end{minted}",
+    "references": 1
+  },
+  {
+    "name": "minted-escape-string",
+    "source": "\\begin{minted}[escapeinside=||]{python}\nx = \"|\\ref{eq:literal}|\"\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "minted-escape-comment",
+    "source": "\\begin{minted}[escapeinside=||]{python}\n# |\\ref{eq:literal}|\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "minted-mathescape",
+    "source": "\\begin{minted}[mathescape]{python}\n# formula $x_1 + 42$\nx = \"$x_1 + 42$\"\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "minted-texcomments",
+    "source": "\\begin{minted}[texcomments]{python}\n# See \\ref{eq:live}\nx = 1\n\\end{minted}",
+    "references": 1
+  },
+  {
+    "name": "listing-escape-code",
+    "source": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}",
+    "references": 1
+  },
+  {
+    "name": "listing-escape-string",
+    "source": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\nx = \"(*@\\ref{eq:literal}@*)\"\n\\end{lstlisting}",
+    "references": 1
+  },
+  {
+    "name": "listing-escape-comment",
+    "source": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\n# (*@\\ref{eq:live}@*)\n\\end{lstlisting}",
+    "references": 1
+  },
+  {
+    "name": "listing-mathescape",
+    "source": "\\begin{lstlisting}[language=Python,mathescape]\nx = $\\ref{eq:live}$\n# $\\ref{eq:live}$\nx = \"$\\ref{eq:literal}$\"\n\\end{lstlisting}",
+    "references": 3
+  },
+  {
+    "name": "listing-global-default",
+    "source": "\\lstset{language=Python,escapeinside={(*@}{@*)}}\n\\begin{lstlisting}\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}",
+    "references": 1
+  },
+  {
+    "name": "listing-style-default",
+    "source": "\\lstdefinestyle{demo}{language=Python,escapeinside={(*@}{@*)}}\n\\begin{lstlisting}[style=demo]\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}",
+    "references": 1
+  },
+  {
+    "name": "minted-alias",
+    "source": "\\newminted{python}{linenos}\n\\begin{pythoncode}\nx = \"\\ref{eq:literal}\"\n\\end{pythoncode}",
+    "references": 0
+  },
+  {
+    "name": "minted-inline-alias",
+    "source": "\\newmintinline[pyinline]{python}{}\n\\pyinline|\"\\ref{eq:literal}\"|",
+    "references": 0
+  },
+  {
+    "name": "listing-environment-alias",
+    "source": "\\lstnewenvironment{pycode}{\\lstset{language=Python}}{}\n\\begin{pycode}\nx = \"\\ref{eq:literal}\"\n\\end{pycode}",
+    "references": 0
+  },
+  {
+    "name": "fancy-commandchars",
+    "source": "\\begin{Verbatim}[commandchars=\\\\\\{\\}]\nSee \\ref{eq:live}\n\\end{Verbatim}",
+    "references": 1
+  },
+  {
+    "name": "fancy-short-verb",
+    "source": "\\DefineShortVerb{\\|}\n|\\ref{eq:literal}|",
+    "references": 0
+  },
+  {
+    "name": "included-comment",
+    "source": "\\includecomment{comment}\n\\begin{comment}\nSee \\ref{eq:live}\n\\end{comment}",
+    "references": 1
+  },
+  {
+    "name": "custom-excluded-comment",
+    "source": "\\excludecomment{private}\n\\begin{private}\n\\ref{eq:literal}\n\\end{private}",
+    "references": 0
+  },
+  {
+    "name": "comment-false-closer",
+    "source": "\\begin{comment}\nprinted \\end{comment} suffix\n\\ref{eq:literal}\n\\end{comment}\nSee \\ref{eq:live}",
+    "references": 1
+  },
+  {
+    "name": "catcode-percent",
+    "source": "\\catcode`\\%=12\n% See \\ref{eq:live}\n\\catcode`\\%=14",
+    "references": 1
+  },
+  {
+    "name": "catcode-dollar",
+    "source": "\\catcode`\\$=12\n$x+1$\n\\catcode`\\$=3",
+    "references": 0
+  },
+  {
+    "name": "catcode-at",
+    "source": "\\catcode`\\@=11\n\\demo@name\n\\catcode`\\@=12\n\\demo@name",
+    "references": 0
+  },
+  {
+    "name": "grouped-makeatletter",
+    "source": "{\\makeatletter \\demo@name}\n\\demo@name",
+    "references": 0
+  },
+  {
+    "name": "grouped-explsyntax",
+    "source": "{\\ExplSyntaxOn \\demo:n}\n\\demo:n",
+    "references": 0
+  },
+  {
+    "name": "conditional-catcodes",
+    "source": "\\ifexample\n\\catcode`\\%=12\n\\else\n\\catcode`\\%=14\n\\fi\n% See \\ref{eq:maybe}",
+    "references": 0
+  },
+  {
+    "name": "dynamic-language",
+    "source": "\\begin{minted}{\\projectlanguage}\nx = \"\\ref{eq:literal}\"\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "dynamic-escape",
+    "source": "\\begin{minted}[escapeinside=\\projectescape]{python}\nx = 1 |\\ref{eq:maybe}|\n\\end{minted}",
+    "references": 0
+  },
+  {
+    "name": "unfinished-escape",
+    "source": "\\begin{minted}[escapeinside=||]{python}\nx = 1 |\\ref{eq:maybe}\n\\end{minted}\n\\ref{eq:live}",
+    "references": 1
+  }
+]

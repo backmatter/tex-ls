@@ -4,6 +4,7 @@
 //! source, including verbatim regions and explicit catcode toggles.
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use smol_str::SmolStr;
 
@@ -67,9 +68,12 @@ impl From<LatexFlavor> for LexConfig {
 /// Per-parse facts discovered from definitions or project declarations.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ParseCtx {
+    pub(crate) reparse_guard: super::embedded::ReparseGuard,
     commands: HashMap<SmolStr, Vec<ArgSpec>>,
     environments: HashMap<SmolStr, Vec<ArgSpec>>,
     suppressed: HashSet<SmolStr>,
+    reader_overrides: HashMap<SmolStr, usize>,
+    non_verbatim_environments: HashSet<SmolStr>,
     begin_aliases: HashMap<SmolStr, SmolStr>,
     end_aliases: HashMap<SmolStr, SmolStr>,
     declared_environments: HashMap<SmolStr, EnvironmentSig>,
@@ -84,6 +88,8 @@ impl ParseCtx {
         self.commands.is_empty()
             && self.environments.is_empty()
             && self.suppressed.is_empty()
+            && self.reader_overrides.is_empty()
+            && self.non_verbatim_environments.is_empty()
             && self.begin_aliases.is_empty()
             && self.end_aliases.is_empty()
             && self.declared_environments.is_empty()
@@ -94,6 +100,7 @@ impl ParseCtx {
         let db = declared.as_db();
         for name in db.environment_names() {
             if let Some(sig) = db.environment(name) {
+                self.non_verbatim_environments.remove(name);
                 self.declared_environments
                     .insert(SmolStr::new(name), sig.clone());
             }
@@ -114,8 +121,42 @@ impl ParseCtx {
         self.suppressed.insert(name);
     }
 
-    fn is_suppressed(&self, name: &str) -> bool {
+    pub(crate) fn suppress_reader_after(&mut self, name: SmolStr, offset: usize) {
+        self.reader_overrides
+            .entry(name)
+            .and_modify(|earliest| *earliest = (*earliest).min(offset))
+            .or_insert(offset);
+    }
+
+    fn is_reader_suppressed_at(&self, name: &str, offset: usize) -> bool {
+        self.is_suppressed(name)
+            || self
+                .reader_overrides
+                .get(name)
+                .is_some_and(|start| *start <= offset)
+    }
+
+    pub(crate) fn reader_overrides_after_or_at(&self, offset: usize) -> bool {
+        self.reader_overrides.values().any(|start| *start >= offset)
+    }
+
+    pub(crate) fn rebased_for_fragment(&self, offset: usize) -> std::borrow::Cow<'_, Self> {
+        if self.reader_overrides.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut rebased = self.clone();
+        for start in rebased.reader_overrides.values_mut() {
+            *start = start.saturating_sub(offset);
+        }
+        std::borrow::Cow::Owned(rebased)
+    }
+
+    pub(crate) fn is_suppressed(&self, name: &str) -> bool {
         self.suppressed.contains(name)
+    }
+
+    pub(crate) fn suppress_environment(&mut self, name: SmolStr) {
+        self.non_verbatim_environments.insert(name);
     }
 
     pub(crate) fn insert_environment(&mut self, name: SmolStr, args: Vec<ArgSpec>) {
@@ -130,7 +171,17 @@ impl ParseCtx {
         !name.is_empty()
             && name.bytes().all(|b| b.is_ascii_lowercase())
             && !reads_following_text(text)
-            && !matches!(name, "verb" | "makeatletter" | "makeatother")
+            && !matches!(
+                name,
+                "verb"
+                    | "makeatletter"
+                    | "makeatother"
+                    | "begingroup"
+                    | "endgroup"
+                    | "bgroup"
+                    | "egroup"
+            )
+            && !super::embedded::observes_settings_command(name)
             && !self.commands.contains_key(name)
             && !self.begin_aliases.contains_key(name)
             && !self.end_aliases.contains_key(name)
@@ -151,6 +202,15 @@ impl ParseCtx {
     }
 
     pub(crate) fn is_verbatim_environment(&self, name: &str) -> bool {
+        if name == "alltt"
+            && !self.environments.contains_key(name)
+            && self.declared_environment(name).is_none()
+        {
+            return false;
+        }
+        if self.non_verbatim_environments.contains(name) {
+            return false;
+        }
         match self.declared_environment(name) {
             Some(sig) => sig.verbatim_body,
             None => {
@@ -256,6 +316,138 @@ pub(crate) fn definition_name_slots(text: &str) -> u8 {
     }
 }
 
+pub(crate) fn primitive_operand_reader(name: &str) -> bool {
+    matches!(
+        name,
+        "meaning"
+            | "show"
+            | "noexpand"
+            | "futurelet"
+            | "let"
+            | "NewCommandCopy"
+            | "RenewCommandCopy"
+            | "DeclareCommandCopy"
+            | "ifx"
+            | "ifdefined"
+    )
+}
+
+/// Literal control-sequence operands do not execute their spelling. This
+/// bounded scan covers declaration names, copies and direct token inspection.
+/// Futurelet's destination is an operand; its following tokens execute again.
+#[derive(Debug, Default)]
+pub(crate) struct PrimitiveOperandScan {
+    remaining: u8,
+    braced: bool,
+    let_equals: bool,
+    compared: bool,
+    skip_spaces: bool,
+    comment_line: bool,
+}
+
+impl PrimitiveOperandScan {
+    fn has_operand(&self) -> bool {
+        self.remaining > 0
+    }
+
+    pub(crate) fn observe(&mut self, kind: SyntaxKind, text: &str, ctx: &ParseCtx) -> bool {
+        self.observe_at(kind, text, ctx, 0)
+    }
+
+    pub(crate) fn observe_at(
+        &mut self,
+        kind: SyntaxKind,
+        text: &str,
+        ctx: &ParseCtx,
+        offset: usize,
+    ) -> bool {
+        if self.compared && self.remaining > 0 {
+            if kind == SyntaxKind::COMMENT {
+                self.comment_line = true;
+                return false;
+            }
+            if kind == SyntaxKind::NEWLINE && self.comment_line {
+                self.comment_line = false;
+                self.skip_spaces = true;
+                return false;
+            }
+            if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
+                if !self.skip_spaces {
+                    self.remaining -= 1;
+                    self.skip_spaces = true;
+                }
+                return false;
+            }
+            if matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD) {
+                return false;
+            }
+            self.comment_line = false;
+            let control = matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL);
+            // WORD coalesces source characters, but ifx compares exactly two
+            // tokens. A run of two ordinary characters exhausts both operands.
+            let count = if kind == SyntaxKind::WORD {
+                text.chars().take(self.remaining as usize).count() as u8
+            } else {
+                1
+            };
+            self.remaining = self.remaining.saturating_sub(count);
+            self.skip_spaces = kind == SyntaxKind::CONTROL_WORD;
+            return control;
+        }
+        if crate::syntax::is_trivia(kind)
+            || matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD)
+        {
+            return false;
+        }
+        if self.remaining > 0 {
+            if self.braced && matches!(kind, SyntaxKind::L_BRACE | SyntaxKind::R_BRACE) {
+                return false;
+            }
+            if self.let_equals
+                && self.remaining == 1
+                && kind == SyntaxKind::WORD
+                && text.starts_with('=')
+            {
+                self.let_equals = false;
+                if text.len() > 1 {
+                    self.remaining = 0;
+                }
+                return false;
+            }
+            let operand = matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL);
+            if operand {
+                self.remaining -= 1;
+            } else {
+                self.remaining = 0;
+            }
+            return operand;
+        }
+        if kind == SyntaxKind::CONTROL_WORD
+            && !text
+                .get(1..)
+                .is_some_and(|name| ctx.is_reader_suppressed_at(name, offset))
+        {
+            let name = text.get(1..).unwrap_or_default();
+            self.remaining = match name {
+                "meaning" | "show" | "noexpand" | "futurelet" | "ifdefined" => 1,
+                "let" | "NewCommandCopy" | "RenewCommandCopy" | "DeclareCommandCopy" => 2,
+                "ifx" => 2,
+                _ => definition_name_slots(text),
+            };
+            self.braced = (is_definition_keyword(text) && name != "let")
+                || matches!(
+                    name,
+                    "NewCommandCopy" | "RenewCommandCopy" | "DeclareCommandCopy"
+                );
+            self.let_equals = name == "let";
+            self.compared = name == "ifx";
+            self.skip_spaces = true;
+            self.comment_line = false;
+        }
+        false
+    }
+}
+
 fn is_literal_token_command(text: &str) -> bool {
     matches!(
         text,
@@ -329,6 +521,52 @@ pub(crate) fn lex_with_implicit_expl(
     Lexer::new(input, ctx, config, Some(implicit_expl)).run()
 }
 
+pub(crate) fn lex_literal_commands(
+    input: &str,
+    chars: [char; 3],
+    comment: Option<char>,
+    ctx: &ParseCtx,
+    config: LexConfig,
+) -> Vec<Token> {
+    let normalized: String = input
+        .chars()
+        .map(|c| {
+            if c == chars[0] {
+                '\\'
+            } else if c == chars[1] {
+                '{'
+            } else if c == chars[2] {
+                '}'
+            } else if matches!(c, '\\' | '{' | '}') {
+                '\u{1}'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let mut lexer = Lexer::new(&normalized, ctx, config, None);
+    lexer.alltt = true;
+    lexer.alltt_comment = comment;
+    lexer.opaque_nested_captures = true;
+    let mut tokens = lexer.run();
+    let mut offset = 0;
+    let mut depth = 0usize;
+    for token in &mut tokens {
+        let len = token.text.len();
+        token.text = SmolStr::new(&input[offset..offset + len]);
+        offset += len;
+        match token.kind {
+            SyntaxKind::L_BRACE => depth += 1,
+            SyntaxKind::R_BRACE => depth = depth.saturating_sub(1),
+            SyntaxKind::WORD | SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE if depth == 0 => {
+                token.kind = SyntaxKind::VERBATIM_BODY;
+            }
+            _ => {}
+        }
+    }
+    tokens
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pending {
     Delim,
@@ -341,6 +579,27 @@ enum Pending {
 struct MacrocodeSave {
     at_letter: bool,
     expl_syntax: bool,
+}
+
+#[derive(Clone, Copy)]
+struct AllttSave {
+    depth: usize,
+    at_letter: bool,
+    expl_syntax: bool,
+    alltt: bool,
+}
+
+#[derive(Clone)]
+struct ScopeSave {
+    at_letter: bool,
+    expl_syntax: bool,
+    percent_comment: bool,
+    dollar_math: bool,
+    uncertain_percent: bool,
+    uncertain_dollar: bool,
+    uncertain_at: bool,
+    short_verbs: Vec<char>,
+    embedded: Rc<super::embedded::State>,
 }
 
 struct Lexer<'a> {
@@ -359,6 +618,23 @@ struct Lexer<'a> {
     pending: Option<Pending>,
     brace_depth: usize,
     brace_counted: usize,
+    alltt: bool,
+    alltt_stack: Vec<AllttSave>,
+    token_list_depth: Option<usize>,
+    token_list_pending: bool,
+    scopes: Vec<ScopeSave>,
+    embedded: Rc<super::embedded::State>,
+    percent_comment: bool,
+    dollar_math: bool,
+    uncertain_percent: bool,
+    uncertain_dollar: bool,
+    uncertain_at: bool,
+    conditional_depth: usize,
+    alltt_comment: Option<char>,
+    opaque_nested_captures: bool,
+    global_prefix: bool,
+    stringify_next: bool,
+    primitive_operands: PrimitiveOperandScan,
 }
 
 impl<'a> Lexer<'a> {
@@ -389,12 +665,50 @@ impl<'a> Lexer<'a> {
             pending: None,
             brace_depth: 0,
             brace_counted: 0,
+            alltt: false,
+            alltt_stack: Vec::new(),
+            token_list_depth: None,
+            token_list_pending: false,
+            scopes: Vec::new(),
+            embedded: Rc::default(),
+            percent_comment: true,
+            dollar_math: true,
+            uncertain_percent: false,
+            uncertain_dollar: false,
+            uncertain_at: false,
+            conditional_depth: 0,
+            alltt_comment: None,
+            opaque_nested_captures: false,
+            global_prefix: false,
+            stringify_next: false,
+            primitive_operands: PrimitiveOperandScan::default(),
         }
     }
 
     fn run(mut self) -> Vec<Token> {
         while self.pos < self.input.len() {
             self.sync_brace_depth();
+            if self
+                .token_list_depth
+                .is_some_and(|depth| self.brace_depth < depth)
+            {
+                self.token_list_depth = None;
+            }
+            if self.stringify_next {
+                let word_len = control_word_len(self.rest(), self.at_letter, self.expl_syntax);
+                self.lex_token(word_len);
+                continue;
+            }
+            if self.token_list_depth.is_some() {
+                let word_len = control_word_len(self.rest(), self.at_letter, self.expl_syntax);
+                self.lex_token(word_len);
+                continue;
+            }
+            if self.primitive_operands.has_operand() {
+                let word_len = control_word_len(self.rest(), self.at_letter, self.expl_syntax);
+                self.lex_token(word_len);
+                continue;
+            }
             // These bytes cannot start a capture or a mode transition. Keep the
             // ordinary token routine authoritative for boundaries and state;
             // avoid probing every raw-capture family for each prose token.
@@ -409,6 +723,7 @@ impl<'a> Lexer<'a> {
             if self.try_macrocode_frame()
                 || self.try_guard()
                 || self.try_doc_margin()
+                || self.try_alltt_environment()
                 || self.try_verbatim_environment()
                 || self.try_verbatim_arg_environment()
             {
@@ -447,11 +762,45 @@ impl<'a> Lexer<'a> {
     fn sync_brace_depth(&mut self) {
         while self.brace_counted < self.out.len() {
             match self.out[self.brace_counted].kind {
-                SyntaxKind::L_BRACE => self.brace_depth += 1,
-                SyntaxKind::R_BRACE => self.brace_depth = self.brace_depth.saturating_sub(1),
+                SyntaxKind::L_BRACE => {
+                    self.brace_depth += 1;
+                    self.save_scope();
+                }
+                SyntaxKind::R_BRACE => {
+                    self.brace_depth = self.brace_depth.saturating_sub(1);
+                    self.restore_scope();
+                }
                 _ => {}
             }
             self.brace_counted += 1;
+        }
+    }
+
+    fn save_scope(&mut self) {
+        self.scopes.push(ScopeSave {
+            at_letter: self.at_letter,
+            expl_syntax: self.expl_syntax,
+            percent_comment: self.percent_comment,
+            dollar_math: self.dollar_math,
+            uncertain_percent: self.uncertain_percent,
+            uncertain_dollar: self.uncertain_dollar,
+            uncertain_at: self.uncertain_at,
+            short_verbs: self.short_verbs.clone(),
+            embedded: self.embedded.clone(),
+        });
+    }
+
+    fn restore_scope(&mut self) {
+        if let Some(save) = self.scopes.pop() {
+            self.at_letter = save.at_letter;
+            self.expl_syntax = save.expl_syntax;
+            self.percent_comment = save.percent_comment;
+            self.dollar_math = save.dollar_math;
+            self.uncertain_percent = save.uncertain_percent;
+            self.uncertain_dollar = save.uncertain_dollar;
+            self.uncertain_at = save.uncertain_at;
+            self.short_verbs = save.short_verbs;
+            self.embedded = save.embedded;
         }
     }
 
@@ -519,8 +868,123 @@ impl<'a> Lexer<'a> {
         true
     }
 
+    // alltt keeps control sequences and groups active, but makes the other
+    // TeX special characters literal. Never treat it as an opaque raw body.
+    fn try_alltt_environment(&mut self) -> bool {
+        let rest = self.rest();
+        if self.pending == Some(Pending::Def) {
+            return false;
+        }
+        if let Some(("alltt", prefix_len)) = begin_name(rest) {
+            if self.ctx.environments.contains_key("alltt")
+                || self.ctx.declared_environment("alltt").is_some()
+                || self.ctx.non_verbatim_environments.contains("alltt")
+            {
+                return false;
+            }
+            self.alltt_stack.push(AllttSave {
+                depth: self.brace_depth,
+                at_letter: self.at_letter,
+                expl_syntax: self.expl_syntax,
+                alltt: self.alltt,
+            });
+            push_env_delimiter(&mut self.out, "\\begin", "alltt");
+            self.consume(prefix_len);
+            self.alltt = true;
+            return true;
+        }
+        if self.alltt
+            && let Some(after) = rest.strip_prefix("\\end")
+        {
+            let after = skip_inline_ws(after);
+            if let Some(tail) = after.strip_prefix("{alltt}")
+                && self
+                    .alltt_stack
+                    .last()
+                    .is_some_and(|save| save.depth == self.brace_depth)
+            {
+                let save = self.alltt_stack.pop().unwrap();
+                push_env_delimiter(&mut self.out, "\\end", "alltt");
+                self.consume(rest.len() - tail.len());
+                self.at_letter = save.at_letter;
+                self.expl_syntax = save.expl_syntax;
+                self.alltt = save.alltt;
+                return true;
+            }
+        }
+        false
+    }
+
     fn try_verbatim_environment(&mut self) -> bool {
         let (rest, ctx) = (self.rest(), self.ctx);
+        if let Some((name, prefix_len)) = begin_name(rest) {
+            let comment = self
+                .embedded
+                .comments
+                .get(name)
+                .copied()
+                .or_else(|| (name == "comment").then_some(Some(false)));
+            if let Some(included) = comment
+                && !ctx.non_verbatim_environments.contains(name)
+                && ctx
+                    .declared_environment(name)
+                    .is_none_or(|sig| sig.verbatim_body && builtin().environment(name) == Some(sig))
+            {
+                push_env_delimiter(&mut self.out, "\\begin", name);
+                if included == Some(true) && !self.opaque_nested_captures {
+                    self.consume(prefix_len);
+                    return true;
+                }
+                let region = &rest[prefix_len..];
+                let len = comment_body_len(region, name);
+                if len > 0 {
+                    self.push(
+                        if included == Some(false) {
+                            SyntaxKind::EXCLUDED_BODY
+                        } else {
+                            SyntaxKind::VERBATIM_BODY
+                        },
+                        &region[..len],
+                    );
+                }
+                self.consume(prefix_len + len);
+                return true;
+            }
+            if let Some(spec) = self.embedded.environment(name, &rest[prefix_len..])
+                && !ctx.non_verbatim_environments.contains(name)
+                && ctx
+                    .declared_environment(name)
+                    .is_none_or(|sig| builtin().environment(name) == Some(sig))
+            {
+                let header = &rest[prefix_len..];
+                let mut args_len = 0;
+                if !header
+                    .trim_start_matches([' ', '\t'])
+                    .starts_with(['\n', '\r'])
+                    && let Some((_, tail)) = super::embedded::argument(header, '[', ']')
+                {
+                    args_len = header.len() - tail.len();
+                }
+                if (name == "minted"
+                    || name.ends_with('*') && self.embedded.environments.contains_key(name))
+                    && let Some((_, tail)) =
+                        super::embedded::argument(&header[args_len..], '{', '}')
+                {
+                    args_len = header.len() - tail.len();
+                }
+                push_env_delimiter(&mut self.out, "\\begin", name);
+                lex_into(&header[..args_len], &mut self.out);
+                let region = &header[args_len..];
+                let len = verbatim_body_len(region, name);
+                if self.opaque_nested_captures {
+                    self.push(SyntaxKind::VERBATIM_BODY, &region[..len]);
+                } else {
+                    super::embedded::body(&region[..len], &spec, &mut self.out, ctx, self.config);
+                }
+                self.consume(prefix_len + args_len + len);
+                return true;
+            }
+        }
         let Some(consumed) = lex_verbatim_environment(rest, ctx, &mut self.out) else {
             return false;
         };
@@ -545,6 +1009,69 @@ impl<'a> Lexer<'a> {
             return false;
         }
         let (rest, ctx) = (self.rest(), self.ctx);
+        if let Some(word_len) = word_len
+            && !ctx.is_suppressed(&rest[1..word_len])
+            && let Some(spec) = self.embedded.inline(&rest[1..word_len], &rest[word_len..])
+        {
+            let name = &rest[1..word_len];
+            if !spec.settings.python() && !self.embedded.inline.contains_key(name) {
+                let consumed = lex_verbatim_command(
+                    rest,
+                    Some(word_len),
+                    ctx,
+                    self.config.dtx && self.in_doc_line,
+                    &mut self.out,
+                );
+                if let Some(consumed) = consumed {
+                    self.consume(consumed);
+                    return true;
+                }
+                return false;
+            }
+            let mut head = word_len;
+            if let Some((_, tail)) = super::embedded::argument(&rest[head..], '[', ']') {
+                head = rest.len() - tail.len();
+            }
+            if matches!(name, "mintinline" | "mint")
+                && let Some((_, tail)) = super::embedded::argument(&rest[head..], '{', '}')
+            {
+                head = rest.len() - tail.len();
+            }
+            head += tex_whitespace_len(&rest[head..]);
+            let region = &rest[head..];
+            let len = if region.starts_with('{') {
+                balanced_group_len(region, b'}')
+            } else {
+                delimited_len(region)
+            };
+            if let Some(len) = len
+                && let Some(open) = region.chars().next()
+            {
+                let close = if open == '{' { '}' } else { open };
+                let closed = len > open.len_utf8() && region[..len].ends_with(close);
+                let end = len - usize::from(closed) * close.len_utf8();
+                self.push(SyntaxKind::CONTROL_WORD, &rest[..word_len]);
+                lex_into(&rest[word_len..head], &mut self.out);
+                if !closed {
+                    self.push(SyntaxKind::VERB, &region[..len]);
+                    self.consume(head + len);
+                    return true;
+                }
+                self.push(SyntaxKind::CODE_OPEN, &region[..open.len_utf8()]);
+                super::embedded::body(
+                    &region[open.len_utf8()..end],
+                    &spec,
+                    &mut self.out,
+                    ctx,
+                    self.config,
+                );
+                if closed {
+                    self.push(SyntaxKind::CODE_CLOSE, &region[end..len]);
+                }
+                self.consume(head + len);
+                return true;
+            }
+        }
         let Some(consumed) = lex_verbatim_command(
             rest,
             word_len,
@@ -576,6 +1103,10 @@ impl<'a> Lexer<'a> {
         let Some(len) = delimited_len(rest) else {
             return false;
         };
+        let delimiter = rest.chars().next().unwrap();
+        if len <= delimiter.len_utf8() || !rest[..len].ends_with(delimiter) {
+            return false;
+        }
         self.push(SyntaxKind::VERB, &rest[..len]);
         self.consume(len);
         true
@@ -627,7 +1158,103 @@ impl<'a> Lexer<'a> {
 
     fn lex_token(&mut self, word_len: Option<usize>) {
         let rest = self.rest();
-        let (kind, mut len) = next_token(rest, word_len, self.expl_syntax);
+        let (mut kind, mut len) = next_token(rest, word_len, self.expl_syntax);
+        if self.alltt && self.alltt_comment.is_some_and(|c| rest.starts_with(c)) {
+            kind = SyntaxKind::COMMENT;
+            len = run_len(rest, |c| c != '\n' && c != '\r');
+        } else if self.alltt
+            && kind == SyntaxKind::WORD
+            && let Some(comment) = self.alltt_comment
+            && let Some(at) = rest[..len].find(comment)
+        {
+            len = at;
+        }
+        if !self.alltt {
+            if rest.starts_with('%') && (self.uncertain_percent || !self.percent_comment) {
+                kind = if self.uncertain_percent {
+                    SyntaxKind::UNCERTAIN
+                } else {
+                    SyntaxKind::WORD
+                };
+                len = if self.uncertain_percent {
+                    run_len(rest, |c| c != '\n' && c != '\r')
+                } else {
+                    1
+                };
+            } else if rest.starts_with('$') && (self.uncertain_dollar || !self.dollar_math) {
+                kind = if self.uncertain_dollar {
+                    SyntaxKind::UNCERTAIN
+                } else {
+                    SyntaxKind::WORD
+                };
+                len = if self.uncertain_dollar {
+                    run_len(rest, |c| c != '\n' && c != '\r')
+                } else {
+                    1
+                };
+            }
+        }
+        if self.uncertain_at && rest.starts_with('\\') {
+            let count = run_len(&rest[1..], |c| {
+                c.is_ascii_alphabetic() || c == '@' || self.expl_syntax && matches!(c, ':' | '_')
+            });
+            if rest[1..1 + count].contains('@') {
+                kind = SyntaxKind::UNCERTAIN;
+                len = 1 + count;
+            }
+        }
+        if self.token_list_pending && kind == SyntaxKind::L_BRACE {
+            self.token_list_depth = Some(self.brace_depth + 1);
+        }
+        if self.token_list_pending
+            && !matches!(
+                kind,
+                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            )
+        {
+            self.token_list_pending = false;
+        }
+        if self.token_list_depth.is_some()
+            && !matches!(
+                kind,
+                SyntaxKind::L_BRACE
+                    | SyntaxKind::R_BRACE
+                    | SyntaxKind::HASH
+                    | SyntaxKind::COMMENT
+                    | SyntaxKind::WHITESPACE
+                    | SyntaxKind::NEWLINE
+            )
+        {
+            kind = SyntaxKind::WORD;
+        }
+        let operand_kind = if self.stringify_next && !crate::syntax::is_trivia(kind) {
+            SyntaxKind::STRINGIFIED_TOKEN
+        } else {
+            kind
+        };
+        let inert_operand =
+            self.primitive_operands
+                .observe_at(operand_kind, &rest[..len], self.ctx, self.pos);
+        if kind == SyntaxKind::CONTROL_WORD
+            && &rest[..len] == "\\detokenize"
+            && !inert_operand
+            && !self.stringify_next
+            && self.pending != Some(Pending::Def)
+            && !self.ctx.is_suppressed("detokenize")
+        {
+            self.token_list_pending = true;
+        }
+        if self.alltt
+            && !(kind == SyntaxKind::COMMENT
+                && self.alltt_comment.is_some_and(|c| rest.starts_with(c)))
+            && matches!(
+                rest.as_bytes()[0],
+                b'%' | b'$' | b'#' | b'^' | b'_' | b'&' | b'~'
+            )
+        {
+            kind = SyntaxKind::WORD;
+            len = 1;
+        }
         if self.pending == Some(Pending::Delim) && kind == SyntaxKind::WORD {
             len = rest.chars().next().expect("rest is non-empty").len_utf8();
         }
@@ -639,9 +1266,33 @@ impl<'a> Lexer<'a> {
         {
             len = if i == 0 { c.len_utf8() } else { i };
         }
+        if self.stringify_next
+            && !matches!(
+                kind,
+                SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+            )
+        {
+            self.stringify_next = false;
+            if kind != SyntaxKind::UNCERTAIN {
+                len = if let Some(word_len) = word_len {
+                    word_len
+                } else if kind == SyntaxKind::CONTROL_SYMBOL {
+                    len
+                } else {
+                    rest.chars().next().unwrap().len_utf8()
+                };
+                kind = SyntaxKind::STRINGIFIED_TOKEN;
+            }
+        }
         debug_assert!(len > 0, "lexer made no progress at byte {}", self.pos);
         let text = &rest[..len];
-        if kind == SyntaxKind::CONTROL_WORD {
+        if kind == SyntaxKind::CONTROL_WORD && !inert_operand {
+            if text == "\\string"
+                && self.pending != Some(Pending::Def)
+                && !self.ctx.is_suppressed("string")
+            {
+                self.stringify_next = true;
+            }
             self.apply_toggles(text, &rest[len..]);
         }
         self.pending = next_pending(self.pending, kind, text);
@@ -655,17 +1306,81 @@ impl<'a> Lexer<'a> {
     }
 
     fn apply_toggles(&mut self, text: &str, after: &str) {
+        if self.pending == Some(Pending::Def) {
+            return;
+        }
+        if text == "\\global" {
+            self.global_prefix = true;
+            return;
+        }
+        if text != "\\catcode" {
+            self.global_prefix = false;
+        }
+        if super::embedded::observes_settings_command(&text[1..])
+            && !self.ctx.is_suppressed(&text[1..])
+        {
+            Rc::make_mut(&mut self.embedded).observe(text, after, self.conditional_depth > 0);
+        }
         match text {
+            "\\begingroup" | "\\bgroup" => self.save_scope(),
+            "\\endgroup" | "\\egroup" => self.restore_scope(),
+            "\\catcode" => {
+                if let Some((character, value)) = literal_catcode(after) {
+                    let uncertain = self.conditional_depth > 0;
+                    match character {
+                        '%' => {
+                            self.uncertain_percent = uncertain || !matches!(value, Some(12 | 14));
+                            if !self.uncertain_percent {
+                                self.percent_comment = value == Some(14);
+                            }
+                        }
+                        '$' => {
+                            self.uncertain_dollar = uncertain || !matches!(value, Some(3 | 12));
+                            if !self.uncertain_dollar {
+                                self.dollar_math = value == Some(3);
+                            }
+                        }
+                        '@' => {
+                            self.uncertain_at = uncertain || !matches!(value, Some(11 | 12));
+                            if !self.uncertain_at {
+                                self.at_letter = value == Some(11);
+                            }
+                        }
+                        _ => {}
+                    }
+                    if self.global_prefix {
+                        for scope in &mut self.scopes {
+                            match character {
+                                '%' => {
+                                    scope.percent_comment = self.percent_comment;
+                                    scope.uncertain_percent = self.uncertain_percent;
+                                }
+                                '$' => {
+                                    scope.dollar_math = self.dollar_math;
+                                    scope.uncertain_dollar = self.uncertain_dollar;
+                                }
+                                '@' => {
+                                    scope.at_letter = self.at_letter;
+                                    scope.uncertain_at = self.uncertain_at;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                self.global_prefix = false;
+            }
+
             "\\makeatletter" => self.at_letter = true,
             "\\makeatother" => self.at_letter = false,
-            "\\MakeShortVerb" => {
+            "\\MakeShortVerb" | "\\DefineShortVerb" => {
                 if let Some(c) = short_verb_char(after)
                     && !self.short_verbs.contains(&c)
                 {
                     self.short_verbs.push(c);
                 }
             }
-            "\\DeleteShortVerb" => {
+            "\\DeleteShortVerb" | "\\UndefineShortVerb" => {
                 if let Some(c) = short_verb_char(after) {
                     self.short_verbs.retain(|&x| x != c);
                 }
@@ -676,6 +1391,11 @@ impl<'a> Lexer<'a> {
                 }
             }
             _ => {
+                if text.starts_with("\\if") {
+                    self.conditional_depth += 1;
+                } else if text == "\\fi" {
+                    self.conditional_depth = self.conditional_depth.saturating_sub(1);
+                }
                 if let Some(toggle) = expl_toggle(text) {
                     self.expl_syntax = matches!(toggle, ExplToggle::On);
                 }
@@ -687,8 +1407,15 @@ impl<'a> Lexer<'a> {
 pub(crate) fn reads_following_text(text: &str) -> bool {
     matches!(
         text,
-        "\\MakeShortVerb" | "\\DeleteShortVerb" | "\\documentclass" | "\\LoadClass"
-    ) || next_pending(None, SyntaxKind::CONTROL_WORD, text).is_some()
+        "\\MakeShortVerb"
+            | "\\DeleteShortVerb"
+            | "\\DefineShortVerb"
+            | "\\UndefineShortVerb"
+            | "\\catcode"
+            | "\\documentclass"
+            | "\\LoadClass"
+    ) || matches!(text, "\\ifx" | "\\ifdefined")
+        || next_pending(None, SyntaxKind::CONTROL_WORD, text).is_some()
 }
 
 fn next_pending(pending: Option<Pending>, kind: SyntaxKind, text: &str) -> Option<Pending> {
@@ -801,18 +1528,21 @@ fn delimited_len(after: &str) -> Option<usize> {
     let mut consumed = delim.len_utf8();
     for c in chars {
         if c == '\n' || c == '\r' {
-            return None;
+            return Some(consumed);
         }
         consumed += c.len_utf8();
         if c == delim {
             return Some(consumed);
         }
     }
-    None
+    Some(consumed)
 }
 
 fn short_verb_char(after: &str) -> Option<char> {
-    let s = skip_inline_ws(after.strip_prefix('*').unwrap_or(after));
+    let mut s = skip_inline_ws(after.strip_prefix('*').unwrap_or(after));
+    if let Some((_, rest)) = super::embedded::argument(s, '[', ']') {
+        s = skip_inline_ws(rest);
+    }
     let (body, braced) = match s.strip_prefix('{') {
         Some(inner) => (skip_inline_ws(inner), true),
         None => (s, false),
@@ -849,6 +1579,13 @@ fn doc_class_enables_bar(after: &str) -> bool {
 
 fn lex_verbatim_environment(rest: &str, ctx: &ParseCtx, out: &mut Vec<Token>) -> Option<usize> {
     let (name, prefix_len) = begin_name(rest)?;
+    if ctx.non_verbatim_environments.contains(name)
+        || ctx
+            .declared_environment(name)
+            .is_some_and(|sig| !sig.verbatim_body)
+    {
+        return None;
+    }
     let args: &[ArgSpec] = match ctx.verbatim_environment_args(name) {
         Some(args) => args,
         None => {
@@ -890,6 +1627,41 @@ fn verbatim_body_len(body: &str, name: &str) -> usize {
         from = at + LEAD.len();
     }
     body.len()
+}
+
+fn comment_body_len(body: &str, name: &str) -> usize {
+    let closer = format!("\\end{{{name}}}");
+    let mut start = 0;
+    for line in body.split_inclusive(['\n', '\r']) {
+        if line.trim_end_matches(['\n', '\r']) == closer {
+            return start;
+        }
+        start += line.len();
+    }
+    body.len()
+}
+
+fn literal_catcode(after: &str) -> Option<(char, Option<u8>)> {
+    let after = after.trim_start();
+    let (character, after) = if let Some(after) = after.strip_prefix('`') {
+        let after = after.strip_prefix('\\').unwrap_or(after);
+        let c = after.chars().next()?;
+        (c, &after[c.len_utf8()..])
+    } else {
+        let len = after.bytes().take_while(u8::is_ascii_digit).count();
+        let number: u32 = after[..len].parse().ok()?;
+        (char::from_u32(number)?, &after[len..])
+    };
+    let after = after.trim_start();
+    let after = after.strip_prefix('=').unwrap_or(after).trim_start();
+    let digits = after.bytes().take_while(u8::is_ascii_digit).count();
+    let end = &after[digits..];
+    let value = if digits > 0 && (!end.starts_with('\\') || end.starts_with("\\relax")) {
+        after[..digits].parse().ok()
+    } else {
+        None
+    };
+    Some((character, value))
 }
 
 fn lex_verbatim_arg_environment(rest: &str, out: &mut Vec<Token>) -> Option<usize> {
@@ -1280,6 +2052,87 @@ mod tests {
     }
 
     #[test]
+    fn alltt_keeps_commands_and_groups_but_disables_other_specials() {
+        let input = "\\begin{alltt}\n% $ # ^ _ & ~ \\textbf{active} \\ref{real}\n\\end{alltt}";
+        let tokens = lex(input);
+        assert_lossless(input);
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\ref")
+        );
+        assert!(tokens.iter().any(|token| token.kind == SyntaxKind::L_BRACE));
+        assert!(!tokens.iter().any(|token| matches!(
+            token.kind,
+            SyntaxKind::COMMENT | SyntaxKind::DOLLAR | SyntaxKind::HASH | SyntaxKind::VERBATIM_BODY
+        )));
+    }
+
+    #[test]
+    fn alltt_closers_obey_control_sequences_groups_and_raw_captures() {
+        let source = concat!(
+            "\\begin{alltt}\n",
+            "\\\\end{alltt} \\verb|\\end{alltt}|\n",
+            "\\newcommand{\\closer}{\\end{alltt}}\n",
+            "\\begin{alltt}$inner$\\end{alltt}\n",
+            "$outer$ % literal \\ref{real}\n",
+            "\\end{alltt}\n% real comment\n",
+        );
+        assert_lossless(source);
+        let tokens = lex(source);
+        let comments: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == SyntaxKind::COMMENT)
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(comments, ["% real comment"]);
+        assert!(!tokens.iter().any(|token| token.kind == SyntaxKind::DOLLAR));
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\ref")
+        );
+    }
+
+    #[test]
+    fn unfinished_inline_literals_do_not_expose_commands_on_the_same_line() {
+        for newline in ["\n", "\r\n", "\r", ""] {
+            let input = format!("\\verb|\\ref{{fake}}%${newline}\\ref{{real}}");
+            let tokens = lex(&input);
+            assert_lossless(&input);
+            assert_eq!(
+                tokens
+                    .iter()
+                    .filter(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\ref")
+                    .count(),
+                usize::from(!newline.is_empty())
+            );
+        }
+    }
+
+    #[test]
+    fn detokenize_does_not_run_lexer_commands_or_raw_captures() {
+        let input = r"\detokenize{\verb|\ref{fake}| \makeatletter \begin{verbatim}} \foo@bar";
+        let tokens = lex(input);
+        assert_lossless(input);
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| matches!(token.kind, SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY))
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\foo")
+        );
+        assert!(
+            !tokens
+                .iter()
+                .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\foo@bar")
+        );
+    }
+
+    #[test]
     fn the_pending_arming_sets_are_disjoint() {
         for name in [
             "\\left",
@@ -1446,10 +2299,10 @@ mod tests {
     }
 
     #[test]
-    fn verb_without_closing_delimiter_is_a_plain_control_word() {
+    fn verb_without_closing_delimiter_preserves_an_incomplete_literal() {
         let toks = lex(r"\verb|x");
-        assert_eq!(toks[0].kind, SyntaxKind::CONTROL_WORD);
-        assert_eq!(toks[0].text, r"\verb");
+        assert_eq!(toks[0].kind, SyntaxKind::VERB);
+        assert_eq!(toks[0].text, r"\verb|x");
     }
 
     #[test]
@@ -1763,7 +2616,7 @@ mod tests {
         assert!(kinds.contains(&SyntaxKind::L_BRACE));
         assert!(
             toks.iter()
-                .any(|t| t.kind == SyntaxKind::VERBATIM_BODY && t.text.contains("print(\"$x$\")"))
+                .any(|t| t.kind == SyntaxKind::FOREIGN_TEXT && t.text.contains("$x$"))
         );
         assert!(!toks.iter().any(|t| t.kind == SyntaxKind::DOLLAR));
     }
@@ -1827,10 +2680,10 @@ mod tests {
     #[test]
     fn unclosed_short_verb_char_stands_alone() {
         let toks = lex("\\MakeShortVerb{\\|} a|b\nc");
-        assert!(!toks.iter().any(|t| t.kind == SyntaxKind::VERB));
+        assert!(!toks.iter().any(|token| token.kind == SyntaxKind::VERB));
         assert!(
             toks.iter()
-                .any(|t| t.kind == SyntaxKind::WORD && t.text == "|")
+                .any(|token| token.kind == SyntaxKind::WORD && token.text == "|")
         );
         assert_lossless("\\MakeShortVerb{\\|} a|b\nc");
     }

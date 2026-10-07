@@ -97,6 +97,34 @@ impl IncrementalDatabase {
                 // against the resulting database, never against old Salsa handles.
                 self.set_backing_batch(token.project, files.backing)?;
                 let db = &mut self.read.inner;
+                // Pre-create every new observation cell with one catalog write.
+                // Repeatedly cloning the growing map makes acquisition quadratic.
+                let project = db.project(token.project);
+                let new_paths: std::collections::BTreeSet<_> = files
+                    .locations
+                    .iter()
+                    .map(|(path, _)| path)
+                    .chain(files.file_resolution.iter().map(|(path, _)| path))
+                    .map(|path| normalize_path(path))
+                    .filter(|path| !project.locations(db).contains_key(path))
+                    .collect();
+                if !new_paths.is_empty() {
+                    let mut catalog = project.locations(db).clone();
+                    for path in new_paths {
+                        catalog.insert(
+                            path,
+                            LocationInput::new(
+                                &*db,
+                                LocationObservation::default(),
+                                Observation::Unknown,
+                            ),
+                        );
+                    }
+                    project
+                        .set_locations(db)
+                        .with_durability(salsa::Durability::MEDIUM)
+                        .to(catalog);
+                }
                 for (path, value) in files.locations {
                     let location = db.location_input(token.project, normalize_path(&path));
                     if location.observation(db) != &value {
@@ -377,11 +405,7 @@ pub(super) fn observed_location_kind(
     };
 
     let path = normalize_path(path);
-    let actual = super::inputs::file_aliases(db, project)
-        .iter()
-        .find(|(requested, _)| requested == &path)
-        .map(|(_, actual)| actual)
-        .unwrap_or(&path);
+    let actual = super::inputs::file_alias_target(db, project, &path).unwrap_or(&path);
     if crate::project::root_views::project_sources(db, project).contains_key(actual) {
         return Observation::Present(LocationKind::File);
     }

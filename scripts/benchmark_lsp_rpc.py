@@ -151,7 +151,9 @@ def measure(binary, count, idle_seconds=3, texmf=False):
             compiler_probes = settled["compilerProbeAttempts"] - compiler_before
             assert compiler_probes == 0, f"Prose edits caused {compiler_probes} compiler artifact probes"
             assert reads == 0, f"Prose edits caused {reads} dependency reads"
-            return {"idle_process_activity": idle_activity(client, idle_seconds), "texmf": texmf, "files": count, "cold_ms": round(cold, 3), "warm_p50_ms": round(statistics.median(warm), 3), "warm_max_ms": round(max(warm), 3), "hover_p50_ms": round(statistics.median(hover_samples), 3), "hover_max_ms": round(max(hover_samples), 3), "definition_p50_ms": round(statistics.median(definition_samples), 3), "definition_max_ms": round(max(definition_samples), 3), "cold_source_reads": before, "warm_source_reads": reads, "cold_compiler_probes": compiler_before, "warm_compiler_probes": compiler_probes}
+            return {"idle_process_activity": idle_activity(client, idle_seconds), "texmf": texmf, "files": count, "cold_ms": round(cold, 3), "warm_p50_ms": round(statistics.median(warm), 3), "warm_max_ms": round(max(warm), 3), "hover_p50_ms": round(statistics.median(hover_samples), 3), "hover_max_ms": round(max(hover_samples), 3), "definition_p50_ms": round(statistics.median(definition_samples), 3), "definition_max_ms": round(max(definition_samples), 3), "cold_source_reads": before, "warm_source_reads": reads, "cold_compiler_probes": compiler_before, "warm_compiler_probes": compiler_probes,
+                    "warm_samples_ms": warm, "hover_samples_ms": hover_samples,
+                    "definition_samples_ms": definition_samples, "memory_kib": memory(client)}
         finally:
             client.close()
 

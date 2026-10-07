@@ -1,0 +1,36 @@
+{
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///positions/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "é😀\nabc\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/selectionRange",
+      "params": {
+        "textDocument": { "uri": "file:///positions/main.tex" },
+        "positions": [
+          { "line": 1, "character": 4294967295 },
+          { "line": 4294967295, "character": 4294967295 },
+          { "line": 0, "character": 2 },
+          { "line": 1, "character": 4294967295 }
+        ]
+      },
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": { "uri": "file:///positions/main.tex" },
+        "position": { "line": 1, "character": 4294967295 }
+      },
+      "expected": null
+    }
+  ]
+}

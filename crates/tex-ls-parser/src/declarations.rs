@@ -509,8 +509,13 @@ pub enum DeclarationErrorKind {
 /// Asking it alone would let a declaration reclassify one of them: `like = "ref"`
 /// on `\cpageref` would demote a list-valued page reference to a single-key
 /// `\ref`, which is exactly what this gate exists to prevent.
+/// Token-list and one-token printing commands retain their parser ownership,
+/// independently of whether the layout signature database lists them.
 fn is_builtin_command(name: &str) -> bool {
-    builtin().command(name).is_some() || ref_command(name).is_some() || cite_command(name).is_some()
+    matches!(name, "detokenize" | "string")
+        || builtin().command(name).is_some()
+        || ref_command(name).is_some()
+        || cite_command(name).is_some()
 }
 
 /// The environment named by `spelling` when it is the written-out delimiter
@@ -817,6 +822,21 @@ mod tests {
                 err.kind,
                 DeclarationErrorKind::BuiltinCommandName { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn source_owned_printing_commands_cannot_be_semantic_key_aliases() {
+        for name in ["detokenize", "string"] {
+            for target in ["ref", "cite"] {
+                let json = format!(r#"{{"commands": {{"{name}": {{"like": "{target}"}}}}}}"#);
+                let err = resolve_err(&json);
+                assert_eq!(err.key, format!("commands.{name}"));
+                assert_eq!(
+                    err.kind,
+                    DeclarationErrorKind::BuiltinCommandName { name: name.into() }
+                );
+            }
         }
     }
 

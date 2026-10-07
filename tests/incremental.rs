@@ -97,8 +97,10 @@ fn query_log_records_only_after_an_observation_window_opens() {
 
     db.clear_query_log();
     let _ = db.semantic_model(file);
-    assert_eq!(db.query_log().len(), 1);
+    assert_eq!(db.query_log().len(), 3);
     assert_eq!(db.query_log()[0].kind, QueryKind::SemanticModel);
+    assert_eq!(db.query_log()[1].kind, QueryKind::FileOperands);
+    assert_eq!(db.query_log()[2].kind, QueryKind::DefinitionSites);
 }
 
 #[test]

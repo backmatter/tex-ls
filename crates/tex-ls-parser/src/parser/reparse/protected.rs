@@ -46,10 +46,10 @@
 //!
 //! **(3) Termination.** The capture's terminator must lie *inside* the fragment, or
 //! the isolated scan stops at the fragment's edge while the file's runs on past it.
-//! A `VERB` carries its own closer by construction — `delimited_len` and
-//! `braced_verb_content_len` yield nothing when unterminated, so an unclosed
-//! `\verb|…` is not a `VERB` token at all. A `VERBATIM_BODY` does not: its
-//! `\end{name}` is a sibling, and an unclosed body simply runs to EOF. So the tier
+//! Delimited `VERB` tokens can recover at a line boundary when unclosed. The
+//! tier declines those captures; otherwise an isolated fragment's EOF could
+//! stand in for a newline outside it. A `VERBATIM_BODY` needs its closing
+//! `\end{name}` sibling inside the fragment. So the tier
 //! requires a token to follow the body *within* the fragment, which is that `\end`.
 //!
 //! **(4) The sequence check.** [`lex_with`] over the *edited* fragment must yield the
@@ -126,10 +126,25 @@ fn try_capture(
     leaf: &SyntaxToken,
     range: TextRange,
 ) -> Option<Reparsed> {
+    if leaf.kind() == SyntaxKind::VERB {
+        let body = leaf
+            .text()
+            .strip_prefix("\\verb")
+            .map(|body| body.strip_prefix('*').unwrap_or(body))
+            .unwrap_or(leaf.text());
+        let opener = body.chars().next()?;
+        let closer = if opener == '{' { '}' } else { opener };
+        if body.len() <= opener.len_utf8() || !body.ends_with(closer) {
+            return None;
+        }
+    }
     if !leaf.text_range().contains_range(range) {
         return None;
     }
-    if !matches!(leaf.kind(), SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY) {
+    if !matches!(
+        leaf.kind(),
+        SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY | SyntaxKind::DELEGATED_CODE
+    ) {
         return None;
     }
     let fragment = Fragment::around(leaf)?;
@@ -141,7 +156,11 @@ fn try_capture(
 
     // Leg 3. A `VERBATIM_BODY`'s terminator is the sibling `\end{name}`, so it has to
     // be in the fragment; a `VERB`'s is inside its own text by construction.
-    if leaf.kind() == SyntaxKind::VERBATIM_BODY && at + 1 == tokens.len() {
+    if matches!(
+        leaf.kind(),
+        SyntaxKind::VERBATIM_BODY | SyntaxKind::DELEGATED_CODE
+    ) && at + 1 == tokens.len()
+    {
         return None;
     }
 
@@ -152,6 +171,19 @@ fn try_capture(
     // keeps the reason legible.
     if new_leaf.is_empty() {
         return None;
+    }
+    // Recovery at fragment EOF is not a terminator. Requiring the edited VERB
+    // to remain closed prevents a deleted closer from consuming following source.
+    if leaf.kind() == SyntaxKind::VERB {
+        let body = new_leaf
+            .strip_prefix("\\verb")
+            .map(|body| body.strip_prefix('*').unwrap_or(body))
+            .unwrap_or(&new_leaf);
+        let opener = body.chars().next()?;
+        let closer = if opener == '{' { '}' } else { opener };
+        if body.len() <= opener.len_utf8() || !body.ends_with(closer) {
+            return None;
+        }
     }
     if !text_reads_are_inert(leaf.kind(), old_leaf, &new_leaf, ctx) {
         return None;
@@ -169,6 +201,23 @@ fn try_capture(
     let new_fragment = edited(&old_fragment, usize::from(fragment.range().start()), edit)?;
     if !relexes_to(base, &new_fragment, &tokens, Some((at, &new_leaf))) {
         return None;
+    }
+
+    if leaf.kind() == SyntaxKind::VERB {
+        let mut probe = new_fragment.clone();
+        probe.push(' ');
+        let got = if base.config.dtx {
+            lex_with_implicit_expl(&probe, base.ctx, base.config, base.implicit_expl)
+        } else {
+            lex_with(&probe, base.ctx, base.config)
+        };
+        if got.len() != tokens.len() + 1
+            || got
+                .last()
+                .is_none_or(|token| token.kind != SyntaxKind::WHITESPACE || token.text != " ")
+        {
+            return None;
+        }
     }
 
     let errors = shifted_errors(base.errors, leaf.text_range(), edit)?;
@@ -244,7 +293,7 @@ impl Fragment {
         }
         let parent = leaf.parent()?;
         match (leaf.kind(), parent.kind()) {
-            (SyntaxKind::VERBATIM_BODY, SyntaxKind::ENVIRONMENT)
+            (SyntaxKind::VERBATIM_BODY | SyntaxKind::DELEGATED_CODE, SyntaxKind::ENVIRONMENT)
             | (SyntaxKind::VERB, SyntaxKind::COMMAND) => Some(Self::Node(parent)),
             _ => None,
         }
@@ -360,7 +409,7 @@ mod tests {
         assert_splices(text, after(text, "int", "x"));
 
         let text = "\\begin{minted}{python}\nif x: pass\n\\end{minted}\n";
-        assert_splices(text, after(text, "if x", ":"));
+        assert_refuses(text, after(text, "if x", ":"));
     }
 
     #[test]
@@ -478,17 +527,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unterminated_verb_is_never_a_verb_token() {
-        for text in [
-            "\\verb|unclosed\n",
-            "\\url{unclosed\n",
-            "\\lstinline|unclosed\n",
+    fn removing_or_unbalancing_a_capture_closer_declines() {
+        for (text, marker, replacement) in [
+            ("Inline \\verb|raw| and after.\n", "| and", ""),
+            ("Inline \\lstinline|raw| and after.\n", "| and", ""),
+            ("See \\url{raw} and after.\n", "} and", "{"),
         ] {
-            let toks = crate::parser::lexer::lex(text);
-            assert!(
-                !toks.iter().any(|t| t.kind == SyntaxKind::VERB),
-                "an unterminated capture became a VERB: {text:?}",
-            );
+            let at = text.find(marker).unwrap();
+            let e = edit(at..at + 1, replacement);
+            with_base(text, |base| {
+                assert!(reparse_protected(base, &e, &e.apply(text)).is_none());
+            });
         }
+    }
+
+    #[test]
+    fn unterminated_delimited_literals_decline_the_protected_splice() {
+        for text in ["\\verb|unclosed\n", "\\lstinline|unclosed\n"] {
+            assert!(
+                crate::parser::lexer::lex(text)
+                    .iter()
+                    .any(|token| token.kind == SyntaxKind::VERB)
+            );
+            with_base(text, |base| {
+                let e = after(text, "unclosed", "x");
+                assert!(reparse_protected(base, &e, &e.apply(text)).is_none());
+            });
+        }
+        // Unbalanced braces do not define a bounded token list.
+        assert!(
+            !crate::parser::lexer::lex("\\url{unclosed\n")
+                .iter()
+                .any(|token| token.kind == SyntaxKind::VERB)
+        );
     }
 }

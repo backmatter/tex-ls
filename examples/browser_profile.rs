@@ -3,6 +3,8 @@
 //!
 //! Input is an array of {path, source} documents, including main.tex. Row zero
 //! includes cold queries; rows 1..=100 alternate command-prefix replacements.
+//! TEX_LS_PROFILE_ROUNDS can reduce the default 100 edits for focused profiling.
+//! TEX_LS_PROFILE_FULL_EDIT shifts all source ranges with whole-document edits.
 //! The stage database deliberately demands every listed query. completionMs
 //! measures a separate Session with the actual request's demand dependencies.
 //! Both databases are disposable profiling state, not application persistence.
@@ -27,6 +29,7 @@ struct Sample {
     classify_ms: f64,
     scope_ms: f64,
     semantic_ms: f64,
+    editor_ms: f64,
     candidates_ms: f64,
     completion_ms: f64,
     items: usize,
@@ -61,9 +64,14 @@ fn main() {
     let file = db.apply_change(&path, text.text_arc(), None);
     session.dispatch("textDocument/didChange", json!({"textDocument":{"uri":"file:///project/main.tex","version":1},"contentChanges":[{"text":text.to_string()}]})).unwrap();
     let mut rows = Vec::new();
-    for i in 0..101 {
+    let rounds = std::env::var("TEX_LS_PROFILE_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
+    let full_edit = std::env::var_os("TEX_LS_PROFILE_FULL_EDIT").is_some();
+    for i in 0..=rounds {
         let prefix = if i % 2 == 0 { "pro" } else { "sec" };
-        let changes = vec![
+        let mut changes = vec![
             lsp_types::TextDocumentContentChangePartial {
                 range: Range::new(Position::new(line, 1), Position::new(line, 4)),
                 text: prefix.into(),
@@ -71,6 +79,14 @@ fn main() {
             }
             .into(),
         ];
+        if full_edit {
+            changes = vec![
+                lsp_types::TextDocumentContentChangeWholeDocument {
+                    text: format!("Prose edit {i}.\n{source}\n\\{prefix}\n"),
+                }
+                .into(),
+            ];
+        }
         let start = Instant::now();
         let edits = apply_content_changes(&mut text, changes.clone()).unwrap();
         db.apply_change(&path, text.text_arc(), edits);
@@ -93,6 +109,9 @@ fn main() {
         let model = snapshot.semantic_model(file);
         let semantic = start.elapsed().as_secs_f64() * 1000.;
         let start = Instant::now();
+        std::hint::black_box(snapshot.editor_symbols(file));
+        let editor = start.elapsed().as_secs_f64() * 1000.;
+        let start = Instant::now();
         std::hint::black_box(tex_ls_analysis::completion::candidates_with_declarations(
             &ctx,
             sigs,
@@ -102,7 +121,8 @@ fn main() {
         let candidates = start.elapsed().as_secs_f64() * 1000.;
         let start = Instant::now();
         session.dispatch("textDocument/didChange",json!({"textDocument":{"uri":"file:///project/main.tex","version":i+2},"contentChanges":changes})).unwrap();
-        let answer=session.dispatch("textDocument/completion",json!({"textDocument":{"uri":"file:///project/main.tex"},"position":{"line":line,"character":4}})).unwrap();
+        let cursor_line = if full_edit { line + 1 } else { line };
+        let answer=session.dispatch("textDocument/completion",json!({"textDocument":{"uri":"file:///project/main.tex"},"position":{"line":cursor_line,"character":4}})).unwrap();
         let completion = start.elapsed().as_secs_f64() * 1000.;
         rows.push(Sample {
             write_ms: write,
@@ -110,6 +130,7 @@ fn main() {
             classify_ms: classify,
             scope_ms: scope,
             semantic_ms: semantic,
+            editor_ms: editor,
             candidates_ms: candidates,
             completion_ms: completion,
             items: answer["items"].as_array().unwrap().len(),

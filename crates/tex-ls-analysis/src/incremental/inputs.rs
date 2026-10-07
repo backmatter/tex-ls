@@ -90,6 +90,7 @@ pub(super) fn semantic_declarations_of(
 
 /// Positive aliases are an equality projection of explicit observations. Errors
 /// and unknown candidates cannot accidentally become successful resolutions.
+/// The location catalog's BTreeMap order keeps requested paths sorted.
 #[salsa::tracked(returns(ref))]
 pub(crate) fn file_aliases(
     db: &dyn IncrementalDb,
@@ -103,4 +104,16 @@ pub(crate) fn file_aliases(
             _ => None,
         })
         .collect()
+}
+
+pub(crate) fn file_alias_target<'a>(
+    db: &'a dyn IncrementalDb,
+    project: ProjectInput,
+    path: &Path,
+) -> Option<&'a Path> {
+    let aliases = file_aliases(db, project);
+    aliases
+        .binary_search_by(|(requested, _)| requested.as_path().cmp(path))
+        .ok()
+        .map(|index| aliases[index].1.as_path())
 }

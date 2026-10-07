@@ -3,10 +3,12 @@
 use rowan::{TextRange, TextSize};
 
 use crate::ast::command_name;
+use crate::semantic::context::PrimitiveOperandContexts;
 use crate::semantic::define::scan_definitions;
 use crate::semantic::signature::{
     ArgKind, ArgumentDomain, Signatures, match_arg_slot, match_verbatim_arg_slot,
 };
+use crate::semantic::{DefSite, scan_definition_sites};
 use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
 /// The effective mode at a source position.
@@ -50,6 +52,10 @@ pub fn argument_domain(group: &SyntaxNode) -> ArgumentDomain {
         return ArgumentDomain::Unknown;
     };
     let root = owner.ancestors().last().unwrap_or_else(|| owner.clone());
+    let sites = scan_definition_sites(&root);
+    if PrimitiveOperandContexts::from_definition_sites(&root, &sites).contains_head(&owner) {
+        return ArgumentDomain::Unknown;
+    }
     let user = scan_definitions(&root);
     let signatures = Signatures::new(&user);
     let args = match owner.kind() {
@@ -95,10 +101,33 @@ pub fn argument_domain(group: &SyntaxNode) -> ArgumentDomain {
 
 impl ModeIndex {
     pub fn build(root: &SyntaxNode) -> Self {
-        let mut ranges = Vec::new();
         let user = scan_definitions(root);
-        let signatures = Signatures::new(&user);
-        walk(root, Mode::Text, &signatures, &mut ranges);
+        Self::build_with_signatures(root, &Signatures::new(&user))
+    }
+
+    /// Reuse source signatures already computed by incremental analysis.
+    pub fn build_with_signatures(root: &SyntaxNode, signatures: &Signatures<'_>) -> Self {
+        Self::build_with_signatures_and_sites(root, signatures, &scan_definition_sites(root))
+    }
+
+    /// Reuse source signatures and definition sites cached by analysis.
+    pub fn build_with_signatures_and_sites(
+        root: &SyntaxNode,
+        signatures: &Signatures<'_>,
+        sites: &[DefSite],
+    ) -> Self {
+        let operands = PrimitiveOperandContexts::from_definition_sites(root, sites);
+        Self::build_with_signatures_and_operands(root, signatures, &operands)
+    }
+
+    /// Reuse operand ownership already proved from this source tree.
+    pub fn build_with_signatures_and_operands(
+        root: &SyntaxNode,
+        signatures: &Signatures<'_>,
+        operands: &PrimitiveOperandContexts,
+    ) -> Self {
+        let mut ranges = Vec::new();
+        walk(root, Mode::Text, signatures, operands, &mut ranges);
         Self { ranges }
     }
 
@@ -129,6 +158,7 @@ fn walk(
     node: &SyntaxNode,
     inherited: Mode,
     signatures: &Signatures<'_>,
+    operands: &PrimitiveOperandContexts,
     ranges: &mut Vec<ModeRange>,
 ) {
     let mode = match node.kind() {
@@ -137,6 +167,7 @@ fn walk(
         _ => inherited,
     };
 
+    let owns_arguments = !operands.contains_head(node);
     let argument_modes = match node.kind() {
         SyntaxKind::COMMAND => command_argument_modes(node, signatures),
         SyntaxKind::BEGIN => environment_argument_modes(node, signatures),
@@ -156,6 +187,7 @@ fn walk(
         );
         let child_mode = if matches!(child.kind(), SyntaxKind::GROUP | SyntaxKind::OPTIONAL)
             && matches!(node.kind(), SyntaxKind::COMMAND | SyntaxKind::BEGIN)
+            && owns_arguments
         {
             let mode = argument_modes
                 .get(argument)
@@ -166,7 +198,7 @@ fn walk(
         } else {
             mode
         };
-        walk(&child, child_mode, signatures, ranges);
+        walk(&child, child_mode, signatures, operands, ranges);
         cursor = child.text_range().end();
     }
     push_range(
@@ -264,6 +296,7 @@ mod tests {
         node: &SyntaxNode,
         inherited: Mode,
         signatures: &Signatures<'_>,
+        operands: &PrimitiveOperandContexts,
         ranges: &mut Vec<ModeRange>,
     ) {
         let mode = match node.kind() {
@@ -272,6 +305,7 @@ mod tests {
             _ => inherited,
         };
 
+        let owns_arguments = !operands.contains_head(node);
         let argument_modes = match node.kind() {
             SyntaxKind::COMMAND => command_argument_modes(node, signatures),
             SyntaxKind::BEGIN => environment_argument_modes(node, signatures),
@@ -286,6 +320,7 @@ mod tests {
                     let child_mode =
                         if matches!(child.kind(), SyntaxKind::GROUP | SyntaxKind::OPTIONAL)
                             && matches!(node.kind(), SyntaxKind::COMMAND | SyntaxKind::BEGIN)
+                            && owns_arguments
                         {
                             let mode = argument_modes
                                 .get(argument)
@@ -296,7 +331,7 @@ mod tests {
                         } else {
                             mode
                         };
-                    walk_tokens_reference(&child, child_mode, signatures, ranges);
+                    walk_tokens_reference(&child, child_mode, signatures, operands, ranges);
                 }
             }
         }
@@ -323,7 +358,11 @@ mod tests {
             let user = scan_definitions(&root);
             let signatures = Signatures::new(&user);
             let mut expected = Vec::new();
-            walk_tokens_reference(&root, Mode::Text, &signatures, &mut expected);
+            let operands = PrimitiveOperandContexts::from_definition_sites(
+                &root,
+                &scan_definition_sites(&root),
+            );
+            walk_tokens_reference(&root, Mode::Text, &signatures, &operands, &mut expected);
             assert_eq!(
                 ModeIndex::build(&root).ranges,
                 expected,
@@ -363,6 +402,45 @@ mod tests {
                 Mode::Unknown
             ]
         );
+    }
+
+    #[test]
+    fn primitive_operand_groups_inherit_ambient_mode_and_have_no_argument_domain() {
+        for (source, expected) in [
+            (
+                r"\let\copy\ensuremath{a_b}\ensuremath{c_d}",
+                vec![Mode::Text, Mode::Math],
+            ),
+            (
+                r"$\let\copy\text{a_b}\text{c_d}$",
+                vec![Mode::Math, Mode::Text],
+            ),
+            (
+                r"\meaning\ensuremath{a_b \ensuremath{c_d}}",
+                vec![Mode::Text, Mode::Math],
+            ),
+            (
+                r"$\ifx a\text{a_b \text{c_d}}$",
+                vec![Mode::Math, Mode::Text],
+            ),
+        ] {
+            assert_eq!(modes(source, &["a_b", "c_d"]), expected, "{source}");
+            let root = parse(source).syntax();
+            let operands = PrimitiveOperandContexts::from_definition_sites(
+                &root,
+                &scan_definition_sites(&root),
+            );
+            let group = root
+                .descendants()
+                .find(|node| {
+                    node.kind() == SyntaxKind::GROUP
+                        && node
+                            .parent()
+                            .is_some_and(|owner| operands.contains_head(&owner))
+                })
+                .unwrap();
+            assert_eq!(argument_domain(&group), ArgumentDomain::Unknown, "{source}");
+        }
     }
 
     #[test]

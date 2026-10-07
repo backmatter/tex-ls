@@ -85,9 +85,61 @@ pub fn semantic_model(db: &dyn IncrementalDb, file: SourceInput) -> SemanticMode
         kind: QueryKind::SemanticModel,
         file: Some(*file.identity(db)),
     });
-    SemanticModel::build_with_declarations(
+    SemanticModel::build_with_declarations_and_operands(
         &parsed_tree_root(db, file),
         semantic_declarations_of(db, file),
+        file_operand_contexts(db, file),
+    )
+}
+
+/// Label display contexts are built lazily once per source revision, including
+/// the first occurrence of a duplicate name even when its context is absent.
+#[salsa::tracked(returns(ref))]
+pub fn file_label_contexts(db: &dyn IncrementalDb, file: SourceInput) -> FileLabelContexts {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::FileLabelContexts,
+        file: Some(*file.identity(db)),
+    });
+    let model = semantic_model(db, file);
+    let mut contexts = FileLabelContexts::default();
+    if model.labels().is_empty() {
+        return contexts;
+    }
+    let root = parsed_tree_root(db, file);
+    let index = tex_ls_parser::semantic::outline::LabelContextIndex::build_with_operands(
+        &root,
+        file_operand_contexts(db, file),
+    );
+    for label in model.labels() {
+        if contexts.labels.contains_key(&label.name) {
+            continue;
+        }
+        let source = index.context_source_at(&root, label.key_range.start());
+        if let Some(source) = source {
+            contexts.contexts.entry(source).or_insert_with(|| {
+                index
+                    .context_at(&root, label.key_range.start())
+                    .expect("context source must classify")
+            });
+        }
+        contexts.labels.insert(label.name.clone(), source);
+    }
+    contexts
+}
+
+/// Operand ownership is shared by source signatures and language consumers.
+#[salsa::tracked(returns(ref))]
+pub fn file_operand_contexts(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> tex_ls_parser::semantic::context::PrimitiveOperandContexts {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::FileOperands,
+        file: Some(*file.identity(db)),
+    });
+    tex_ls_parser::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+        &parsed_tree_root(db, file),
+        definition_sites(db, file),
     )
 }
 
@@ -106,7 +158,28 @@ pub fn document_signatures(db: &dyn IncrementalDb, file: SourceInput) -> Signatu
         kind: QueryKind::DocumentSignatures,
         file: Some(*file.identity(db)),
     });
-    scan_definitions(&parsed_tree_root(db, file))
+    tex_ls_parser::semantic::define::scan_definitions_with_operands(
+        &parsed_tree_root(db, file),
+        file_operand_contexts(db, file),
+    )
+}
+
+/// Source modes are shared by highlighting and completion, and rebuilt only
+/// when their source tree or source signatures change.
+#[salsa::tracked(returns(ref))]
+pub fn file_modes(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> tex_ls_parser::semantic::mode::ModeIndex {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::FileModes,
+        file: Some(*file.identity(db)),
+    });
+    tex_ls_parser::semantic::mode::ModeIndex::build_with_signatures_and_operands(
+        &parsed_tree_root(db, file),
+        &tex_ls_parser::semantic::Signatures::new(document_signatures(db, file)),
+        file_operand_contexts(db, file),
+    )
 }
 
 /// The file's merged **signature scope**: the scanned definitions of every package
@@ -172,7 +245,22 @@ pub fn doc_associations(db: &dyn IncrementalDb, file: SourceInput) -> Vec<DocAss
         kind: QueryKind::DocAssociations,
         file: Some(*file.identity(db)),
     });
-    build_doc_associations(&parsed_tree_root(db, file))
+    tex_ls_parser::semantic::doc::doc_associations_with_context(
+        &parsed_tree_root(db, file),
+        file_operand_contexts(db, file),
+    )
+}
+
+fn file_roles(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+    root: &SyntaxNode,
+) -> crate::external::links::FileRoleContext {
+    crate::external::links::FileRoleContext::from_definition_sites_and_operands(
+        root,
+        definition_sites(db, file),
+        file_operand_contexts(db, file),
+    )
 }
 
 /// The file's inclusion edges, range-free
@@ -188,7 +276,11 @@ pub fn include_edges(db: &dyn IncrementalDb, file: SourceInput) -> Vec<IncludeEd
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
-    collect_include_edge_keys(&root, file.path(db).parent())
+    let roles = file_roles(db, file, &root);
+    crate::project::include::collect_include_edges_with_roles(&root, file.path(db).parent(), &roles)
+        .iter()
+        .map(crate::project::IncludeEdge::key)
+        .collect()
 }
 
 /// The file's package/class load edges, range-free
@@ -204,7 +296,11 @@ pub fn package_edges(db: &dyn IncrementalDb, file: SourceInput) -> Vec<PackageEd
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
-    collect_package_edge_keys(&root, file.path(db).parent())
+    let roles = file_roles(db, file, &root);
+    crate::project::package::collect_package_edges_with_roles(&root, file.path(db).parent(), &roles)
+        .into_iter()
+        .map(|edge| edge.key())
+        .collect()
 }
 
 /// The file's distinct `\label` names, sorted — a range-free, ref-free
@@ -332,7 +428,7 @@ pub fn latex_lint_findings(
         .then(|| resolved_labels(db, db.project_input(*file.project(db))));
     let citations = (!model.citations().is_empty())
         .then(|| resolved_citations(db, db.project_input(*file.project(db))));
-    let mut findings = crate::linter::lint_document(
+    let ctx = crate::linter::rules::RuleContext::new(
         file.path(db),
         &root,
         model,
@@ -342,7 +438,9 @@ pub fn latex_lint_findings(
             db,
             db.project_input(*file.project(db)),
         )),
-    );
+    )
+    .with_source_facts(definition_sites(db, file), file_operand_contexts(db, file));
+    let mut findings = crate::linter::check::lint_document_context(&ctx);
     if findings.iter().any(|d| d.rule == "unknown-command") {
         crate::linter::rules::unknown_command::suppress_defined(
             &mut findings,
@@ -522,8 +620,11 @@ pub fn file_cite_facts(db: &dyn IncrementalDb, file: SourceInput) -> FileCiteFac
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
+    let roles = file_roles(db, file, &root);
     FileCiteFacts {
-        bib_targets: collect_bib_resource_targets(&root, None),
+        bib_targets: crate::project::include::collect_bib_resource_targets_with_roles(
+            &root, None, &roles,
+        ),
         manual_keys: semantic_model(db, file)
             .bibitems()
             .iter()
@@ -555,7 +656,10 @@ pub fn file_outline(
         kind: QueryKind::Outline,
         file: Some(*file.identity(db)),
     });
-    crate::semantic::outline(&parsed_tree_root(db, file))
+    tex_ls_parser::semantic::outline::outline_with_operands(
+        &parsed_tree_root(db, file),
+        file_operand_contexts(db, file),
+    )
 }
 
 #[salsa::tracked(returns(ref))]
@@ -579,14 +683,16 @@ fn file_references_in_context(
     context: &crate::external::FilePathContext,
 ) -> Vec<crate::external::links::FileReference> {
     let root = parsed_tree_root(db, file);
+    let roles = file_roles(db, file, &root);
     let mut references: Vec<crate::external::links::FileReference> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for base in &context.bases {
-        for reference in crate::external::links::file_references(
+        for reference in crate::external::links::file_references_with_roles(
             &root,
             Some(base),
             Some(&context.root_directory),
             &context.graphics,
+            &roles,
         ) {
             if seen.insert(reference.clone()) {
                 references.push(reference);
@@ -622,10 +728,19 @@ fn file_references_from_root(
 }
 
 #[salsa::tracked(returns(ref))]
-fn root_graphics(db: &dyn IncrementalDb, file: SourceInput) -> Vec<PathBuf> {
-    crate::external::inherited_graphics(
-        &parsed_tree_root(db, file),
+pub(crate) fn root_graphics(db: &dyn IncrementalDb, file: SourceInput) -> Vec<PathBuf> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::RootGraphics,
+        file: Some(*file.identity(db)),
+    });
+    let root = parsed_tree_root(db, file);
+    if !crate::external::has_graphics_path(&root) {
+        return Vec::new();
+    }
+    crate::external::inherited_graphics_with_roles(
+        &root,
         file.path(db).parent().unwrap_or(Path::new("")),
+        &file_roles(db, file, &root),
     )
 }
 
@@ -695,11 +810,7 @@ pub(super) fn command_scope(db: &dyn IncrementalDb, origin: SourceInput) -> Vec<
         if !seen.insert(path.clone()) {
             continue;
         }
-        let path = super::inputs::file_aliases(db, project)
-            .iter()
-            .find(|(requested, _)| requested == &path)
-            .map(|(_, actual)| actual)
-            .unwrap_or(&path);
+        let path = super::inputs::file_alias_target(db, project, &path).unwrap_or(&path);
         let Some(file) = members.get(path) else {
             continue;
         };
@@ -732,7 +843,10 @@ fn editor_declarations(
     db: &dyn IncrementalDb,
     file: SourceInput,
 ) -> Vec<crate::semantic::define::editor::EditorDeclaration> {
-    crate::semantic::define::editor::editor_declarations(&parsed_tree_root(db, file))
+    crate::semantic::define::editor::editor_declarations_with_operands(
+        &parsed_tree_root(db, file),
+        file_operand_contexts(db, file),
+    )
 }
 
 /// Commands whose rename would leave a literal alias source or generated name
@@ -857,11 +971,7 @@ pub fn editor_symbols(db: &dyn IncrementalDb, origin: SourceInput) -> EditorSymb
         .into_iter()
         .rev()
         .filter_map(|path| {
-            let actual = super::inputs::file_aliases(db, project)
-                .iter()
-                .find(|(requested, _)| requested == &path)
-                .map(|(_, actual)| actual)
-                .unwrap_or(&path);
+            let actual = super::inputs::file_alias_target(db, project, &path).unwrap_or(&path);
             members
                 .get(actual)
                 .map(|root| Work::File { root: *root, path })
@@ -873,15 +983,11 @@ pub fn editor_symbols(db: &dyn IncrementalDb, origin: SourceInput) -> EditorSymb
         match work {
             Work::Declaration(file, root, index) => ordered.push((file, root, index)),
             Work::File { path, root } => {
-                let path = super::inputs::file_aliases(db, project)
-                    .iter()
-                    .find(|(requested, _)| requested == &path)
-                    .map(|(_, actual)| actual)
-                    .unwrap_or(&path);
+                let path = super::inputs::file_alias_target(db, project, &path).unwrap_or(&path);
                 let Some(file) = members.get(path) else {
                     continue;
                 };
-                if !seen.insert(path.clone()) {
+                if !seen.insert(path.to_path_buf()) {
                     continue;
                 }
                 pending.extend(editor_events(db, *file, root).iter().enumerate().rev().map(

@@ -30,7 +30,7 @@ use lsp_types::{Contents, Hover, MarkupContent, MarkupKind};
 use tex_ls_analysis::bib::ast as bib_ast;
 pub use tex_ls_analysis::hover::{Provenance, lookup_command, lookup_environment};
 use tex_ls_analysis::hover::{TargetKind, signature_target_at};
-use tex_ls_parser::ast::{command_name, nth_group};
+use tex_ls_parser::ast::nth_group;
 use tex_ls_parser::semantic::LabelContext;
 use tex_ls_parser::semantic::completion::{PackageMeta, package_metadata};
 use tex_ls_parser::semantic::pkgmeta::{NeedsFormatDecl, OptionDecl, ProvidesDecl, provides_kind};
@@ -143,7 +143,16 @@ fn build_hover(
         return Some(markup_hover(value, site.name_range, idx));
     }
 
-    if let Some(target) = package_target_at(root, offset) {
+    if let Some(target) = package_target_at(root, offset, || {
+        let file = snapshot
+            .lookup_file(lint_path)
+            .expect("hover source must belong to its snapshot");
+        tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
+            root,
+            snapshot.definition_sites(file),
+            snapshot.file_operand_contexts(file),
+        )
+    }) {
         let mut value = package_metadata(&target.name)
             .map(|meta| render_package(&target.name, target.is_class, meta))
             .unwrap_or_else(|| {
@@ -246,8 +255,13 @@ struct PackageTarget {
 /// brace `{…}` argument of a `\usepackage`/`\documentclass`-family command, resolved
 /// to the single comma-separated segment covering the offset (so `\usepackage{a,b|}`
 /// hovers `b`). Comment continuations use the same literal spans as file links.
-fn package_target_at(root: &SyntaxNode, offset: usize) -> Option<PackageTarget> {
-    use tex_ls_parser::semantic::roles::{FileRoleKind, file_role};
+fn package_target_at(
+    root: &SyntaxNode,
+    offset: usize,
+    roles: impl FnOnce() -> tex_ls_analysis::external::links::FileRoleContext,
+) -> Option<PackageTarget> {
+    use tex_ls_parser::semantic::roles::FileRoleKind;
+    let file_roles = std::cell::LazyCell::new(roles);
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
     let (left, right) = match root.token_at_offset(at) {
         rowan::TokenAtOffset::None => return None,
@@ -268,10 +282,7 @@ fn package_target_at(root: &SyntaxNode, offset: usize) -> Option<PackageTarget> 
         if command.kind() != SyntaxKind::COMMAND {
             continue;
         }
-        let Some(name) = command_name(&command) else {
-            continue;
-        };
-        let Some(role) = file_role(&name) else {
+        let Some(role) = file_roles.role(&command) else {
             continue;
         };
         let is_class = match role.kind {
@@ -709,6 +720,17 @@ fn file_hover(snapshot: &Analysis, path: &Path, offset: usize) -> Option<(String
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn prose_package_probe_does_not_request_file_ownership() {
+        let root = tex_ls_parser::parser::parse("ordinary prose").syntax();
+        assert!(
+            package_target_at(&root, 3, || {
+                panic!("a prose hover must not build file roles")
+            })
+            .is_none()
+        );
+    }
+
     use super::*;
     use tex_ls_analysis::incremental::IncrementalDatabase;
 

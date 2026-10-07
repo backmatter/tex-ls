@@ -43,6 +43,17 @@ pub fn compute_signature_help(
     let idx = snapshot.file_line_index(file, enc);
     let offset = idx.offset_at(position.line, position.character);
     let root = snapshot.parsed_tree(file);
+    let at = TextSize::new(offset as u32);
+    if root
+        .token_at_offset(at)
+        .right_biased()
+        .is_some_and(|token| {
+            token.text_range().contains(at)
+                && tex_ls_parser::semantic::context::in_token_list(&token)
+        })
+    {
+        return None;
+    }
     let scope = snapshot.editor_signatures(file);
     if let Some(owner) = root
         .token_at_offset(TextSize::new(offset as u32))
@@ -196,6 +207,9 @@ fn argument_target_at(root: &SyntaxNode, offset: usize) -> Option<ArgTarget> {
     };
 
     for token in [left, right].into_iter().flatten() {
+        if tex_ls_parser::semantic::context::in_token_list(&token) {
+            continue;
+        }
         let Some(group) = enclosing_argument(&token) else {
             continue;
         };

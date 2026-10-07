@@ -98,7 +98,9 @@ impl Parser<'_> {
                     self.error_at(opener_span, format!("unclosed `{opener}`"));
                     break;
                 }
-                Some(SyntaxKind::CONTROL_SYMBOL) if self.text() == closer => {
+                Some(SyntaxKind::CONTROL_SYMBOL)
+                    if self.text() == closer && !self.is_primitive_operand(self.pos) =>
+                {
                     // The closer belongs to the math node, not its body.
                     break;
                 }
@@ -288,6 +290,13 @@ impl Parser<'_> {
             return;
         }
         match self.kind() {
+            Some(kind) if self.is_primitive_operand(self.pos) => {
+                if kind == SyntaxKind::CONTROL_WORD {
+                    self.operand_command(ArgumentDomain::Math);
+                } else {
+                    self.bump();
+                }
+            }
             Some(SyntaxKind::L_BRACE) => self.math_group(),
             Some(SyntaxKind::CONTROL_WORD) => {
                 // Same definition-body/expl3-region and brace-less gates as
@@ -428,7 +437,10 @@ impl Parser<'_> {
                     self.error_at(opener, "unclosed `\\left`");
                     break;
                 }
-                Some(SyntaxKind::CONTROL_SYMBOL) if matches!(self.text(), "\\]" | "\\)") => {
+                Some(SyntaxKind::CONTROL_SYMBOL)
+                    if matches!(self.text(), "\\]" | "\\)")
+                        && !self.is_primitive_operand(self.pos) =>
+                {
                     self.error_at(opener, "unclosed `\\left`");
                     break;
                 }

@@ -13,6 +13,7 @@
 pub mod conditional;
 pub mod core;
 pub mod edit;
+pub(crate) mod embedded;
 pub(crate) mod events;
 pub(crate) mod grammar;
 pub mod lexer;

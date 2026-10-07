@@ -833,7 +833,8 @@ fn verbatim_command_skips_leading_args() {
     // under the command, which therefore spans the whole construct.
     let out = tree(r"\mintinline{python}{x = $1}");
     assert!(!out.contains("error @"), "{out}");
-    assert!(out.contains(r#"VERB@19..27 "{x = $1}""#), "{out}");
+    assert!(out.contains("INLINE_CODE@19..27"), "{out}");
+    assert!(!out.contains("INLINE_MATH@"), "{out}");
     assert!(out.contains("COMMAND@0..27"), "{out}");
 }
 
@@ -2315,8 +2316,8 @@ fn a_let_source_operand_is_not_an_opener() {
     );
     assert_eq!(
         environments(&format!("{defs}\\let\\a\\def\\bc x \\ec\n")),
-        (0, true),
-        "a keyword consumed as an operand does not re-arm, but its slot still ran"
+        (1, true),
+        "the copied def token cannot redefine the following genuine opener"
     );
 }
 

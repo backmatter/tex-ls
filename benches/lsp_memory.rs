@@ -61,10 +61,17 @@ impl Client {
             capabilities: ClientCapabilities {
                 text_document: Some(TextDocumentClientCapabilities {
                     diagnostic: Some(DiagnosticClientCapabilities::default()),
+                    semantic_tokens: Some(serde_json::from_value(serde_json::json!({
+                        "requests": {"full": true}, "formats": ["relative"],
+                        "tokenTypes": tex_ls_protocol::semantic_tokens::TYPES.iter()
+                            .filter(|kind| **kind != "texEmbedded").copied().collect::<Vec<_>>(),
+                        "tokenModifiers": tex_ls_protocol::semantic_tokens::MODIFIERS,
+                    })).expect("semantic-token capabilities")),
                     ..Default::default()
                 }),
                 ..Default::default()
             },
+            initialization_options: Some(serde_json::json!({"texmf": {"enabled": false}})),
             ..Default::default()
         };
         let response = client.request("initialize", serde_json::to_value(params).unwrap());
@@ -200,6 +207,32 @@ impl Client {
     fn barrier(&mut self, uri: &Uri) {
         self.diagnostic(uri);
         self.hover(uri);
+        let response = self.request(
+            "textDocument/semanticTokens/full",
+            serde_json::json!({"textDocument": {"uri": uri}}),
+        );
+        assert!(
+            response.response_result.is_ok(),
+            "semantic tokens failed: {response:?}"
+        );
+        for method in [
+            "textDocument/definition",
+            "textDocument/references",
+            "textDocument/documentHighlight",
+            "textDocument/rename",
+        ] {
+            let mut params = serde_json::json!({"textDocument": {"uri": uri}, "position": {"line": 4, "character": 34}});
+            if method == "textDocument/references" {
+                params["context"] = serde_json::json!({"includeDeclaration": true});
+            } else if method == "textDocument/rename" {
+                params["newName"] = "replacement".into();
+            }
+            let response = self.request(method, params);
+            assert!(
+                response.response_result.is_ok(),
+                "{method} failed: {response:?}"
+            );
+        }
     }
 
     fn shutdown(mut self) {
@@ -350,7 +383,7 @@ fn main() {
     let query_path = scratch.path().join("query.tex");
     fs::write(
         &query_path,
-        "\\documentclass{article}\n% query\n% query\n% query\n\\section{Query}\n",
+        "\\documentclass{article}\n% query\n% query\n% query\n\\section{Query}\\label{demo}\\ref{demo} é😀\n",
     )
     .unwrap();
 

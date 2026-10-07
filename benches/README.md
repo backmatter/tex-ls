@@ -43,7 +43,8 @@ source reads can queue a final compiler-artifact batch.
 They measure completion, hover, definition, and diagnostics
 through five edits. Synthetic runs
 assert that a documented command resolves to its declaration, including across
-files. Real-project definition counts depend on the available dependencies.
+files. Synthetic output retains individual warm samples and Linux process memory.
+Real-project definition counts depend on the available dependencies.
 Assertions check completion, report invalidation/reuse, and zero warm
 source reads/compiler probes. Fallback watcher reads are outside those acquisition
 counters. Each workload also observes three idle seconds (`--idle-seconds`): Linux
@@ -54,6 +55,60 @@ needed only for typesetting.
 
 For before/after comparisons, pass the executable as the first positional argument
 and alternate binaries under the same machine conditions. Keep raw output with the comparison.
+
+## Highlighting workloads
+
+```sh
+python3 scripts/benchmark_highlighting.py target/release/tex-ls
+```
+
+This measures full semantic-token requests, ten-line range requests, document
+outlines, diagnostic pulls, and full requests after incremental prose edits.
+Workloads cover prose, many definitions, literal `csname` uses, math, long Unicode
+math lines, Python listings, inert token lists, graphics keyvals, and BibTeX,
+including a single Unicode line with many entries. Each workload starts a fresh
+server with TEXMF disabled, then repeats warm requests after acquisition settles.
+It checks token ordering, range/full equivalence, and stable responses. JSON lines retain every timed sample,
+source and token hashes, and Linux process RSS/high-water marks. Use `--sizes`,
+`--workloads`, and `--repeats` to select a workload; compare matching source and
+purpose hashes when alternating before/after executables. Purpose hashes coalesce
+adjacent identical roles, so harmless token segmentation changes remain comparable.
+Outlines use hierarchical support by default; `--flat-symbols` measures flat
+clients. Symbol and diagnostic hashes normalize the temporary document URI for comparisons.
+
+## Bulk navigation workloads
+
+```sh
+python3 scripts/benchmark_navigation.py target/release/tex-ls
+```
+
+This measures definitions, references with and without declarations, rename, and cursor
+highlights for labels, citations, commands, environments, glossary keys, and
+BibTeX strings. Separate workloads measure document links and bibliography
+folding. Fixtures put many occurrences on one Unicode line and declarations after
+uses. The ASCII label workload checks conversion overhead; `many_definitions`
+checks command uses in a file with many unrelated definitions. `redefinitions`
+checks many declarations of one command, including definition-link containers. Each workload
+starts a fresh server with TEXMF disabled and waits for acquisition to settle.
+JSON lines retain warm samples, response counts and hashes, source hashes, and
+Linux process RSS/high-water marks. Temporary URIs are normalized for before/after
+comparisons. Use `--sizes`, `--workloads`, and `--repeats` to limit the run.
+The optional `many_files` workload measures a command search across many files
+whose declarations do not match. For example, use `--workloads many_files --sizes
+250 1000` to check namespace lookup without large response payloads.
+
+## Bulk editor workloads
+
+`python3 scripts/benchmark_bulk.py target/release/tex-ls` measures multi-cursor
+LaTeX and BibTeX selections, safe Fix All edits, BibTeX range formatting, document
+colors, color presentations, bulk quick fixes, table-column edits, and file-rename previews. It runs both UTF-8 and
+UTF-16 on long Unicode lines, with unsorted and duplicate selection cursors.
+Each result includes source and response hashes, repeated request timings, and
+process memory. Fix All uses an explicit fixture configuration for the safe
+script-brace rule. These requests do not change files on disk.
+The optional `--workloads unknown_actions` measures suppression alternatives over
+a large selection. Their result count is bounded, and changes to that bound
+intentionally change the response hash.
 
 ## Focused profiles
 
@@ -72,7 +127,14 @@ Run `cargo run --release --locked --example NAME`:
 | `session_profile` | Live and disposed allocations after repeated session open/close histories |
 
 `session_profile` needs `--features tex-ls-browser/allocation-metrics`.
+`browser_profile` accepts a JSON array of `{path, source}` documents. Set
+`TEX_LS_PROFILE_ROUNDS` to limit edits and `TEX_LS_PROFILE_FULL_EDIT=1` to shift all
+source ranges with whole-document replacements instead of command-prefix edits.
 `scripts/profile_wasm_session.cjs` profiles an allocation-metrics WASM build.
+The native session-history benchmark includes definition, references, rename,
+cursor-highlight, and semantic-token requests alongside
+diagnostics and hover. It disables TEXMF discovery so installation observations
+cannot change the retained-history comparison.
 
 `bibliography_profile` checks full/incremental equivalence and compares direct flat
 symbols and the response adapter with a reference adapter. It records their

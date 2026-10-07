@@ -244,12 +244,31 @@ pub fn classify_context_with_declarations(
     offset: usize,
     declared: &ResolvedDeclarations,
 ) -> CompletionContext {
+    classify_context_with_roles(root, offset, declared, || {
+        crate::external::links::FileRoleContext::new(root)
+    })
+}
+
+/// Keep command-name classification local; other arguments reuse source facts.
+pub fn classify_context_with_roles(
+    root: &SyntaxNode,
+    offset: usize,
+    declared: &ResolvedDeclarations,
+    roles: impl FnOnce() -> crate::external::links::FileRoleContext,
+) -> CompletionContext {
     let offset = TextSize::new(offset.min(u32::MAX as usize) as u32);
     let (left, right) = match root.token_at_offset(offset) {
         TokenAtOffset::None => return CompletionContext::None,
         TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
     };
+    if [left.as_ref(), right.as_ref()]
+        .into_iter()
+        .flatten()
+        .all(tex_ls_parser::semantic::context::in_token_list)
+    {
+        return CompletionContext::None;
+    }
 
     // Typing a command name extends the token to the *left* of the cursor.
     if let Some(left) = &left
@@ -258,8 +277,12 @@ pub fn classify_context_with_declarations(
         return ctx;
     }
 
+    let file_roles = roles();
+
     for command in root.descendants().filter(|node| {
-        node.kind() == SyntaxKind::COMMAND && node.text_range().contains_inclusive(offset)
+        node.kind() == SyntaxKind::COMMAND
+            && node.text_range().contains_inclusive(offset)
+            && file_roles.allows(node)
     }) {
         for (kind, range, name) in
             tex_ls_parser::semantic::roles::biblatex_style_arguments(&command)
@@ -277,13 +300,13 @@ pub fn classify_context_with_declarations(
         }
     }
 
-    if let Some(context) = options::classify(root, usize::from(offset), declared) {
+    if let Some(context) = options::classify(root, usize::from(offset), declared, &file_roles) {
         return context;
     }
 
     // Inside a brace group: either adjacent token's parent is the group.
     for tok in [left.as_ref(), right.as_ref()].into_iter().flatten() {
-        if let Some(ctx) = group_context(tok, offset, declared) {
+        if let Some(ctx) = group_context(tok, offset, declared, &file_roles) {
             return ctx;
         }
     }
@@ -325,6 +348,7 @@ fn group_context(
     token: &SyntaxToken,
     offset: TextSize,
     declared: &ResolvedDeclarations,
+    file_roles: &crate::external::links::FileRoleContext,
 ) -> Option<CompletionContext> {
     let group = enclosing_group(token)?;
     let parent = group.parent()?;
@@ -336,9 +360,19 @@ fn group_context(
             })
         }
         (SyntaxKind::GROUP | SyntaxKind::BARE_ARGUMENT, SyntaxKind::COMMAND) => {
+            if file_roles.is_operand_head(&parent) {
+                return None;
+            }
             let name = command_name(&parent)?;
             let index = group_index(&parent, &group)?;
-            command_arg_context(&name, index, &group, offset, declared)
+            command_arg_context(
+                &name,
+                index,
+                &group,
+                offset,
+                declared,
+                file_roles.allows(&parent),
+            )
         }
         _ => None,
     }
@@ -351,6 +385,7 @@ fn command_arg_context(
     group: &SyntaxNode,
     offset: TextSize,
     declared: &ResolvedDeclarations,
+    builtin_file_role: bool,
 ) -> Option<CompletionContext> {
     let semantic_name = declared.command_like(name).unwrap_or(name);
     if matches!(
@@ -395,6 +430,7 @@ fn command_arg_context(
         });
     }
     if let Some(kind) = package_arg(name)
+        && builtin_file_role
         && tex_ls_parser::semantic::roles::file_role(name)
             .is_some_and(|role| role.argument == index)
     {
@@ -410,6 +446,7 @@ fn command_arg_context(
         });
     }
     if let Some((kind, path_index)) = file_arg(name)
+        && builtin_file_role
         && index == path_index
     {
         if discontiguous_file_name_at(group, name, offset) {
@@ -441,6 +478,7 @@ fn command_arg_context(
         });
     }
     if let Some(pgf) = tikz_library_command(name)
+        && builtin_file_role
         && index == 0
     {
         // A `\usetikzlibrary{calc,fi|}` completes the name after the last comma.
@@ -858,6 +896,24 @@ fn union_names<'a>(names: impl Iterator<Item = &'a str>, prefix: &str) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn command_name_completion_does_not_construct_file_roles() {
+        let source = r"\sect";
+        let root = crate::parser::parse(source).syntax();
+        let context = classify_context_with_roles(
+            &root,
+            source.len(),
+            &ResolvedDeclarations::default(),
+            || panic!("command-name classification must not build source role indexes"),
+        );
+        assert_eq!(
+            context,
+            CompletionContext::CommandName {
+                prefix: "sect".into()
+            }
+        );
+    }
     use crate::declarations::Declarations;
     use crate::parser::parse;
     use crate::semantic::scan_definitions;
@@ -880,6 +936,40 @@ mod tests {
 
     fn classify(src: &str, offset: usize) -> CompletionContext {
         classify_context(&root(src), offset)
+    }
+
+    #[test]
+    fn copied_heads_have_no_argument_completion_but_nested_calls_do() {
+        for command in [
+            "ref",
+            "cite",
+            "gls",
+            "label",
+            "newglossaryentry",
+            "input",
+            "includegraphics",
+        ] {
+            let source = format!("\\meaning\\{command}{{ke}}");
+            assert_eq!(
+                classify(&source, at(&source, "{ke")),
+                CompletionContext::None,
+                "{source}"
+            );
+        }
+        let source = r"\meaning\ref{\ref{ke}}";
+        assert_eq!(
+            classify(source, source.rfind("ke").unwrap() + 2),
+            CompletionContext::LabelRef {
+                prefix: "ke".into()
+            }
+        );
+        let source = r"\meaning\re";
+        assert_eq!(
+            classify(source, source.len()),
+            CompletionContext::CommandName {
+                prefix: "re".into()
+            }
+        );
     }
 
     /// Candidate labels for a source + cursor, using the document's own scanned
@@ -1059,6 +1149,32 @@ mod tests {
         );
         let got = labels(src, offset);
         assert_eq!(got, vec!["sec:intro".to_string()]);
+    }
+
+    #[test]
+    fn printed_token_lists_do_not_offer_command_or_key_completion() {
+        let src = r"\label{real}\detokenize{\ref{re}\fo\begin{itemize}\end{itemize}}\ref{re}";
+        for prefix in [
+            r"\detokenize{\ref{re",
+            r"\detokenize{\ref{re}\fo",
+            r"\detokenize{\ref{re}\fo\begin{it",
+        ] {
+            assert_eq!(classify(src, at(src, prefix)), CompletionContext::None);
+        }
+        let live = src.rfind(r"\ref{re").unwrap() + r"\ref{re".len();
+        assert_eq!(
+            classify(src, live),
+            CompletionContext::LabelRef {
+                prefix: "re".into()
+            }
+        );
+        let src = r"\renewcommand{\detokenize}[1]{#1}\detokenize{\ref{re}}";
+        assert_eq!(
+            classify(src, at(src, r"\detokenize{\ref{re")),
+            CompletionContext::LabelRef {
+                prefix: "re".into()
+            }
+        );
     }
 
     #[test]

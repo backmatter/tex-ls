@@ -36,7 +36,7 @@ use std::path::PathBuf;
 
 use crate::linter::conditional::{Frame, mutually_exclusive};
 use crate::linter::diagnostic::{Diagnostic, Severity};
-use crate::project::{PackageKind, PackageTarget, collect_package_edges};
+use crate::project::{PackageKind, PackageTarget};
 
 use super::{Example, Rule, RuleContext};
 
@@ -76,7 +76,11 @@ impl Rule for DuplicatePackage {
         // a third unconditional load is still flagged even when the first two
         // were mutually exclusive with each other.
         let mut seen: HashMap<PathBuf, Vec<&[Frame]>> = HashMap::new();
-        for edge in collect_package_edges(ctx.root, None) {
+        for edge in crate::project::package::collect_package_edges_with_roles(
+            ctx.root,
+            None,
+            ctx.file_roles(),
+        ) {
             if !matches!(
                 edge.kind,
                 PackageKind::UsePackage | PackageKind::RequirePackage

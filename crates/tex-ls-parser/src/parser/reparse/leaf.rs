@@ -119,6 +119,19 @@ pub(super) fn context_admits(leaf: &SyntaxToken, relex_from: &SyntaxToken) -> Op
         return None;
     }
 
+    // ifx consumes two TeX tokens, even when WORD coalesces their source
+    // characters. Changing either operand can activate a later raw capture.
+    // Its operands may cross comments and line endings, so the line scan alone
+    // cannot establish this proof. Unrelated prose retains its ordinary tier.
+    let mut prior = previous_nontrivia(leaf);
+    for _ in 0..2 {
+        let Some(token) = prior else { break };
+        if token.kind() == SyntaxKind::CONTROL_WORD && token.text() == "\\ifx" {
+            return None;
+        }
+        prior = previous_nontrivia(&token);
+    }
+
     Some(Context { in_math })
 }
 
@@ -199,7 +212,9 @@ pub(super) fn text_reads_are_inert(kind: SyntaxKind, old: &str, new: &str, ctx: 
         // all.
         SyntaxKind::WHITESPACE | SyntaxKind::COMMENT => true,
         SyntaxKind::WORD => word_reads_are_inert(old, new, ctx),
-        SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY => raw_capture_reads_are_inert(old, new),
+        SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY | SyntaxKind::DELEGATED_CODE => {
+            raw_capture_reads_are_inert(old, new)
+        }
         _ => false,
     }
 }
@@ -322,6 +337,15 @@ mod tests {
     use Verdict::*;
 
     const TEXT_READS: &[(&str, Verdict)] = &[
+        (
+            "|| self.tokens[self.pos].text != \"#\"",
+            Guarded("primitive string files decline incremental splices"),
+        ),
+        (
+            "&& matches!(token.text.as_bytes().first(), Some(b'1'..=b'9'))",
+            Guarded("primitive string files decline incremental splices"),
+        ),
+        (r#".take_while(|t| t.text != "\\end")"#, ControlSequence),
         ("self.text(),", ControlSequence),
         (
             r#".is_some_and(|token| token.kind == SyntaxKind::WORD && token.text == "*")"#,
@@ -359,15 +383,7 @@ mod tests {
             ControlSequence,
         ),
         (
-            r#"Some(SyntaxKind::CONTROL_SYMBOL) if matches!(self.text(), "\\]" | "\\)") => {"#,
-            ControlSequence,
-        ),
-        (
             r#"Some(SyntaxKind::CONTROL_SYMBOL) if self.text() == "\\\\" => self.line_break(),"#,
-            ControlSequence,
-        ),
-        (
-            "Some(SyntaxKind::CONTROL_SYMBOL) if self.text() == closer => {",
             ControlSequence,
         ),
         (
@@ -416,6 +432,16 @@ mod tests {
             ControlSequence,
         ),
         (
+            r#"let operand = operands.observe_at(token.kind, &token.text, ctx, operand_offset);"#,
+            Guarded(
+                "ifx operand adjacency, let assignment guards, and ordered-reader offset fallback",
+            ),
+        ),
+        (
+            r#"&& token.text.get(1..) == Some("detokenize")"#,
+            ControlSequence,
+        ),
+        (
             "let builtin_args = builtin_command_args(self.text());",
             ControlSequence,
         ),
@@ -443,6 +469,7 @@ mod tests {
             Context("a `NAME_GROUP`/`BEGIN`/`END` ancestor, or a `\\begin` head"),
         ),
         ("off += t.text.len();", Offsets),
+        ("operand_offset += token.text.len();", Offsets),
         (
             "return Some(t.text.as_str());",
             Guarded(
@@ -454,8 +481,13 @@ mod tests {
             "self.in_def_body = saved || is_definition_body_command(self.text());",
             ControlSequence,
         ),
+        ("&& self.text() == name", ControlSequence),
         (
-            "self.kind() == Some(SyntaxKind::CONTROL_WORD) && self.text() == name",
+            r#"if self.text() == closer && !self.is_primitive_operand(self.pos) =>"#,
+            ControlSequence,
+        ),
+        (
+            r#"if matches!(self.text(), "\\]" | "\\)")"#,
             ControlSequence,
         ),
         (
@@ -595,7 +627,11 @@ mod tests {
     #[test]
     fn a_raw_capture_may_not_gain_or_lose_its_leading_backslash() {
         let ctx = ctx();
-        for kind in [SyntaxKind::VERB, SyntaxKind::VERBATIM_BODY] {
+        for kind in [
+            SyntaxKind::VERB,
+            SyntaxKind::VERBATIM_BODY,
+            SyntaxKind::DELEGATED_CODE,
+        ] {
             assert!(text_reads_are_inert(kind, "|a|", "|ab|", ctx));
             assert!(text_reads_are_inert(kind, "\\verb|a|", "\\verb|ab|", ctx));
             assert!(!text_reads_are_inert(kind, "|a|", "\\a|", ctx));

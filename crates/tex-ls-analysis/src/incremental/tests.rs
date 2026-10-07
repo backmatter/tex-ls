@@ -2,6 +2,377 @@
 use super::*;
 
 #[test]
+fn ordered_alias_lookup_preserves_resolution_and_invalidates_removed_aliases() {
+    use crate::external::{
+        ExternalInputKind, ExternalInputs, FileCandidates, FileInputs, Observation,
+    };
+    let mut db = IncrementalDatabase::default();
+    let project = db.project_id();
+    let main = Path::new("/p/main.tex");
+    let target = Path::new("/p/actual.tex");
+    let file = db.apply_change(
+        main,
+        "\\documentclass{article}\\input{alias0000}\\input{alias0500}\\input{alias0999}",
+        None,
+    );
+    db.apply_change(target, "\\newcommand{\\aliasedcommand}{Printed}", None);
+    let paths: Vec<_> = (0..1_000)
+        .map(|index| PathBuf::from(format!("/p/alias{index:04}.tex")))
+        .collect();
+    let token = db
+        .begin_external_refresh(project, ExternalInputKind::Files)
+        .unwrap();
+    db.apply_external_inputs(
+        token,
+        ExternalInputs::Files(FileInputs {
+            file_resolution: paths
+                .iter()
+                .rev()
+                .map(|path| (path.clone(), Observation::Present(target.into())))
+                .collect(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    {
+        let snapshot = db.snapshot();
+        for path in &paths {
+            assert_eq!(snapshot.file_alias(path), Some(target));
+            assert_eq!(
+                snapshot
+                    .resolve_file(&FileCandidates {
+                        local: vec![path.clone()],
+                        installed: None
+                    })
+                    .target,
+                Observation::Present(path.clone())
+            );
+        }
+        for missing in ["/p/a.tex", "/p/alias0500a.tex", "/p/z.tex"] {
+            assert!(
+                snapshot
+                    .resolve_file(&FileCandidates {
+                        local: vec![missing.into()],
+                        installed: None
+                    })
+                    .target
+                    == Observation::Unknown
+            );
+        }
+        assert!(
+            snapshot
+                .editor_symbols(file)
+                .commands
+                .contains("aliasedcommand")
+        );
+        assert!(
+            snapshot
+                .command_source_files(main)
+                .iter()
+                .any(|path| path == target)
+        );
+    }
+    let token = db
+        .begin_external_refresh(project, ExternalInputKind::Files)
+        .unwrap();
+    db.apply_external_inputs(
+        token,
+        ExternalInputs::Files(FileInputs {
+            file_resolution: paths
+                .iter()
+                .map(|path| (path.clone(), Observation::Absent))
+                .collect(),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let snapshot = db.snapshot();
+    assert!(snapshot.file_alias(&paths[500]).is_none());
+    assert_eq!(
+        snapshot
+            .resolve_file(&FileCandidates {
+                local: vec![paths[500].clone()],
+                installed: None
+            })
+            .target,
+        Observation::Unknown
+    );
+    assert!(
+        !snapshot
+            .editor_symbols(file)
+            .commands
+            .contains("aliasedcommand")
+    );
+    assert!(
+        !snapshot
+            .command_source_files(main)
+            .iter()
+            .any(|path| path == target)
+    );
+}
+
+#[test]
+fn acquisition_batches_preserve_shared_overlays_removals_aliases_and_last_values() {
+    use crate::external::{
+        ExternalInputKind, ExternalInputs, FileInputs, LocationKind, LocationObservation,
+        Observation,
+    };
+    let mut db = IncrementalDatabase::default();
+    let first = db.project_id();
+    let second = db.create_project(ResolvedDeclarations::default());
+    let shared = Path::new("/p/shared.tex");
+    let removed = Path::new("/p/removed.tex");
+    db.set_backing(first, shared, Some("Old backing".into_source_text()))
+        .unwrap();
+    db.set_backing(second, shared, Some("Old backing".into_source_text()))
+        .unwrap();
+    db.set_backing(first, removed, Some("Removed backing".into_source_text()))
+        .unwrap();
+    db.open_overlay(second, shared, "Unsaved overlay").unwrap();
+    let token = db
+        .begin_external_refresh(first, ExternalInputKind::Files)
+        .unwrap();
+    db.apply_external_inputs(
+        token,
+        ExternalInputs::Files(FileInputs {
+            backing: vec![
+                (shared.into(), Some("New backing".into_source_text())),
+                (removed.into(), None),
+                ("/p/new.tex".into(), Some("First value".into_source_text())),
+                ("/p/./new.tex".into(), Some("Last value".into_source_text())),
+            ],
+            locations: vec![(
+                "/p/./new.tex".into(),
+                LocationObservation {
+                    kind: Observation::Present(LocationKind::File),
+                    ..Default::default()
+                },
+            )],
+            file_resolution: vec![(
+                "/p/alias.tex".into(),
+                Observation::Present("/p/./new.tex".into()),
+            )],
+        }),
+    )
+    .unwrap();
+    let snapshot = db.snapshot_for(first).unwrap();
+    assert_eq!(
+        snapshot
+            .project_members()
+            .iter()
+            .map(|member| member.path.as_path())
+            .collect::<Vec<_>>(),
+        [Path::new("/p/new.tex"), shared]
+    );
+    assert!(snapshot.lookup_file(removed).is_none());
+    assert_eq!(
+        snapshot.file_text(snapshot.lookup_file(shared).unwrap()),
+        "Unsaved overlay"
+    );
+    assert_eq!(
+        snapshot.file_text(snapshot.lookup_file(Path::new("/p/new.tex")).unwrap()),
+        "Last value"
+    );
+    assert_eq!(
+        snapshot.file_alias(Path::new("/p/alias.tex")),
+        Some(Path::new("/p/new.tex"))
+    );
+    assert_eq!(
+        snapshot.location_observation(Path::new("/p/new.tex")).kind,
+        Observation::Present(LocationKind::File)
+    );
+    drop(snapshot);
+    db.close_overlay(second, shared).unwrap();
+    for project in [first, second] {
+        let snapshot = db.snapshot_for(project).unwrap();
+        assert_eq!(
+            snapshot.file_text(snapshot.lookup_file(shared).unwrap()),
+            "New backing"
+        );
+    }
+    // An addition without a storage rebuild must publish membership too.
+    db.set_backing_batch(
+        first,
+        [("/p/extra.tex".into(), Some("Extra".into_source_text()))],
+    )
+    .unwrap();
+    let snapshot = db.snapshot_for(first).unwrap();
+    assert_eq!(snapshot.project_members().len(), 3);
+    assert!(snapshot.lookup_file(Path::new("/p/extra.tex")).is_some());
+}
+
+#[test]
+fn graph_filters_and_root_graphics_reuse_cached_ownership_after_edits() {
+    let mut db = IncrementalDatabase::default();
+    let path = Path::new("/project/main.tex");
+    let source = r"\includeonly{a}\meaning\includeonly{b}\graphicspath{{images/}}\meaning\graphicspath{{fake/}}\meaning\input{printed}\include{a}\include{b}";
+    let file = db.apply_change(path, source, None);
+    db.apply_change(
+        Path::new("/project/a.tex"),
+        r"A\includegraphics{plot}",
+        None,
+    );
+    db.apply_change(
+        Path::new("/project/b.tex"),
+        r"B\includegraphics{plot}",
+        None,
+    );
+    let check = |db: &IncrementalDatabase, directory: &str, included: &str| {
+        let snapshot = db.snapshot();
+        snapshot.file_modes(file);
+        let view = snapshot.project_graph().interpret(path);
+        for name in ["a", "b"] {
+            let target = PathBuf::from(format!("/project/{name}.tex"));
+            assert_eq!(
+                view.edges
+                    .iter()
+                    .find(|edge| edge.target.as_ref() == Some(&target))
+                    .unwrap()
+                    .build_participation,
+                Some(name == included)
+            );
+        }
+        let child = snapshot
+            .lookup_file(Path::new(&format!("/project/{included}.tex")))
+            .unwrap();
+        let references = snapshot.file_references(child);
+        assert_eq!(references.len(), 1);
+        assert!(
+            references[0]
+                .candidates
+                .local
+                .contains(&PathBuf::from(format!("/project/{directory}/plot.pdf")))
+        );
+    };
+    db.clear_query_log();
+    check(&db, "images", "a");
+    for kind in [QueryKind::DefinitionSites, QueryKind::FileOperands] {
+        assert_eq!(
+            db.query_log()
+                .iter()
+                .filter(|entry| entry.kind == kind && entry.file == Some(file))
+                .count(),
+            1
+        );
+    }
+    db.clear_query_log();
+    check(&db, "images", "a");
+    assert!(db.query_log().is_empty());
+    db.apply_change(
+        path,
+        format!(r"\renewcommand{{\meaning}}[1]{{#1}}{source}"),
+        None,
+    );
+    check(&db, "fake", "b");
+    for kind in [QueryKind::DefinitionSites, QueryKind::FileOperands] {
+        assert_eq!(
+            db.query_log()
+                .iter()
+                .filter(|entry| entry.kind == kind && entry.file == Some(file))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn inherited_graphics_are_shared_and_prose_edits_reuse_child_contexts() {
+    let mut db = IncrementalDatabase::default();
+    let path = Path::new("/project/main.tex");
+    let mut source = "\\documentclass{article}\n\\graphicspath{{images/}}\n".to_string();
+    let mut children = Vec::new();
+    for index in 0..32 {
+        source.push_str(&format!("\\input{{chapter{index}}}\n"));
+        children.push(db.apply_change(
+            &PathBuf::from(format!("/project/chapter{index}.tex")),
+            "\\includegraphics{figure.png}\n",
+            None,
+        ));
+    }
+    db.apply_change(path, source.as_str(), None);
+    db.clear_query_log();
+    let check = |db: &IncrementalDatabase, directory: &str| {
+        let snapshot = db.snapshot();
+        for &child in &children {
+            let references = snapshot.file_references(child);
+            assert_eq!(references.len(), 1);
+            assert!(
+                references[0]
+                    .candidates
+                    .local
+                    .contains(&PathBuf::from(format!("/project/{directory}/figure.png")))
+            );
+        }
+        assert_eq!(
+            snapshot
+                .query_log()
+                .iter()
+                .filter(|entry| entry.kind == QueryKind::RootGraphics)
+                .count(),
+            1
+        );
+    };
+    check(&db, "images");
+    db.clear_query_log();
+    db.apply_change(path, format!("Prose.\n{source}"), None);
+    check(&db, "images");
+    assert!(
+        db.snapshot()
+            .query_log()
+            .iter()
+            .all(|entry| entry.kind != QueryKind::FileReferences)
+    );
+    db.clear_query_log();
+    db.apply_change(path, source.replace("images/", "changed/"), None);
+    check(&db, "changed");
+    assert_eq!(
+        db.snapshot()
+            .query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::FileReferences)
+            .count(),
+        children.len()
+    );
+}
+
+#[test]
+fn source_modes_are_reused_and_invalidate_when_source_changes_the_domain() {
+    use tex_ls_parser::semantic::mode::Mode;
+    let mut db = IncrementalDatabase::default();
+    let path = Path::new("/project/modes.tex");
+    let source = r"$x + \text{printed}$";
+    let file = db.apply_change(path, source, None);
+    let at = source.find("printed").unwrap();
+    assert_eq!(db.snapshot().file_modes(file).mode_at(at), Mode::Text);
+    db.clear_query_log();
+    for _ in 0..3 {
+        assert_eq!(db.snapshot().file_modes(file).mode_at(at), Mode::Text);
+    }
+    assert!(
+        db.snapshot()
+            .query_log()
+            .iter()
+            .all(|entry| entry.kind != QueryKind::FileModes)
+    );
+    let changed = r"\renewcommand{\text}[1]{#1}$x + \text{printed}$";
+    db.apply_change(path, changed, None);
+    assert_eq!(
+        db.snapshot()
+            .file_modes(file)
+            .mode_at(changed.find("printed").unwrap()),
+        Mode::Unknown
+    );
+    assert_eq!(
+        db.snapshot()
+            .query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::FileModes)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn removal_releases_text_after_the_last_snapshot() {
     let mut db = Database::default();
     let text = "\\section{Removed}\n".into_source_text();
@@ -635,6 +1006,7 @@ fn feature_extractions_share_current_ranges_and_preserve_stable_project_facts() 
     }
     for kind in [
         QueryKind::DefinitionSites,
+        QueryKind::FileOperands,
         QueryKind::NameOccurrences,
         QueryKind::Outline,
         QueryKind::IncludeComponents,
@@ -738,4 +1110,274 @@ fn changing_one_namespace_reuses_the_other_components_facts() {
                     QueryKind::ComponentLabels | QueryKind::ComponentCitations
                 ))
     );
+}
+
+#[test]
+fn label_context_cache_is_lazy_shared_across_candidates_and_invalidates_with_ownership() {
+    use tex_ls_parser::semantic::LabelContext;
+    let mut db = IncrementalDatabase::default();
+    let origin = Path::new("/project/context-main.tex");
+    let child = Path::new("/project/context-child.tex");
+    let mut origin_source = String::from(
+        r"\input{context-child}\section{Live}\meaning\section{Copied}\label{ownership}",
+    );
+    for index in 0..64 {
+        origin_source.push_str(&format!(
+            "\n\\section{{Origin {index}}}\\label{{origin-{index}}}"
+        ));
+    }
+    let child_source = (0..256)
+        .map(|index| format!("\n\\section{{Child {index}}}\\label{{child-{index}}}"))
+        .collect::<String>();
+    let origin_file = db.apply_change(origin, origin_source.as_str(), None);
+    let child_file = db.apply_change(child, child_source.as_str(), None);
+    {
+        let snapshot = db.snapshot();
+        snapshot.semantic_model(origin_file);
+        snapshot.file_outline(origin_file);
+        snapshot.file_modes(origin_file);
+        assert!(
+            snapshot
+                .query_log()
+                .iter()
+                .all(|entry| entry.kind != QueryKind::FileLabelContexts)
+        );
+    }
+    db.clear_query_log();
+    {
+        let snapshot = db.snapshot();
+        for (prefix, count) in [("origin", 64), ("child", 256)] {
+            for index in 0..count {
+                let expected = if prefix == "origin" {
+                    format!("Origin {index}")
+                } else {
+                    format!("Child {index}")
+                };
+                assert_eq!(
+                    snapshot.label_context(origin, &format!("{prefix}-{index}")),
+                    Some(LabelContext::Section { title: expected })
+                );
+            }
+        }
+        for file in [origin_file, child_file] {
+            assert_eq!(
+                snapshot
+                    .query_log()
+                    .iter()
+                    .filter(|entry| entry.kind == QueryKind::FileLabelContexts
+                        && entry.file == Some(file))
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            snapshot.label_context(origin, "ownership"),
+            Some(LabelContext::Section {
+                title: "Live".into()
+            })
+        );
+    }
+    db.clear_query_log();
+    for index in 0..256 {
+        assert!(
+            db.snapshot()
+                .label_context(origin, &format!("child-{index}"))
+                .is_some()
+        );
+    }
+    assert!(
+        db.query_log()
+            .iter()
+            .all(|entry| entry.kind != QueryKind::FileLabelContexts)
+    );
+    db.apply_change(
+        origin,
+        format!(r"\renewcommand{{\meaning}}[1]{{#1}}{origin_source}"),
+        None,
+    );
+    assert_eq!(
+        db.snapshot().label_context(origin, "ownership"),
+        Some(LabelContext::Section {
+            title: "Copied".into()
+        })
+    );
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::FileLabelContexts)
+            .count(),
+        1
+    );
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .find(|entry| entry.kind == QueryKind::FileLabelContexts)
+            .unwrap()
+            .file,
+        Some(origin_file)
+    );
+}
+
+#[test]
+fn label_context_cache_keeps_first_duplicate_and_none_falls_through_to_other_definers() {
+    use tex_ls_parser::semantic::LabelContext;
+    let mut db = IncrementalDatabase::default();
+    let origin = Path::new("/project/duplicate-main.tex");
+    let child = Path::new("/project/duplicate-child.tex");
+    let file = db.apply_change(origin, r"\input{duplicate-child}\label{none-first}\section{Origin}\label{none-first}\label{first-title}\section{Later}\label{first-title}", None);
+    db.apply_change(child, r"\section{Child}\label{none-first}", None);
+    let snapshot = db.snapshot();
+    assert_eq!(
+        snapshot.file_label_contexts(file).get("none-first"),
+        Some(None)
+    );
+    assert_eq!(
+        snapshot.label_context(origin, "none-first"),
+        Some(LabelContext::Section {
+            title: "Child".into()
+        })
+    );
+    assert_eq!(
+        snapshot.label_context(origin, "first-title"),
+        Some(LabelContext::Section {
+            title: "Origin".into()
+        })
+    );
+    assert_eq!(snapshot.label_context(origin, "absent"), None);
+}
+
+#[test]
+fn label_context_cache_stores_long_titles_once_per_source_context() {
+    let mut db = IncrementalDatabase::default();
+    let path = Path::new("/project/shared-titles.tex");
+    let heading = "Heading ".repeat(4096);
+    let caption = "Caption ".repeat(4096);
+    let mut source = format!("\\section{{{heading}}}");
+    for index in 0..256 {
+        source.push_str(&format!("\\label{{section-{index}}}"));
+    }
+    source.push_str(&format!("\\begin{{figure}}\\caption{{{caption}}}"));
+    for index in 0..256 {
+        source.push_str(&format!("\\label{{float-{index}}}"));
+    }
+    source.push_str(r"\end{figure}");
+    let file = db.apply_change(path, source, None);
+    let snapshot = db.snapshot();
+    let cache = snapshot.file_label_contexts(file);
+    assert_eq!(cache.labels.len(), 512);
+    assert_eq!(cache.contexts.len(), 2);
+    assert_eq!(cache.get("section-0"), cache.get("section-255"));
+    assert_eq!(cache.get("float-0"), cache.get("float-255"));
+    let stored_text_bytes = cache
+        .contexts
+        .values()
+        .map(|context| match context {
+            tex_ls_parser::semantic::LabelContext::Section { title } => title.len(),
+            tex_ls_parser::semantic::LabelContext::Float { caption, .. } => {
+                caption.as_ref().map_or(0, String::len)
+            }
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        stored_text_bytes,
+        heading.trim().len() + caption.trim().len()
+    );
+}
+
+#[test]
+fn operand_facts_are_shared_across_consumers_and_match_fresh_analysis_after_edits() {
+    let path = Path::new("/project/operand-cache.tex");
+    let source = r"\includeonly{a}\meaning\includeonly{b}\include{a}\meaning\newcommand{\fake}[1]{#1}\section{Live}\label{live}\meaning\ref{printed}\ref{live}";
+    let mut db = IncrementalDatabase::default();
+    let file = db.apply_change(path, source, None);
+    let check = |snapshot: &Analysis, source: &str, expected_refs: usize, expected_fake: bool| {
+        let root = snapshot.parsed_tree(file);
+        let full = crate::parser::parse(source).syntax();
+        assert_eq!(root.green(), full.green());
+        assert_eq!(
+            snapshot.semantic_model(file),
+            &tex_ls_parser::semantic::SemanticModel::build(&full)
+        );
+        assert_eq!(snapshot.semantic_model(file).refs().len(), expected_refs);
+        assert_eq!(
+            snapshot.document_signatures(file),
+            &tex_ls_parser::semantic::scan_definitions(&full)
+        );
+        assert_eq!(
+            snapshot.document_signatures(file).command("fake").is_some(),
+            expected_fake
+        );
+        assert_eq!(
+            snapshot.file_modes(file),
+            &tex_ls_parser::semantic::mode::ModeIndex::build(&full)
+        );
+        assert_eq!(
+            snapshot.file_outline(file),
+            tex_ls_parser::semantic::outline(&full)
+        );
+        assert_eq!(
+            snapshot.doc_associations(file),
+            tex_ls_parser::semantic::doc_associations(&full)
+        );
+        snapshot.file_label_contexts(file);
+        snapshot.file_references(file);
+        assert_eq!(
+            snapshot.label_context(path, "live"),
+            Some(tex_ls_parser::semantic::LabelContext::Section {
+                title: "Live".into()
+            })
+        );
+    };
+    db.clear_query_log();
+    check(&db.snapshot(), source, 1, false);
+    for kind in [QueryKind::FileOperands, QueryKind::DefinitionSites] {
+        assert_eq!(
+            db.query_log()
+                .iter()
+                .filter(|entry| entry.kind == kind && entry.file == Some(file))
+                .count(),
+            1
+        );
+    }
+    db.clear_query_log();
+    check(&db.snapshot(), source, 1, false);
+    assert!(db.query_log().iter().all(|entry| !matches!(
+        entry.kind,
+        QueryKind::FileOperands | QueryKind::DefinitionSites
+    )));
+    let edited = format!(r"\renewcommand{{\meaning}}[1]{{#1}}{source}");
+    db.apply_change(path, edited.as_str(), None);
+    check(&db.snapshot(), &edited, 2, true);
+    for kind in [QueryKind::FileOperands, QueryKind::DefinitionSites] {
+        assert_eq!(
+            db.query_log()
+                .iter()
+                .filter(|entry| entry.kind == kind && entry.file == Some(file))
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn empty_definition_cache_preserves_copied_file_roles_and_nested_live_uses() {
+    let path = Path::new("/project/empty-sites.tex");
+    let source = r"\meaning\input{fake \input{nested}}\ifx a\input{compared}\fi\input{real}";
+    let mut db = IncrementalDatabase::default();
+    let file = db.apply_change(path, source, None);
+    let snapshot = db.snapshot();
+    assert!(snapshot.definition_sites(file).is_empty());
+    let root = snapshot.parsed_tree(file);
+    let roles = crate::external::links::FileRoleContext::from_definition_sites_and_operands(
+        &root,
+        snapshot.definition_sites(file),
+        snapshot.file_operand_contexts(file),
+    );
+    let heads = root
+        .descendants()
+        .filter(|node| crate::ast::command_name(node).as_deref() == Some("input"))
+        .map(|node| roles.allows(&node))
+        .collect::<Vec<_>>();
+    assert_eq!(heads, vec![false, true, false, true]);
 }

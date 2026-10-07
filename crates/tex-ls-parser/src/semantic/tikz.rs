@@ -23,7 +23,7 @@ use crate::syntax::{SyntaxElement, SyntaxKind};
 
 /// Path operators: a break lands *before* one (the idiomatic continuation
 /// lead), and the operator binds **forward** to whatever it connects.
-fn is_path_operator(text: &str) -> bool {
+pub fn is_path_operator(text: &str) -> bool {
     matches!(text, "--" | "|-" | "-|" | "..")
 }
 
@@ -35,7 +35,7 @@ fn is_path_operator(text: &str) -> bool {
 /// words whose split from their neighbors reads as broken TikZ. A library verb
 /// not listed here degrades to a neutral gap — today's layout — which is the
 /// admission bargain of keeping the model semantic-side.
-fn is_operation_keyword(text: &str) -> bool {
+pub fn is_operation_keyword(text: &str) -> bool {
     matches!(
         text,
         "circle"

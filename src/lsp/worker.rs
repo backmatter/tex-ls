@@ -1030,7 +1030,17 @@ mod audit_scheduler_tests {
             path: old.clone(),
             position: Position::default(),
         });
-        assert_eq!(worker.pending_reads.len(), 1);
+        let rename_wire = RequestId::from(10);
+        let rename_id = requests
+            .lock()
+            .unwrap()
+            .receive(rename_wire.clone())
+            .unwrap();
+        worker.handle_job_guarded(WorkerJob::WillRenameFiles {
+            id: rename_id,
+            files: vec![(old.clone(), new.clone())],
+        });
+        assert_eq!(worker.pending_reads.len(), 2);
         worker.handle_job_guarded(WorkerJob::DidRenameFiles {
             files: vec![(old, new.clone())],
         });
@@ -1039,6 +1049,7 @@ mod audit_scheduler_tests {
             "write passed the saturated read queue"
         );
         requests.lock().unwrap().cancel(&original);
+        requests.lock().unwrap().cancel(&rename_wire);
         drop(held);
         worker.dispatch_reads();
         assert!(worker.pending_reads.is_empty());

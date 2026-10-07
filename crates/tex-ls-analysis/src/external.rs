@@ -132,10 +132,11 @@ pub enum ExternalInputs {
 
 pub mod compiler;
 mod resolution;
+pub(crate) use resolution::has_graphics_path;
 pub use resolution::is_literal_file_name;
 pub use resolution::{
-    FileCandidates, FilePathContext, command_directories, completion_directories,
-    inherited_graphics,
+    FileCandidates, FilePathContext, command_directories, command_directories_with_roles,
+    completion_directories, inherited_graphics, inherited_graphics_with_roles,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

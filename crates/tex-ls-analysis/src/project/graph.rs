@@ -90,8 +90,12 @@ pub struct IncludeGraph {
     edges: HashMap<PathBuf, Vec<ResolvedInclude>>,
     /// Reverse map: included file → the files that include it.
     included_by: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Reverse parent relationships, retaining the reverse-edge visit order.
+    subfile_children: HashMap<PathBuf, Vec<PathBuf>>,
     /// Edges that resolve to nothing in the analyzed set (dynamic or external).
     unresolved: Vec<UnresolvedInclude>,
+    /// Per-file positions in `unresolved`, preserving source order.
+    unresolved_by_source: HashMap<PathBuf, Vec<usize>>,
     /// Files reachable from the document root via resolved edges (root inclusive).
     /// Empty when [`build`](Self::build) was given no root — the salsa wrapper
     /// passes `None`, deferring "which file is the main document" to a consumer.
@@ -183,6 +187,36 @@ impl IncludeGraph {
         let roots: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
         let cycles = detect_cycles_over(&roots, &adj);
 
+        let mut unresolved_by_source: HashMap<PathBuf, Vec<usize>> = HashMap::new();
+        for (index, edge) in unresolved.iter().enumerate() {
+            unresolved_by_source
+                .entry(edge.from.clone())
+                .or_default()
+                .push(index);
+        }
+        let mut subfile_parents: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
+        for (child, outgoing) in &edges {
+            for edge in outgoing
+                .iter()
+                .filter(|edge| edge.kind == IncludeKind::SubFilesParent)
+            {
+                subfile_parents
+                    .entry(edge.to.clone())
+                    .or_default()
+                    .insert(child.clone());
+            }
+        }
+        let subfile_children = subfile_parents
+            .into_iter()
+            .map(|(parent, children)| {
+                let ordered = included_by[&parent]
+                    .iter()
+                    .filter(|child| children.contains(*child))
+                    .cloned()
+                    .collect();
+                (parent, ordered)
+            })
+            .collect();
         Self {
             aliases,
             include_only: files
@@ -191,7 +225,9 @@ impl IncludeGraph {
                 .collect(),
             edges,
             included_by,
+            subfile_children,
             unresolved,
+            unresolved_by_source,
             reachable,
             cycles,
         }
@@ -218,9 +254,8 @@ impl IncludeGraph {
             bases.push(base.clone());
             bases.sort();
             for edge in self
-                .unresolved
-                .iter()
-                .filter(|edge| edge.from == path && edge.kind == SubFilesParent)
+                .unresolved_from(&path)
+                .filter(|edge| edge.kind == SubFilesParent)
             {
                 result.edges.push(RootEdge {
                     from: path.clone(),
@@ -239,9 +274,8 @@ impl IncludeGraph {
                 .filter(|edge| edge.kind != SubFilesParent)
                 .map(|edge| (edge.kind, edge.literal.as_deref(), Some(edge.to.as_path())))
                 .chain(
-                    self.unresolved
-                        .iter()
-                        .filter(|edge| edge.from == path && edge.kind != SubFilesParent)
+                    self.unresolved_from(&path)
+                        .filter(|edge| edge.kind != SubFilesParent)
                         .map(|edge| {
                             (
                                 edge.kind,
@@ -298,14 +332,8 @@ impl IncludeGraph {
                     pending.push((target, next_base));
                 }
             }
-            for child in self.included_by(&path) {
-                if self
-                    .outgoing(child)
-                    .iter()
-                    .any(|edge| edge.to == path && edge.kind == SubFilesParent)
-                {
-                    pending.push((child.clone(), child.parent().unwrap_or(&base).to_path_buf()));
-                }
+            for child in self.subfile_children(&path) {
+                pending.push((child.clone(), child.parent().unwrap_or(&base).to_path_buf()));
             }
         }
         result.contexts = contexts;
@@ -322,6 +350,10 @@ impl IncludeGraph {
         self.included_by.get(file).map_or(&[], Vec::as_slice)
     }
 
+    pub(crate) fn subfile_children(&self, file: &Path) -> &[PathBuf] {
+        self.subfile_children.get(file).map_or(&[], Vec::as_slice)
+    }
+
     /// Whether `file` is reachable from the document root (always `false` when
     /// the graph was built without a root).
     pub fn is_reachable(&self, file: &Path) -> bool {
@@ -331,6 +363,14 @@ impl IncludeGraph {
     /// Edges that resolve to nothing in the analyzed set.
     pub fn unresolved(&self) -> &[UnresolvedInclude] {
         &self.unresolved
+    }
+
+    fn unresolved_from(&self, file: &Path) -> impl Iterator<Item = &UnresolvedInclude> {
+        self.unresolved_by_source
+            .get(file)
+            .into_iter()
+            .flatten()
+            .map(|&index| &self.unresolved[index])
     }
 
     /// Detected inclusion cycles.
@@ -364,64 +404,50 @@ fn detect_cycles_over(
     roots: &[PathBuf],
     adj: &HashMap<PathBuf, Vec<PathBuf>>,
 ) -> Vec<Vec<PathBuf>> {
-    let mut on_stack: HashSet<PathBuf> = HashSet::new();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut path: Vec<PathBuf> = Vec::new();
+    let mut on_stack: HashMap<&Path, usize> = HashMap::new();
+    let mut visited: HashSet<&Path> = HashSet::new();
+    let mut path: Vec<&Path> = Vec::new();
+    let mut pending: Vec<(&Path, usize)> = Vec::new();
     let mut found: HashSet<Vec<PathBuf>> = HashSet::new();
 
     for root in roots {
-        dfs_cycles(
-            root,
-            adj,
-            &mut on_stack,
-            &mut visited,
-            &mut path,
-            &mut found,
-        );
+        if !visited.insert(root.as_path()) {
+            continue;
+        }
+        on_stack.insert(root, path.len());
+        path.push(root);
+        pending.push((root, 0));
+        while let Some((node, next)) = pending.last_mut() {
+            if let Some(to) = adj.get(*node).and_then(|edges| edges.get(*next)) {
+                *next += 1;
+                if let Some(&start) = on_stack.get(to.as_path()) {
+                    found.insert(normalize_cycle(&path[start..]));
+                } else if visited.insert(to.as_path()) {
+                    on_stack.insert(to, path.len());
+                    path.push(to);
+                    pending.push((to, 0));
+                }
+            } else {
+                on_stack.remove(*node);
+                path.pop();
+                pending.pop();
+            }
+        }
     }
 
     found.into_iter().collect()
 }
 
-fn dfs_cycles(
-    node: &Path,
-    adj: &HashMap<PathBuf, Vec<PathBuf>>,
-    on_stack: &mut HashSet<PathBuf>,
-    visited: &mut HashSet<PathBuf>,
-    path: &mut Vec<PathBuf>,
-    found: &mut HashSet<Vec<PathBuf>>,
-) {
-    if on_stack.contains(node) {
-        // Back-edge: the cycle is the path slice from this node's first
-        // appearance to the current end.
-        if let Some(start) = path.iter().position(|p| p == node) {
-            found.insert(normalize_cycle(&path[start..]));
-        }
-        return;
-    }
-    if !visited.insert(node.to_path_buf()) {
-        return;
-    }
-
-    on_stack.insert(node.to_path_buf());
-    path.push(node.to_path_buf());
-    for to in adj.get(node).map_or(&[][..], Vec::as_slice) {
-        dfs_cycles(to, adj, on_stack, visited, path, found);
-    }
-    path.pop();
-    on_stack.remove(node);
-}
-
 /// Rotate a cycle so it starts at its smallest path, giving every rotation of
 /// the same cycle one canonical form.
-fn normalize_cycle(cycle: &[PathBuf]) -> Vec<PathBuf> {
+fn normalize_cycle(cycle: &[&Path]) -> Vec<PathBuf> {
     let Some(min_at) = (0..cycle.len()).min_by_key(|&i| &cycle[i]) else {
         return Vec::new();
     };
     cycle[min_at..]
         .iter()
         .chain(&cycle[..min_at])
-        .cloned()
+        .map(|path| path.to_path_buf())
         .collect()
 }
 
@@ -654,7 +680,15 @@ fn file_include_only(
     db: &dyn IncrementalDb,
     file: crate::incremental::SourceInput,
 ) -> tex_ls_parser::semantic::roles::IncludeOnly {
-    tex_ls_parser::semantic::roles::include_only(&crate::incremental::parsed_tree_root(db, file))
+    let root = crate::incremental::parsed_tree_root(db, file);
+    let roles = crate::external::links::FileRoleContext::from_definition_sites_and_operands(
+        &root,
+        crate::incremental::definition_sites(db, file),
+        crate::incremental::file_operand_contexts(db, file),
+    );
+    tex_ls_parser::semantic::roles::include_only_with_ownership(&root, |command| {
+        roles.allows(command)
+    })
 }
 
 /// The root is passed as `None` — no consumer designates the main document yet,
@@ -718,6 +752,112 @@ pub(crate) fn package_graph(db: &dyn IncrementalDb, context: ProjectInput) -> Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deep_dependency_chain_and_cycle_do_not_use_the_call_stack() {
+        let roots: Vec<_> = (0..12_000)
+            .map(|index| PathBuf::from(format!("/p/{index:05}.tex")))
+            .collect();
+        let mut adjacency: HashMap<_, _> = roots
+            .windows(2)
+            .map(|pair| (pair[0].clone(), vec![pair[1].clone()]))
+            .collect();
+        assert!(detect_cycles_over(&roots, &adjacency).is_empty());
+        adjacency.insert(roots.last().unwrap().clone(), vec![roots[6_000].clone()]);
+        assert_eq!(
+            detect_cycles_over(&roots, &adjacency),
+            [roots[6_000..].to_vec()]
+        );
+    }
+
+    #[test]
+    fn iterative_cycles_match_bounded_recursive_reference() {
+        fn visit(
+            node: usize,
+            edges: &[Vec<usize>],
+            active: &mut Vec<usize>,
+            visited: &mut [bool],
+            cycles: &mut BTreeSet<Vec<usize>>,
+        ) {
+            if let Some(start) = active.iter().position(|&value| value == node) {
+                let mut cycle = active[start..].to_vec();
+                let first = cycle
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, value)| *value)
+                    .unwrap()
+                    .0;
+                cycle.rotate_left(first);
+                cycles.insert(cycle);
+                return;
+            }
+            if visited[node] {
+                return;
+            }
+            visited[node] = true;
+            active.push(node);
+            for &next in &edges[node] {
+                visit(next, edges, active, visited, cycles);
+            }
+            active.pop();
+        }
+        use std::collections::BTreeSet;
+        for count in [3, 4] {
+            let pairs: Vec<_> = (0..count)
+                .flat_map(|from| (0..count).map(move |to| (from, to)))
+                .filter(|&(from, to)| count == 3 || from != to)
+                .collect();
+            let nodes: Vec<_> = (0..count)
+                .map(|index| PathBuf::from(index.to_string()))
+                .collect();
+            for mask in 0..1usize << pairs.len() {
+                let mut edges = vec![Vec::new(); count];
+                for (bit, &(from, to)) in pairs.iter().enumerate() {
+                    if mask & (1 << bit) != 0 {
+                        edges[from].push(to);
+                    }
+                }
+                let mut order: Vec<_> = (0..count).collect();
+                if mask % 2 == 0 {
+                    order.reverse();
+                    for outgoing in &mut edges {
+                        outgoing.reverse();
+                    }
+                }
+                let mut expected = BTreeSet::new();
+                let mut visited = vec![false; count];
+                for &root in &order {
+                    visit(root, &edges, &mut Vec::new(), &mut visited, &mut expected);
+                }
+                let roots: Vec<_> = order.iter().map(|&index| nodes[index].clone()).collect();
+                let adjacency = nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, node)| {
+                        (
+                            node.clone(),
+                            edges[index]
+                                .iter()
+                                .map(|&next| nodes[next].clone())
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                let actual: BTreeSet<_> =
+                    detect_cycles_over(&roots, &adjacency).into_iter().collect();
+                let expected: BTreeSet<Vec<PathBuf>> = expected
+                    .into_iter()
+                    .map(|cycle| {
+                        cycle
+                            .into_iter()
+                            .map(|index| nodes[index].clone())
+                            .collect()
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "{count} nodes, mask {mask}");
+            }
+        }
+    }
 
     #[test]
     fn root_paths_preserve_import_context_and_inherited_includeonly() {
@@ -808,6 +948,101 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn indexed_unresolved_edges_preserve_root_interpretation_order() {
+        use IncludeKind::{Input, SubFilesParent};
+        let files = [
+            facts(
+                "/p/a.tex",
+                &[
+                    (Input, "/p/missing-a.tex"),
+                    (SubFilesParent, "/p/parent-a.tex"),
+                    (Input, "/p/b.tex"),
+                    (Input, "/p/missing-a2.tex"),
+                ],
+            ),
+            facts(
+                "/p/b.tex",
+                &[
+                    (Input, "/p/missing-b.tex"),
+                    (SubFilesParent, "/p/parent-b.tex"),
+                ],
+            ),
+        ];
+        let graph = IncludeGraph::build(&files, None);
+        let interpretation = graph.interpret(Path::new("/p/a.tex"));
+        let actual: Vec<_> = interpretation
+            .edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge.from.as_path(),
+                    edge.target.as_deref().unwrap(),
+                    edge.kind,
+                    edge.resolved,
+                    edge.build_participation,
+                )
+            })
+            .collect();
+        let expected = [
+            (
+                "/p/a.tex",
+                "/p/parent-a.tex",
+                SubFilesParent,
+                false,
+                Some(false),
+            ),
+            ("/p/a.tex", "/p/b.tex", Input, true, Some(true)),
+            ("/p/a.tex", "/p/missing-a.tex", Input, false, Some(true)),
+            ("/p/a.tex", "/p/missing-a2.tex", Input, false, Some(true)),
+            (
+                "/p/b.tex",
+                "/p/parent-b.tex",
+                SubFilesParent,
+                false,
+                Some(false),
+            ),
+            ("/p/b.tex", "/p/missing-b.tex", Input, false, Some(true)),
+        ]
+        .map(|(from, target, kind, resolved, participation)| {
+            (
+                Path::new(from),
+                Path::new(target),
+                kind,
+                resolved,
+                participation,
+            )
+        });
+        assert_eq!(actual, expected);
+        assert!(!interpretation.is_closed());
+        assert_eq!(interpretation.contexts.len(), 2);
+    }
+
+    #[test]
+    fn indexed_subfile_children_keep_duplicate_reverse_order_and_exclude_ordinary_inputs() {
+        use IncludeKind::{Input, SubFilesParent};
+        let files = [
+            facts("/p/main.tex", &[]),
+            facts(
+                "/p/a.tex",
+                &[(Input, "/p/main.tex"), (SubFilesParent, "/p/main.tex")],
+            ),
+            facts("/p/ordinary.tex", &[(Input, "/p/main.tex")]),
+            facts("/p/b.tex", &[(SubFilesParent, "/p/main.tex")]),
+        ];
+        let graph = IncludeGraph::build(&files, None);
+        assert_eq!(
+            graph.subfile_children(Path::new("/p/main.tex")),
+            ["/p/a.tex", "/p/a.tex", "/p/b.tex"].map(PathBuf::from)
+        );
+        let interpretation = graph.interpret(Path::new("/p/main.tex"));
+        assert_eq!(
+            interpretation.contexts.keys().cloned().collect::<Vec<_>>(),
+            ["/p/a.tex", "/p/b.tex", "/p/main.tex"].map(PathBuf::from)
+        );
+        assert!(interpretation.is_closed());
     }
 
     #[test]

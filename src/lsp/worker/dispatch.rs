@@ -72,15 +72,28 @@ impl Worker {
                 });
             }
             WorkerJob::WillRenameFiles { id, files } => {
+                let permit = self.read_spawner.reserve();
+                let cancellation = self.requests.lock().expect("ledger").cancellation(&id);
                 let snapshots: Vec<_> = self
                     .projects
                     .projects()
-                    .map(|project| self.db.snapshot_for(project).expect("registered project"))
+                    .map(|project| {
+                        self.db
+                            .snapshot_for(project)
+                            .expect("registered project")
+                            .with_cancellation(cancellation.clone())
+                    })
                     .collect();
-                let result = tex_ls_protocol::file_operations::will_rename(&snapshots, &files, enc);
-                let _ = self
-                    .out_tx
-                    .send(Outbound::Response(Response::new_ok(id, result)));
+                let out_tx = self.out_tx.clone();
+                let requests = self.requests.clone();
+                self.read_spawner.spawn_reserved(permit, move || {
+                    if !requests.lock().expect("ledger").contains(&id) {
+                        return;
+                    }
+                    respond(id, &out_tx, || {
+                        tex_ls_protocol::file_operations::will_rename(&snapshots, &files, enc)
+                    });
+                });
             }
             WorkerJob::DidRenameFiles { files } => {
                 for (old, _) in &files {

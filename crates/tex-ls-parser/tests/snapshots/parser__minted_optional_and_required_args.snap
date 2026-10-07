@@ -1,5 +1,5 @@
 ---
-source: tests/parser.rs
+source: crates/tex-ls-parser/tests/parser.rs
 expression: "tree(\"\\\\begin{minted}[frame=single]{python}\\ncode\\n\\\\end{minted}\")"
 ---
 ROOT@0..54
@@ -18,7 +18,9 @@ ROOT@0..54
         L_BRACE@28..29 "{"
         WORD@29..35 "python"
         R_BRACE@35..36 "}"
-    VERBATIM_BODY@36..42 "\ncode\n"
+    FOREIGN_TEXT@36..37 "\n"
+    FOREIGN_TEXT@37..41 "code"
+    FOREIGN_TEXT@41..42 "\n"
     END@42..54
       CONTROL_WORD@42..46 "\\end"
       NAME_GROUP@46..54

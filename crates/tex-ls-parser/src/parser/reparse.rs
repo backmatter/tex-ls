@@ -153,13 +153,6 @@ pub fn reparse(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Re
 /// spans everything between them, which a cost guard declines outright, while the
 /// chain splices each edit on its own.
 pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> Option<Reparsed> {
-    // Bare input attachment crosses trivia and changes the structural ownership
-    // of filename tokens. Until each splice tier proves those boundaries, use
-    // the authoritative full parse (including edits creating/removing the head).
-    if base.text.contains("\\input") || new_text.contains("\\input") {
-        return None;
-    }
-
     if edits.is_empty() {
         return None;
     }
@@ -241,6 +234,9 @@ pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> 
 /// Each tier lands here as an `.or_else` and returns through [`finish`], so none
 /// can skip the length check or the oracle.
 fn reparse_one(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Reparsed> {
+    if base.ctx.reparse_guard.full || base.ctx.reader_overrides_after_or_at(edit.range.start) {
+        return None;
+    }
     // Recovery consumed the rest of the file; any edit may change that boundary.
     if base
         .errors
@@ -248,6 +244,23 @@ fn reparse_one(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Re
         .any(|error| error.message == crate::NESTING_LIMIT_ERROR)
     {
         return None;
+    }
+    if base.ctx.reparse_guard.local_modes {
+        // Alphabetic WORD edits cannot toggle lexical state. The token tier
+        // retains its ancestry, text-read, relex and neighbour proofs. Opaque
+        // captures have their own old/new sequence proof. Math admits only
+        // ASCII letters here, so no newly state-sensitive punctuation can enter
+        // a fragment that already proved it parses faithfully in isolation.
+        return token::reparse_letters(base, edit, new_text)
+            .or_else(|| protected::reparse_protected(base, edit, new_text))
+            .or_else(|| {
+                edit.insert
+                    .bytes()
+                    .chain(base.text[edit.range.clone()].bytes())
+                    .all(|byte| byte.is_ascii_alphabetic())
+                    .then(|| math::reparse_math(base, edit, new_text))
+                    .flatten()
+            });
     }
     token::reparse_token(base, edit, new_text)
         .or_else(|| protected::reparse_protected(base, edit, new_text))

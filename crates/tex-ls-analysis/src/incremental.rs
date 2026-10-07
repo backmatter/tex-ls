@@ -22,14 +22,10 @@ use crate::project::labels::{
 use crate::project::options::resolved_package_options;
 use crate::project::{
     BibTarget, IncludeEdgeKey, PackageEdgeKey, PackageOptionFacts, ProjectMember,
-    ResolvedCitations, ResolvedLabels, ResolvedPackageOptions, collect_bib_resource_targets,
-    collect_include_edge_keys, collect_package_edge_keys, package_graph, package_option_facts,
+    ResolvedCitations, ResolvedLabels, ResolvedPackageOptions, package_graph, package_option_facts,
     resolved_citations, resolved_labels, workspace_project,
 };
-use crate::semantic::{
-    DocAssociation, SemanticModel, SignatureDb, doc_associations as build_doc_associations,
-    scan_definitions,
-};
+use crate::semantic::{DocAssociation, SemanticModel, SignatureDb};
 use crate::source::file_kind_or_tex;
 use crate::syntax::SyntaxNode;
 
@@ -125,4 +121,4 @@ mod tests;
 mod host;
 pub use host::*;
 pub use queries::FileCiteFacts;
-pub use values::{ParseDiagnosticData, QueryKind, QueryLogEntry};
+pub use values::{FileLabelContexts, ParseDiagnosticData, QueryKind, QueryLogEntry};

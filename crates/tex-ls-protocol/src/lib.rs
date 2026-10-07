@@ -53,7 +53,7 @@ use tex_ls_analysis::project::aux::AuxData;
 use tex_ls_analysis::project::texmf::TexmfIndex;
 use tex_ls_analysis::project::{ResolvedCitations, ResolvedLabels};
 use tex_ls_analysis::source::{FileKind, file_kind_or_tex};
-use tex_ls_analysis::text::{LineIndex, LineTable, PositionEncoding, TextBuffer};
+use tex_ls_analysis::text::{LineIndex, PositionEncoding, TextBuffer};
 use tex_ls_formatter::formatter::{
     FormatStyle, SentenceOptions, format_node_range_with_signatures_sentence,
     format_node_with_signatures_sentence,

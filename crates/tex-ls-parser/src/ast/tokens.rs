@@ -33,7 +33,9 @@ impl ControlWord {
     /// The control-word name with the leading `\` stripped (`section` for
     /// `\section`).
     pub fn name(&self) -> &str {
-        self.syntax.text().trim_start_matches('\\')
+        // The lexer can prove a custom ASCII escape character in a Fancyvrb
+        // body. Its original spelling survives in the token.
+        &self.syntax.text()[1..]
     }
 
     /// The byte range of the `\foo` token, backslash included.

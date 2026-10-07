@@ -9,6 +9,254 @@ fn database(text: &str) -> (IncrementalDatabase, PathBuf) {
 }
 
 #[test]
+fn key_rename_preserves_primitive_operand_arguments_and_renames_nested_uses() {
+    for (definition, command) in [(r"\label{demo}", "ref"), (r"\bibitem{demo}", "cite")] {
+        let source = format!(
+            "{definition}\né😀 \\let\\copy\\{command}{{demo}}\\meaning\\{command}{{\\{command}{{demo}}}}\\{command}{{demo}}"
+        );
+        let (db, path) = database(&source);
+        let snapshot = db.snapshot();
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = LineIndex::with_encoding(&source, encoding);
+            let at = source.rfind("{demo}").unwrap() + 1;
+            let (line, character) = index.position(at);
+            let changes = compute_rename(
+                &snapshot,
+                &path,
+                Position::new(line, character),
+                "renamed",
+                encoding,
+            )
+            .unwrap()
+            .changes
+            .unwrap();
+            let mut edits = changes[&path_to_uri(&path).unwrap()].clone();
+            assert_eq!(edits.len(), 3, "{source}");
+            edits.sort_by_key(|edit| (edit.range.start.line, edit.range.start.character));
+            let mut actual = source.clone();
+            for edit in edits.iter().rev() {
+                let start = index.offset_at(edit.range.start.line, edit.range.start.character);
+                let end = index.offset_at(edit.range.end.line, edit.range.end.character);
+                actual.replace_range(start..end, &edit.new_text);
+            }
+            let expected = format!(
+                "{}\né😀 \\let\\copy\\{command}{{demo}}\\meaning\\{command}{{\\{command}{{renamed}}}}\\{command}{{renamed}}",
+                definition.replace("demo", "renamed")
+            );
+            assert_eq!(actual, expected, "{encoding:?}");
+        }
+    }
+}
+
+#[test]
+fn large_ranges_offer_bounded_suppressions_with_one_file_choice() {
+    for newline in ["\n", "\r\n", "\r"] {
+        let source = format!("    \\notacommand{{é😀}}{newline}").repeat(24);
+        let (mut db, path) = database(&source);
+        let uri = path_to_uri(&path).unwrap();
+        for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let snapshot = db.snapshot();
+            let file = snapshot.lookup_file(&path).unwrap();
+            let idx = snapshot.file_line_index(file, enc);
+            let (line, character) = idx.position(source.len());
+            let actions = compute_code_actions(
+                &snapshot,
+                &uri,
+                &path,
+                FileKind::Tex,
+                Range::new(Position::default(), Position::new(line, character)),
+                Some(&[CodeActionKind::QuickFix]),
+                &RuleSelection::resolve(None, &[]).0,
+                enc,
+            );
+            assert_eq!(actions.len(), 9);
+            assert_eq!(actions.iter().filter(|action| matches!(action, CodeActionResponse::CodeAction(action) if action.title.ends_with("in this file"))).count(), 1);
+            drop(snapshot);
+            for action in actions {
+                let CodeActionResponse::CodeAction(action) = action else {
+                    panic!("literal action")
+                };
+                let edit = &action.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri][0];
+                let idx = LineIndex::with_encoding(&source, enc);
+                let at = idx.offset_at(edit.range.start.line, edit.range.start.character);
+                let mut updated = source.clone();
+                updated.insert_str(at, &edit.new_text);
+                db.apply_change(&path, updated.as_str(), None);
+                let snapshot = db.snapshot();
+                let remaining = snapshot
+                    .latex_lint_findings(snapshot.lookup_file(&path).unwrap())
+                    .iter()
+                    .filter(|finding| finding.rule == "unknown-command")
+                    .count();
+                assert_eq!(
+                    remaining,
+                    if action.title.ends_with("in this file") {
+                        0
+                    } else {
+                        23
+                    }
+                );
+                drop(snapshot);
+                db.apply_change(&path, source.as_str(), None);
+            }
+        }
+    }
+}
+
+#[test]
+fn printed_token_lists_share_navigation_hover_completion_and_rename_ownership() {
+    let source = concat!(
+        "\\newcommand{\\foo}[1]{#1}\n",
+        "😀 \\detokenize{\\foo{printed} \\textbf{shown}}\n",
+        "\\foo{live}\n",
+    );
+    let (db, path) = database(source);
+    let snapshot = db.snapshot();
+    let file = snapshot.lookup_file(&path).unwrap();
+    for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let index = snapshot.file_line_index(file, enc);
+        let position = |offset| {
+            let (line, character) = index.position(offset);
+            Position::new(line, character)
+        };
+        let printed = position(source.find(r"\foo{printed}").unwrap() + 2);
+        assert!(compute_goto_definition(&snapshot, &path, printed, enc).is_empty());
+        assert!(compute_prepare_rename(&snapshot, &path, enc, printed).is_none());
+        assert!(hover::compute_hover(&snapshot, &path, enc, printed).is_none());
+        let completion =
+            compute_completion(&snapshot, &path_to_uri(&path).unwrap(), &path, enc, printed);
+        assert!(completion.items.is_empty());
+        let argument = position(source.find("shown").unwrap() + 2);
+        assert!(signature_help::compute_signature_help(&snapshot, &path, argument, enc).is_none());
+        let live = position(source.rfind(r"\foo{live}").unwrap() + 2);
+        assert!(!compute_goto_definition(&snapshot, &path, live, enc).is_empty());
+        assert!(hover::compute_hover(&snapshot, &path, enc, live).is_some());
+        let edit = compute_rename(&snapshot, &path, live, "renamed", enc).unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = changes.get(&path_to_uri(&path).unwrap()).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().all(|edit| edit.range.start.line != 1));
+    }
+}
+
+#[test]
+fn semantic_command_aliases_preserve_primitive_token_list_ownership() {
+    let source = "\\label{real}\n😀 \\detokenize{\\shortcut{real}}\n😀 \\shortcut{real}\n";
+    let (mut db, path) = database(source);
+    let original_tree = {
+        let snapshot = db.snapshot();
+        snapshot
+            .parsed_tree(snapshot.lookup_file(&path).unwrap())
+            .green()
+            .to_owned()
+    };
+    let declarations: tex_ls_parser::declarations::Declarations =
+        serde_json::from_value(json!({"commands":{"shortcut":{"like":"ref"}}})).unwrap();
+    db.set_declarations(declarations.resolve().unwrap());
+    let snapshot = db.snapshot();
+    let file = snapshot.lookup_file(&path).unwrap();
+    assert_eq!(snapshot.parsed_tree(file).green().to_owned(), original_tree);
+    assert_eq!(snapshot.semantic_model(file).refs().len(), 1);
+    for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let index = snapshot.file_line_index(file, enc);
+        let tokens = semantic_tokens::compute(&snapshot, &path, enc, None);
+        let mut line = 0;
+        let mut column = 0;
+        let decoded: Vec<_> = tokens["data"]
+            .as_array()
+            .unwrap()
+            .as_chunks::<5>()
+            .0
+            .iter()
+            .map(|token| {
+                let delta = token[0].as_u64().unwrap() as u32;
+                line += delta;
+                column = if delta == 0 { column } else { 0 } + token[1].as_u64().unwrap() as u32;
+                (
+                    line,
+                    column,
+                    column + token[2].as_u64().unwrap() as u32,
+                    token[3].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        for (offset, expected_kind, navigable) in [
+            (
+                source.find(r"\shortcut{real}").unwrap() + r"\shortcut{".len(),
+                9,
+                false,
+            ),
+            (
+                source.rfind(r"\shortcut{real}").unwrap() + r"\shortcut{".len(),
+                2,
+                true,
+            ),
+        ] {
+            let (line, character) = index.position(offset);
+            assert!(decoded.iter().any(|(token_line, start, end, kind)| {
+                *token_line == line
+                    && *start <= character
+                    && character < *end
+                    && *kind == expected_kind
+            }));
+            let definitions =
+                compute_goto_definition(&snapshot, &path, Position::new(line, character), enc);
+            assert_eq!(!definitions.is_empty(), navigable);
+        }
+    }
+}
+
+#[test]
+fn printed_environment_pairs_do_not_link_highlight_or_refactor() {
+    let source = "😀 \\detokenize{\\begin{center}printed\\end{center}}\n😀 \\begin{center}live\\end{center}\n";
+    let (db, path) = database(source);
+    let snapshot = db.snapshot();
+    let file = snapshot.lookup_file(&path).unwrap();
+    let uri = path_to_uri(&path).unwrap();
+    let kind = CodeActionKind::from("refactor.rewrite.environment");
+    for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let index = snapshot.file_line_index(file, enc);
+        for (offset, active) in [
+            (source.find("center").unwrap(), false),
+            (
+                source.rfind(r"\begin{center}").unwrap() + r"\begin{".len(),
+                true,
+            ),
+        ] {
+            let (line, character) = index.position(offset);
+            let position = Position::new(line, character);
+            let linked = compute_linked_editing(&snapshot, &path, enc, position);
+            assert_eq!(linked.is_some(), active);
+            assert_eq!(
+                compute_document_highlight(&snapshot, &path, enc, position).len(),
+                if active { 2 } else { 0 }
+            );
+            let actions = compute_code_actions(
+                &snapshot,
+                &uri,
+                &path,
+                FileKind::Tex,
+                Range::new(position, position),
+                Some(std::slice::from_ref(&kind)),
+                &RuleSelection::resolve(None, &[]).0,
+                enc,
+            );
+            assert_eq!(!actions.is_empty(), active);
+            if active {
+                assert_eq!(linked.unwrap().ranges.len(), 2);
+                for action in actions {
+                    if let lsp_types::CodeActionResponse::CodeAction(action) = action {
+                        let changes = action.edit.unwrap().changes.unwrap();
+                        assert!(changes.values().all(|edits| edits.len() == 2
+                            && edits.iter().all(|edit| edit.range.start.line == 1)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn bib_rule_links_match_quick_fixes_and_document_workspace_reports() {
     let path = PathBuf::from(fixture_path!("/diagnostic-help/refs.bib"));
     let mut db = IncrementalDatabase::default();
@@ -144,7 +392,15 @@ fn semantic_tokens_respect_encoding_protection_and_negotiated_legend() {
     let (db, path) = database(source);
     for (encoding, column) in [(PositionEncoding::Utf8, 5), (PositionEncoding::Utf16, 3)] {
         let result = semantic_tokens::compute(&db.snapshot(), &path, encoding, None);
-        assert_eq!(result["data"][1], column);
+        let macro_token = result["data"]
+            .as_array()
+            .unwrap()
+            .as_chunks::<5>()
+            .0
+            .iter()
+            .find(|token| token[3] == 0)
+            .unwrap();
+        assert_eq!(macro_token[1], column);
         let chunks: Vec<_> = result["data"]
             .as_array()
             .unwrap()
@@ -155,7 +411,9 @@ fn semantic_tokens_respect_encoding_protection_and_negotiated_legend() {
         let mut line = 0;
         for chunk in chunks {
             line += chunk[0].as_u64().unwrap();
-            assert_ne!(line, 2, "protected body");
+            if line == 2 {
+                assert_ne!(chunk[3], 0, "protected body must not contain active macros");
+            }
         }
         let policy = ResponsePolicy::new(
             &json!({"capabilities":{"textDocument":{"semanticTokens":{"tokenTypes":["variable"],"formats":["relative"],"requests":{"full":true,"range":true}}}}}),
@@ -841,17 +1099,17 @@ fn file_argument_roles_share_highlighting_navigation_and_filename_translation() 
             "english-apa.lbx",
             7,
         ),
-        ("input", "", "chapter", "chapter.tex", 5),
-        ("include", "", "chapter", "chapter.tex", 5),
-        ("bibliography", "", "references", "references.bib", 5),
-        ("addbibresource", "", "references.bib", "references.bib", 5),
-        ("includegraphics", "[width=3cm]", "figure", "figure.pdf", 5),
+        ("input", "", "chapter", "chapter.tex", 10),
+        ("include", "", "chapter", "chapter.tex", 10),
+        ("bibliography", "", "references", "references.bib", 10),
+        ("addbibresource", "", "references.bib", "references.bib", 10),
+        ("includegraphics", "[width=3cm]", "figure", "figure.pdf", 10),
         (
             "import",
             "{sections/}",
             "chapter",
             "sections/chapter.tex",
-            5,
+            10,
         ),
     ];
     for (command, options, name, filename, kind) in cases {

@@ -34,18 +34,7 @@ impl RootViews {
                 .iter()
                 .filter(|edge| edge.kind != super::include::IncludeKind::SubFilesParent)
                 .map(|edge| edge.to.clone())
-                .chain(
-                    graph
-                        .included_by(path)
-                        .iter()
-                        .filter(|child| {
-                            graph.outgoing(child).iter().any(|edge| {
-                                edge.to == path
-                                    && edge.kind == super::include::IncludeKind::SubFilesParent
-                            })
-                        })
-                        .cloned(),
-                )
+                .chain(graph.subfile_children(path).iter().cloned())
                 .filter(|path| known.contains(path))
                 .collect::<Vec<_>>()
         };
@@ -74,6 +63,7 @@ impl RootViews {
             contexts.keys().cloned().collect::<Vec<_>>()
         };
         let mut scopes: Vec<_> = seeds.iter().map(|seed| reach(seed)).collect();
+        let mut claimed: std::collections::HashSet<_> = scopes.iter().flatten().cloned().collect();
         // Add unclaimed fragments, starting with parentless files. A root-relative
         // include can claim a file that has no source-relative incoming edge.
         for path in paths
@@ -81,36 +71,37 @@ impl RootViews {
             .filter(|path| !incoming.contains(*path))
             .chain(paths.iter())
         {
-            if !scopes.iter().any(|scope| scope.contains(path)) {
+            if !claimed.contains(path) {
                 seeds.push(path.clone());
-                scopes.push(reach(path));
+                let scope = reach(path);
+                claimed.extend(scope.iter().cloned());
+                scopes.push(scope);
             }
         }
-        let roots: HashMap<_, Vec<_>> = paths
+        let mut roots: HashMap<_, Vec<_>> = paths
             .iter()
-            .map(|path| {
-                (
-                    path.clone(),
-                    scopes
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, scope)| scope.contains(path))
-                        .map(|(id, _)| seeds[id].clone())
-                        .collect(),
-                )
-            })
+            .map(|path| (path.clone(), Vec::new()))
+            .collect();
+        for (seed, scope) in seeds.iter().zip(&scopes) {
+            for path in scope {
+                if let Some(candidates) = roots.get_mut(path) {
+                    candidates.push(seed.clone());
+                }
+            }
+        }
+        let seed_indices: HashMap<_, _> = seeds
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.clone(), index))
             .collect();
         let mut component_of = HashMap::new();
         let mut representatives = seeds.clone();
         for path in &paths {
             let candidates = &roots[path];
-            let id = if let Some(id) = seeds.iter().position(|seed| seed == path) {
+            let id = if let Some(&id) = seed_indices.get(path) {
                 id
             } else if candidates.len() == 1 {
-                seeds
-                    .iter()
-                    .position(|seed| seed == &candidates[0])
-                    .unwrap()
+                seed_indices[&candidates[0]]
             } else {
                 // Do not union independent roots for an ambiguous shared child.
                 let id = scopes.len();
@@ -231,12 +222,7 @@ pub(crate) fn file_context(
     let root_directory = root.parent().unwrap_or(Path::new("")).to_path_buf();
     let graphics = project_sources(db, context)
         .get(root)
-        .map(|root_file| {
-            crate::external::inherited_graphics(
-                &crate::incremental::parsed_tree_root(db, *root_file),
-                &root_directory,
-            )
-        })
+        .map(|root_file| crate::incremental::root_graphics(db, *root_file).clone())
         .unwrap_or_default();
     Some(crate::external::FilePathContext {
         root_directory,
@@ -252,4 +238,113 @@ pub(crate) fn contexts<'a>(
     root: &Path,
 ) -> Option<&'a std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> {
     include_components(db, project).contexts.get(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::project::{
+        graph::FileFacts,
+        include::{IncludeEdgeKey, IncludeKind, IncludeTarget},
+    };
+
+    fn graph(files: &[(&str, &[&str])]) -> IncludeGraph {
+        let facts: Vec<_> = files
+            .iter()
+            .map(|(path, targets)| FileFacts {
+                path: PathBuf::from(path),
+                include_only: Default::default(),
+                include_edges: targets
+                    .iter()
+                    .map(|target| IncludeEdgeKey {
+                        literal: None,
+                        build_participation: Some(true),
+                        kind: IncludeKind::Input,
+                        target: IncludeTarget::Path(PathBuf::from(target)),
+                    })
+                    .collect(),
+            })
+            .collect();
+        IncludeGraph::build(&facts, None)
+    }
+
+    #[test]
+    fn shared_children_keep_ordered_roots_and_independent_default_views() {
+        let files: &[(&str, &[&str])] = &[
+            ("/p/b.tex", &["/p/shared.tex"]),
+            ("/p/a.tex", &["/p/shared.tex"]),
+            ("/p/shared.tex", &["/p/leaf.tex"]),
+            ("/p/leaf.tex", &[]),
+            ("/p/fragment.tex", &[]),
+        ];
+        let views = RootViews::build(
+            files.iter().map(|(path, _)| Path::new(path)),
+            &graph(files),
+            [Path::new("/p/b.tex"), Path::new("/p/a.tex")],
+        );
+        let roots = vec![PathBuf::from("/p/a.tex"), PathBuf::from("/p/b.tex")];
+        for child in ["/p/shared.tex", "/p/leaf.tex"] {
+            assert_eq!(views.roots[Path::new(child)], roots);
+        }
+        assert_eq!(
+            views.representatives,
+            [
+                "/p/a.tex",
+                "/p/b.tex",
+                "/p/fragment.tex",
+                "/p/leaf.tex",
+                "/p/shared.tex"
+            ]
+            .map(PathBuf::from)
+        );
+        assert_eq!(views.count, 5);
+        assert_eq!(
+            views.scopes[views.component_of[Path::new("/p/leaf.tex")]],
+            [PathBuf::from("/p/leaf.tex")]
+        );
+        assert_eq!(
+            views.scopes[views.component_of[Path::new("/p/shared.tex")]],
+            [PathBuf::from("/p/leaf.tex"), PathBuf::from("/p/shared.tex")]
+        );
+        assert!(views.closed.iter().all(|&closed| closed));
+    }
+
+    #[test]
+    fn a_rootless_cycle_keeps_one_deterministic_view() {
+        let files: &[(&str, &[&str])] = &[("/p/b.tex", &["/p/a.tex"]), ("/p/a.tex", &["/p/b.tex"])];
+        let views = RootViews::build(
+            files.iter().map(|(path, _)| Path::new(path)),
+            &graph(files),
+            [],
+        );
+        assert_eq!(views.count, 1);
+        assert_eq!(views.representatives, [PathBuf::from("/p/a.tex")]);
+        assert_eq!(
+            views.component_of[Path::new("/p/a.tex")],
+            views.component_of[Path::new("/p/b.tex")]
+        );
+    }
+
+    #[test]
+    fn many_independent_sources_keep_their_own_views() {
+        let paths: Vec<_> = (0..1000)
+            .map(|index| format!("/p/{index:04}.tex"))
+            .collect();
+        let files: Vec<(&str, &[&str])> = paths
+            .iter()
+            .rev()
+            .map(|path| (path.as_str(), &[][..]))
+            .collect();
+        let views = RootViews::build(
+            files.iter().map(|(path, _)| Path::new(path)),
+            &graph(&files),
+            [],
+        );
+        assert_eq!(views.count, paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            assert_eq!(views.component_of[Path::new(path)], index);
+            assert_eq!(views.roots[Path::new(path)], [PathBuf::from(path)]);
+            assert_eq!(views.scopes[index], [PathBuf::from(path)]);
+        }
+    }
 }

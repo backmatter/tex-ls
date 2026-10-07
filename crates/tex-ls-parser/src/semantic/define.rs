@@ -45,6 +45,17 @@ use smol_str::SmolStr;
 /// later `\renewcommand` wins — TeX's last-definition-wins, modulo execution order
 /// we do not track.
 pub fn scan_definitions(root: &SyntaxNode) -> SignatureDb {
+    let sites = scan_definition_sites(root);
+    let operands = super::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
+    scan_definitions_with_operands(root, &operands)
+}
+
+/// Reuse operand ownership already proved from this source tree.
+pub fn scan_definitions_with_operands(
+    root: &SyntaxNode,
+    operands: &super::context::PrimitiveOperandContexts,
+) -> SignatureDb {
+    let contexts = super::context::TokenListContexts::new(root);
     let mut db = SignatureDb::default();
     // Replacement-body facts collected alongside each command signature, keyed by
     // name (last definition wins, mirroring `db`). Consumed after the walk to flag
@@ -60,14 +71,21 @@ pub fn scan_definitions(root: &SyntaxNode) -> SignatureDb {
     // wins, like `db`) and filtered by [`apply_env_aliases`] afterwards, since
     // admitting one requires seeing the *other* half of the pair.
     let mut alias_candidates: HashMap<SmolStr, EnvAliasCandidate> = HashMap::new();
+    let mut listing_overrides = HashSet::new();
 
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| !contexts.contains(node.text_range()))
+        .filter(|node| !operands.contains_head(node))
     {
         let Some(name) = command_name(&command) else {
             continue;
         };
+        let extra = editor::extra_declarations(&command);
+        if listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides) {
+            continue;
+        }
         match DefKind::of(&name) {
             Some(DefKind::Command) => {
                 scan_newcommand(&command, &mut db, &mut bodies, &mut alias_candidates)
@@ -83,6 +101,7 @@ pub fn scan_definitions(root: &SyntaxNode) -> SignatureDb {
             Some(DefKind::VerbatimEnvironment) => {
                 scan_verbatim_environment(&name, &command, &mut db)
             }
+            Some(DefKind::Minted) => scan_minted(&name, &command, &mut db),
             None => {}
         }
     }
@@ -268,12 +287,36 @@ pub struct DefSite {
 /// keeping every definition — no last-wins collapsing, since a `\renewcommand` of an
 /// earlier definition is still a definition site the user may navigate to or rename.
 pub fn scan_definition_sites(root: &SyntaxNode) -> Vec<DefSite> {
+    let sites = raw_definition_sites(root, None);
+    if sites.is_empty() {
+        return sites;
+    }
+    let operands = super::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
+    raw_definition_sites(root, Some(&operands))
+}
+
+fn raw_definition_sites(
+    root: &SyntaxNode,
+    operands: Option<&super::context::PrimitiveOperandContexts>,
+) -> Vec<DefSite> {
+    let contexts = super::context::TokenListContexts::new(root);
     let mut sites = Vec::new();
+    let mut listing_overrides = HashSet::new();
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| !contexts.contains(node.text_range()))
+        .filter(|node| {
+            operands.is_none_or(|operands| !operands.contains_head_start(node.text_range().start()))
+        })
     {
         let extra = editor::extra_declarations(&command);
+        if operands.is_some()
+            && let Some(name) = command_name(&command)
+            && listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides)
+        {
+            continue;
+        }
         if extra.is_empty() {
             sites.extend(ordinary_definition_site(&command));
         } else {
@@ -281,6 +324,45 @@ pub fn scan_definition_sites(root: &SyntaxNode) -> Vec<DefSite> {
         }
     }
     sites
+}
+
+fn listing_declaration_overridden(
+    command: &SyntaxNode,
+    name: &str,
+    extra: &[editor::EditorDeclaration],
+    overrides: &mut HashSet<SmolStr>,
+) -> bool {
+    if listing_declaration_factory(name) && overrides.contains(name) {
+        return true;
+    }
+    if extra.is_empty() {
+        if let Some(site) = ordinary_definition_site(command)
+            && listing_command_override(&site)
+        {
+            overrides.insert(site.name);
+        }
+    } else {
+        overrides.extend(
+            extra
+                .iter()
+                .map(|declaration| &declaration.site)
+                .filter(|site| listing_command_override(site))
+                .map(|site| site.name.clone()),
+        );
+    }
+    false
+}
+
+pub(crate) fn listing_command_override(site: &DefSite) -> bool {
+    site.kind == DefSiteKind::Command
+        && crate::parser::embedded::observes_settings_command(&site.name)
+}
+
+pub(crate) fn listing_declaration_factory(name: &str) -> bool {
+    matches!(
+        DefKind::of(name),
+        Some(DefKind::Minted | DefKind::VerbatimEnvironment)
+    )
 }
 
 fn ordinary_definition_site(command: &SyntaxNode) -> Option<DefSite> {
@@ -291,6 +373,7 @@ fn ordinary_definition_site(command: &SyntaxNode) -> Option<DefSite> {
         Some(DefKind::Environment | DefKind::XparseEnvironment | DefKind::VerbatimEnvironment) => {
             environment_def_site(command)
         }
+        Some(DefKind::Minted) => minted_site(&name, command),
         None => None,
     };
     site.or_else(|| {
@@ -688,6 +771,7 @@ pub fn is_definition_command(name: &str) -> bool {
 
 /// Which definition family a control word names, if any.
 enum DefKind {
+    Minted,
     Command,
     Def,
     Environment,
@@ -703,6 +787,7 @@ enum DefKind {
 impl DefKind {
     fn of(name: &str) -> Option<Self> {
         Some(match name {
+            "newminted" | "newmintinline" => DefKind::Minted,
             "newcommand"
             | "renewcommand"
             | "providecommand"
@@ -732,6 +817,74 @@ impl DefKind {
             _ => return None,
         })
     }
+}
+
+fn minted_name(definer: &str, command: &SyntaxNode) -> Option<SmolStr> {
+    if let Some(optional) = children::<Optional>(command).next() {
+        let text = optional.syntax().text().to_string();
+        return text
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .map(SmolStr::new);
+    }
+    let language = nth_group_text(command, 0)?;
+    if !language
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'+' | b'-' | b'#' | b'.'))
+    {
+        return None;
+    }
+    Some(SmolStr::new(format!(
+        "{language}{}",
+        if definer == "newminted" {
+            "code"
+        } else {
+            "inline"
+        }
+    )))
+}
+
+fn scan_minted(definer: &str, command: &SyntaxNode, db: &mut SignatureDb) {
+    let Some(name) = minted_name(definer, command) else {
+        return;
+    };
+    if definer == "newminted" {
+        let mut sig = environment_sig(latex2e_args(1, true));
+        sig.verbatim_body = true;
+        let mut starred = sig.clone();
+        starred.args = latex2e_args(1, false).into();
+        db.insert_environment(format!("{name}*"), starred);
+        db.insert_environment(name, sig);
+    } else {
+        db.insert_command(
+            name,
+            CommandSig {
+                args: latex2e_args(1, true).into(),
+                verbatim: true,
+                verbatim_delimited: true,
+                ..CommandSig::default()
+            },
+        );
+    }
+}
+
+fn minted_site(definer: &str, command: &SyntaxNode) -> Option<DefSite> {
+    let name = minted_name(definer, command)?;
+    // A generated default name has no literal source span to rename.
+    let optional = children::<Optional>(command).next()?;
+    Some(DefSite {
+        name,
+        kind: if definer == "newminted" {
+            DefSiteKind::Environment
+        } else {
+            DefSiteKind::Command
+        },
+        name_range: TextRange::new(
+            optional.syntax().text_range().start() + TextSize::new(1),
+            optional.syntax().text_range().end() - TextSize::new(1),
+        ),
+        range: command.text_range(),
+    })
 }
 
 /// `\newcommand{\name}[n][default]{body}` → a [`CommandSig`]. The name is the
@@ -1534,6 +1687,50 @@ mod tests {
     fn sites_of(src: &str) -> Vec<DefSite> {
         assert_eq!(reconstruct(src), src, "reconstruct must round-trip");
         scan_definition_sites(&SyntaxNode::new_root(parse(src).green))
+    }
+
+    #[test]
+    fn copied_definers_do_not_define_names_or_override_operand_readers() {
+        for (source, expected_names) in [
+            (r"\meaning\newcommand{\fake}[1]{#1}", vec![]),
+            (
+                r"\meaning\renewcommand{\meaning}[1]{#1}\meaning\newcommand{\fake}[1]{#1}",
+                vec![],
+            ),
+            (
+                r"\meaning\renewcommand{\ifx}[1]{#1}\ifx a\newcommand{\fake}[1]{#1}\fi",
+                vec![],
+            ),
+            (
+                r"\meaning\newcommand{\newcommand{\real}[1]{#1}}",
+                vec!["real"],
+            ),
+            (
+                r"\meaning\renewcommand{\newminted}[1]{#1}\newminted[real]{python}{}",
+                vec!["real"],
+            ),
+        ] {
+            let root = parse(source).syntax();
+            let sites = scan_definition_sites(&root);
+            assert_eq!(
+                sites
+                    .iter()
+                    .map(|site| site.name.as_str())
+                    .collect::<Vec<_>>(),
+                expected_names,
+                "{source}"
+            );
+            let db = scan_definitions(&root);
+            assert!(db.command("fake").is_none(), "{source}");
+            assert!(db.command("meaning").is_none(), "{source}");
+            assert!(db.command("ifx").is_none(), "{source}");
+            if expected_names.contains(&"real") {
+                assert!(
+                    db.command("real").is_some() || db.environment("real").is_some(),
+                    "{source}"
+                );
+            }
+        }
     }
 
     #[test]

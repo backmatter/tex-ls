@@ -13,6 +13,9 @@ pub(crate) enum Event {
     Start(SyntaxKind),
     /// Attach the token at this index in the token stream.
     Tok(usize),
+    /// Retain a token's exact source while applying a role proved by grammar
+    /// context, such as a macro parameter substituted before `\string` runs.
+    RekindTok { idx: usize, kind: SyntaxKind },
     /// Attach a `WORD` sub-token: the `start..end` byte slice of the token at
     /// `idx`. Math parsing uses these slices to recover TeX's one-token script
     /// boundaries from the lexer's coarser `WORD` runs (`a,b^2` and `x^2;`).

@@ -1,5 +1,8 @@
 //! Color-picker results and exact edits over proven literal declarations.
-use crate::{Analysis, Path, PositionEncoding, convert::lsp_range};
+use crate::{
+    Analysis, Path, PositionEncoding,
+    convert::{lsp_range, lsp_range_with_cursor},
+};
 use lsp_types::{Color, ColorInformation, ColorPresentation, Range, TextEdit};
 
 pub fn document_colors(
@@ -14,18 +17,22 @@ pub fn document_colors(
         return vec![];
     };
     let idx = snapshot.file_line_index(file, enc);
-    tex_ls_analysis::colors::literal_colors(&snapshot.parsed_tree(file))
-        .into_iter()
-        .map(|item| ColorInformation {
-            range: lsp_range(&idx, item.range),
-            color: Color {
-                red: item.rgb[0] as f32,
-                green: item.rgb[1] as f32,
-                blue: item.rgb[2] as f32,
-                alpha: 1.,
-            },
-        })
-        .collect()
+    let mut positions = idx.position_cursor();
+    tex_ls_analysis::colors::literal_colors_with_operands(
+        &snapshot.parsed_tree(file),
+        snapshot.file_operand_contexts(file),
+    )
+    .into_iter()
+    .map(|item| ColorInformation {
+        range: lsp_range_with_cursor(&mut positions, item.range),
+        color: Color {
+            red: item.rgb[0] as f32,
+            green: item.rgb[1] as f32,
+            blue: item.rgb[2] as f32,
+            alpha: 1.,
+        },
+    })
+    .collect()
 }
 
 pub fn color_presentations(
@@ -48,10 +55,18 @@ pub fn color_presentations(
         return vec![];
     };
     let idx = snapshot.file_line_index(file, enc);
-    let Some(item) = tex_ls_analysis::colors::literal_colors(&snapshot.parsed_tree(file))
-        .into_iter()
-        .find(|item| lsp_range(&idx, item.range) == range)
-    else {
+    let start = idx.offset_at(range.start.line, range.start.character);
+    let end = idx.offset_at(range.end.line, range.end.character);
+    let Some(item) = tex_ls_analysis::colors::literal_colors_with_operands(
+        &snapshot.parsed_tree(file),
+        snapshot.file_operand_contexts(file),
+    )
+    .into_iter()
+    .find(|item| {
+        usize::from(item.range.start()) == start
+            && usize::from(item.range.end()) == end
+            && lsp_range(&idx, item.range) == range
+    }) else {
         return vec![];
     };
     let model = if item.model == "gray" && !(color.red == color.green && color.green == color.blue)

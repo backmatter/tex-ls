@@ -4,12 +4,15 @@ use tex_ls_parser::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 pub fn selection_chain(root: &SyntaxNode, offset: usize) -> Vec<TextRange> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
+    if !root.text_range().contains_inclusive(at) {
+        return vec![root.text_range()];
+    }
 
     // Collect the innermost-first stack of byte ranges. A cursor inside a token starts
     // from that token; a cursor at a token boundary prefers the non-trivia side so it
     // expands into real syntax first; a cursor past EOF has only the root.
     let mut ranges: Vec<TextRange> = Vec::new();
-    match root.token_at_offset(at) {
+    match tex_ls_parser::syntax::token_at_offset(root, at) {
         TokenAtOffset::Single(tok) => push_token_chain(&tok, &mut ranges),
         TokenAtOffset::Between(left, right) => {
             push_token_chain(&prefer_nontrivia(left, right), &mut ranges)
@@ -41,5 +44,16 @@ fn prefer_nontrivia(left: SyntaxToken, right: SyntaxToken) -> SyntaxToken {
         left
     } else {
         right
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn selections_past_the_tree_return_its_root_range() {
+        let root = tex_ls_parser::parser::parse("\\textbf{x}").syntax();
+        for offset in [11, usize::MAX] {
+            assert_eq!(super::selection_chain(&root, offset), [root.text_range()]);
+        }
     }
 }

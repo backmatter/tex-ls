@@ -53,7 +53,7 @@ pub fn prepare(
     path: &Path,
     offset: usize,
     items: &mut Vec<CompletionItem>,
-) -> (String, HashMap<String, u8>, bool) {
+) -> (String, HashMap<String, u8>, bool, bool) {
     let file = snapshot.lookup_file(path).expect("completion source");
     let mut relevance = HashMap::new();
     if file_kind_for(path) == FileKind::Bib {
@@ -71,13 +71,20 @@ pub fn prepare(
             }
         };
         add_glyphs(items, None);
-        return (query, relevance, false);
+        return (query, relevance, false, false);
     }
     let root = snapshot.parsed_tree(file);
-    let context = tex_ls_analysis::completion::classify_context_with_declarations(
+    let context = tex_ls_analysis::completion::classify_context_with_roles(
         &root,
         offset,
         snapshot.declarations_for(path),
+        || {
+            tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
+                &root,
+                snapshot.definition_sites(file),
+                snapshot.file_operand_contexts(file),
+            )
+        },
     );
     let query = prefix(&context).to_owned();
     if matches!(
@@ -162,19 +169,17 @@ pub fn prepare(
             .flat_map(|token| token.parent_ancestors())
             .filter(|node| node.kind() == SyntaxKind::COMMAND)
             .any(|node| tex_ls_parser::ast::command_name(&node).as_deref() == Some("eqref"));
-        let aux = document_aux(snapshot, snapshot.resolve_labels(), path);
+        let aux = (!query.is_empty())
+            .then(|| document_aux(snapshot, snapshot.resolve_labels(), path))
+            .flatten();
         for item in items.iter_mut() {
-            let context = snapshot.label_context(path, &item.label);
+            let context = snapshot.label_context_ref(path, &item.label);
             let number = aux
                 .as_ref()
                 .and_then(|aux| aux.labels.get(item.label.as_str()));
-            item.detail =
-                super::hover::render_label_markdown(context.as_ref(), number.map(String::as_str));
-            item.filter_text = Some(format!(
-                "{} {}",
-                item.label,
-                item.detail.as_deref().unwrap_or("")
-            ));
+            if !query.is_empty() {
+                set_label_details(item, context, number.map(String::as_str));
+            }
             if equation {
                 relevance.insert(
                     item.label.clone(),
@@ -336,8 +341,7 @@ pub fn prepare(
                 relevance.insert(item.label.clone(), 0);
             }
             // Pair insertion is restricted to a source tail needing new structure.
-            let text_mode = tex_ls_parser::semantic::mode::ModeIndex::build(&root)
-                .mode_at(offset.saturating_sub(1))
+            let text_mode = snapshot.file_modes(file).mode_at(offset.saturating_sub(1))
                 == tex_ls_parser::semantic::mode::Mode::Text;
             for (open, close) in [("(", ")"), ("[", "]")].into_iter().filter(|_| text_mode) {
                 relevance.insert(open.into(), 0);
@@ -352,6 +356,8 @@ pub fn prepare(
         }
     }
     let file_path = matches!(context, CompletionContext::FilePath { .. });
+    let deferred_label_details =
+        matches!(context, CompletionContext::LabelRef { .. }) && query.is_empty();
     (
         if file_path {
             query.rsplit('/').next().unwrap_or(&query).into()
@@ -360,7 +366,32 @@ pub fn prepare(
         },
         relevance,
         file_path,
+        deferred_label_details,
     )
+}
+
+fn set_label_details(
+    item: &mut CompletionItem,
+    context: Option<&LabelContext>,
+    number: Option<&str>,
+) {
+    item.detail = super::hover::render_label_markdown(context, number);
+    item.filter_text = Some(format!(
+        "{} {}",
+        item.label,
+        item.detail.as_deref().unwrap_or("")
+    ));
+}
+
+pub fn enrich_label_details(snapshot: &Analysis, path: &Path, items: &mut [CompletionItem]) {
+    let aux = document_aux(snapshot, snapshot.resolve_labels(), path);
+    for item in items {
+        let context = snapshot.label_context_ref(path, &item.label);
+        let number = aux
+            .as_ref()
+            .and_then(|aux| aux.labels.get(item.label.as_str()));
+        set_label_details(item, context, number.map(String::as_str));
+    }
 }
 fn add_glyphs(items: &mut [CompletionItem], scope: Option<&SignatureDb>) {
     for item in items {

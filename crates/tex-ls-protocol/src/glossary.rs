@@ -52,29 +52,36 @@ pub fn locations(
     include_definition: bool,
     enc: PositionEncoding,
 ) -> Vec<Location> {
-    occurrences(snapshot, path, key)
-        .into_iter()
-        .filter(|(_, _, definition)| {
-            if definition_only {
-                *definition
-            } else {
-                include_definition || !definition
-            }
-        })
-        .filter_map(|(path, range, _)| {
-            let file = snapshot.lookup_file(&path)?;
-            location_for(&path, &snapshot.file_line_index(file, enc), range)
-        })
-        .collect()
+    let sites = occurrences(snapshot, path, key);
+    locations_for_ranges(
+        snapshot,
+        sites
+            .iter()
+            .filter(|(_, _, definition)| {
+                if definition_only {
+                    *definition
+                } else {
+                    include_definition || !definition
+                }
+            })
+            .map(|(path, range, _)| (path.as_path(), *range)),
+        enc,
+    )
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub fn rename_allowed(snapshot: &Analysis, path: &Path, key: &str) -> bool {
     let sites = occurrences(snapshot, path, key);
+    let mut checked = HashSet::new();
     snapshot.resolve_labels().is_closed(path)
         && snapshot.resolve_labels().has_unique_root(path)
         && sites.iter().all(|(path, _, _)| {
-            name_refs::macro_roots(snapshot.resolve_labels(), snapshot.package_graph(), path).len()
-                <= 1
+            !checked.insert(path)
+                || name_refs::macro_roots(snapshot.resolve_labels(), snapshot.package_graph(), path)
+                    .len()
+                    <= 1
         })
         && sites
             .iter()
@@ -96,17 +103,15 @@ pub fn rename(
     {
         return None;
     }
-    let mut changes = HashMap::new();
-    for (path, range, _) in occurrences(snapshot, path, key) {
-        let file = snapshot.lookup_file(&path)?;
-        let uri = path_to_uri(&path)?;
-        push_edit(
-            &mut changes,
-            &uri,
-            &snapshot.file_line_index(file, enc),
-            range,
-            new_name,
-        );
-    }
-    finalize_rename(changes)
+    let sites = occurrences(snapshot, path, key);
+    let locations: Option<Vec<_>> = locations_for_ranges(
+        snapshot,
+        sites
+            .iter()
+            .map(|(path, range, _)| (path.as_path(), *range)),
+        enc,
+    )
+    .into_iter()
+    .collect();
+    finalize_rename(edits_for_locations(locations?, new_name))
 }

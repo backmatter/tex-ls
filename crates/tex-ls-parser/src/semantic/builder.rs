@@ -32,10 +32,30 @@ pub fn build_with_declarations(
     root: &SyntaxNode,
     declared: &ResolvedDeclarations,
 ) -> SemanticModel {
+    build_with_declarations_and_sites(root, declared, &super::scan_definition_sites(root))
+}
+
+pub fn build_with_declarations_and_sites(
+    root: &SyntaxNode,
+    declared: &ResolvedDeclarations,
+    sites: &[super::DefSite],
+) -> SemanticModel {
+    let operands = super::context::PrimitiveOperandContexts::from_definition_sites(root, sites);
+    build_with_declarations_and_operands(root, declared, &operands)
+}
+
+pub fn build_with_declarations_and_operands(
+    root: &SyntaxNode,
+    declared: &ResolvedDeclarations,
+    operands: &super::context::PrimitiveOperandContexts,
+) -> SemanticModel {
     let mut model = SemanticModel::default();
     let signatures = Signatures::new(declared.as_db());
-
+    let contexts = super::context::TokenListContexts::new(root);
     for node in root.descendants() {
+        if contexts.contains(node.text_range()) {
+            continue;
+        }
         if node.kind() == SyntaxKind::BEGIN {
             if let Some(sig) = signatures.environment_at(&node)
                 && sig.label_key
@@ -46,7 +66,7 @@ pub fn build_with_declarations(
             }
             continue;
         }
-        if node.kind() != SyntaxKind::COMMAND {
+        if node.kind() != SyntaxKind::COMMAND || operands.contains_head(&node) {
             continue;
         }
         let command = node;
@@ -436,6 +456,33 @@ mod tests {
 
     fn model(src: &str) -> crate::semantic::SemanticModel {
         build(&SyntaxNode::new_root(parse(src).green))
+    }
+
+    #[test]
+    fn primitive_operands_do_not_create_keys_but_leftover_groups_still_execute() {
+        let source = concat!(
+            "\\let\\copy\\label{fake-label}\\label{real-label}",
+            "\\meaning\\ref{fake-ref}\\ref{real-ref}",
+            "\\show\\cite{fake-cite}\\cite{real-cite}",
+            "\\noexpand\\gls{fake-glossary}\\gls{real-glossary}",
+            "\\let\\copy\\ref{\\ref{nested-ref}}",
+            "\\ifx a\\ref{compared-ref}\\fi",
+        );
+        let model = model(source);
+        assert_eq!(model.labels().len(), 1);
+        assert_eq!(model.labels()[0].name, "real-label");
+        assert_eq!(
+            model
+                .refs()
+                .iter()
+                .map(|site| site.name.as_str())
+                .collect::<Vec<_>>(),
+            ["real-ref", "nested-ref"]
+        );
+        assert_eq!(model.citations().len(), 1);
+        assert_eq!(model.citations()[0].name, "real-cite");
+        assert_eq!(model.glossary_uses().len(), 1);
+        assert_eq!(model.glossary_uses()[0].key, "real-glossary");
     }
 
     #[test]

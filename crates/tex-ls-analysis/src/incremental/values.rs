@@ -1,8 +1,32 @@
 //! Values for incremental analysis.
 use super::*;
 
+/// Per-file label display contexts. Names retain their first source occurrence;
+/// labels under the same construct share one heading or caption allocation.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct FileLabelContexts {
+    pub(super) labels: HashMap<SmolStr, Option<(crate::syntax::SyntaxKind, rowan::TextSize)>>,
+    pub(super) contexts: HashMap<
+        (crate::syntax::SyntaxKind, rowan::TextSize),
+        tex_ls_parser::semantic::LabelContext,
+    >,
+}
+
+impl FileLabelContexts {
+    /// Distinguish an absent name from a first occurrence without a context.
+    pub fn get(&self, name: &str) -> Option<Option<&tex_ls_parser::semantic::LabelContext>> {
+        self.labels
+            .get(name)
+            .map(|source| source.and_then(|source| self.contexts.get(&source)))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QueryKind {
+    RootGraphics,
+    FileModes,
+    FileOperands,
+    FileLabelContexts,
     ParsedDocument,
     /// A file's per-file label/reference model (`semantic_model`).
     SemanticModel,

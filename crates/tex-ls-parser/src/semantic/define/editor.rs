@@ -242,15 +242,33 @@ fn next_control_name(
 }
 
 pub fn editor_declarations(root: &SyntaxNode) -> Vec<EditorDeclaration> {
+    let sites = scan_definition_sites(root);
+    let operands =
+        crate::semantic::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
+    editor_declarations_with_operands(root, &operands)
+}
+
+/// Reuse the source's operand ownership when collecting editor declarations.
+pub fn editor_declarations_with_operands(
+    root: &SyntaxNode,
+    operands: &crate::semantic::context::PrimitiveOperandContexts,
+) -> Vec<EditorDeclaration> {
     let mut declarations = Vec::new();
+    let mut listing_overrides = HashSet::new();
+    let contexts = crate::semantic::context::TokenListContexts::new(root);
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
+        .filter(|node| !contexts.contains(node.text_range()))
+        .filter(|node| !operands.contains_head(node))
     {
         let Some(name) = command_name(&command) else {
             continue;
         };
         let extra = extra_declarations(&command);
+        if listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides) {
+            continue;
+        }
         if !extra.is_empty() {
             declarations.extend(extra);
             continue;
@@ -301,6 +319,7 @@ pub fn editor_declarations(root: &SyntaxNode) -> Vec<EditorDeclaration> {
             Some(DefKind::VerbatimEnvironment) => {
                 scan_verbatim_environment(&name, &command, &mut signatures)
             }
+            Some(DefKind::Minted) => scan_minted(&name, &command, &mut signatures),
             None => {}
         }
         // These declarers have a fixed public argument contract even when
@@ -336,6 +355,28 @@ pub fn editor_declarations(root: &SyntaxNode) -> Vec<EditorDeclaration> {
         }
         apply_verbatim_flags(&mut signatures, &bodies);
         apply_verbatim_env_flags(&mut signatures, &env_bodies, &bodies);
+        if name.starts_with("newmint")
+            && ordinary_definition_site(&command).is_none()
+            && let Some(generated) = minted_name(&name, &command)
+            && let Some((name_range, _)) = nth_group_inner(&command, 0)
+        {
+            declarations.push(EditorDeclaration {
+                site: DefSite {
+                    name: generated,
+                    kind: if name == "newminted" {
+                        DefSiteKind::Environment
+                    } else {
+                        DefSiteKind::Command
+                    },
+                    name_range,
+                    range: command.text_range(),
+                },
+                signatures,
+                alias: None,
+                alias_is_name_text: false,
+            });
+            continue;
+        }
         // Site scanning includes known declarations with an unknown argument shape.
         if let Some(site) = ordinary_definition_site(&command) {
             let alias = if name == "let" {
@@ -358,6 +399,69 @@ pub fn editor_declarations(root: &SyntaxNode) -> Vec<EditorDeclaration> {
 mod tests {
     use super::*;
     use crate::parser::parse;
+
+    #[test]
+    fn copied_declaration_heads_do_not_create_editor_symbols() {
+        for source in [
+            r"\meaning\newcommand{\ghost}[1]{#1\newcommand{\nested}{x}}\newcommand{\real}{x}",
+            r"\meaning\RenewCommandCopy{\ghost}{\relax}\newcommand{\real}{x}",
+            r"\ExplSyntaxOn\meaning\cs_set:cpn{ghost}#1{#1}\ExplSyntaxOff\newcommand{\real}{x}",
+        ] {
+            let root = parse(source).syntax();
+            assert_eq!(root.text().to_string(), source);
+            let sites = scan_definition_sites(&root);
+            let operands =
+                crate::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+                    &root, &sites,
+                );
+            let declarations = editor_declarations_with_operands(&root, &operands);
+            assert_eq!(declarations, editor_declarations(&root));
+            assert!(
+                declarations
+                    .iter()
+                    .all(|declaration| declaration.site.name != "ghost"),
+                "{source}: {declarations:?}"
+            );
+            assert!(
+                declarations
+                    .iter()
+                    .any(|declaration| declaration.site.name == "real"),
+                "{source}: {declarations:?}"
+            );
+            if source.contains("nested") {
+                assert!(
+                    declarations
+                        .iter()
+                        .any(|declaration| declaration.site.name == "nested"),
+                    "{source}: {declarations:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn copied_factory_overrides_preserve_later_generated_editor_signatures() {
+        for copied_override in [
+            r"\meaning\renewcommand{\newmintinline}[1]{#1}",
+            r"\meaning\RenewCommandCopy{\newmintinline}{\relax}",
+            r"\ExplSyntaxOn\meaning\cs_set:cpn{newmintinline}#1{#1}\ExplSyntaxOff",
+        ] {
+            let source = format!(r"{copied_override}\newmintinline[code]{{python}}{{}}");
+            let root = parse(&source).syntax();
+            let declarations = editor_declarations(&root);
+            assert!(
+                declarations
+                    .iter()
+                    .all(|declaration| declaration.site.name != "newmintinline"),
+                "{source}: {declarations:?}"
+            );
+            let generated = declarations
+                .iter()
+                .find(|declaration| declaration.site.name == "code")
+                .unwrap_or_else(|| panic!("{source}: {declarations:?}"));
+            assert!(generated.signatures.command("code").is_some(), "{source}");
+        }
+    }
 
     #[test]
     fn command_copies_accept_each_literal_argument_form() {

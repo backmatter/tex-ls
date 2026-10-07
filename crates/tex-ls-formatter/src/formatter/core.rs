@@ -362,6 +362,7 @@ fn format_root(
     // tree, held by value for the whole lowering like `regions`. Empty for the
     // overwhelming majority of documents, in which case every query is free.
     let suppressed = directives::Suppressions::build(root);
+    let token_lists = tex_ls_parser::semantic::context::TokenListContexts::new(root);
     // The sentence-boundary profile for the `sentence`/`semantic` wrap modes,
     // resolved from the run's [`SentenceOptions`]. `Copy`, borrowing the merged
     // no-break slice `ctx` still owns for the whole call, so it rides `LowerCtx`
@@ -381,6 +382,7 @@ fn format_root(
         signatures: Signatures::new(&user),
         expl3_regions: &regions,
         suppressed: suppressed.format_ranges(),
+        token_lists: &token_lists,
         profile,
         range,
         dtx_reflow_cache: &dtx_reflow_cache,
@@ -772,6 +774,7 @@ struct LowerCtx<'a> {
     /// clamped against the hard width by [`FormatStyle::stable_wrap_target`].
     stable_target: usize,
     signatures: Signatures<'a>,
+    token_lists: &'a tex_ls_parser::semantic::context::TokenListContexts,
     /// Sorted, non-overlapping byte ranges of the document's expl3 regions (see
     /// [`expl3_regions`]). Inside these, source whitespace is catcode-9 (ignored)
     /// and `~` is catcode-10 (a literal space), so the formatter lays out the code
@@ -935,6 +938,52 @@ impl<'a> LowerCtx<'a> {
 /// threaded through so it reaches every nested paragraph (including environment and
 /// group bodies).
 fn lower_node(node: &SyntaxNode, cx: LowerCtx<'_>) -> Ir {
+    if node.kind() == SyntaxKind::INLINE_CODE
+        || node.kind() == SyntaxKind::EMBEDDED_TEX
+        || node.kind() == SyntaxKind::ENVIRONMENT
+            && (node
+                .children()
+                .any(|child| child.kind() == SyntaxKind::EMBEDDED_TEX)
+                || cx
+                    .signatures
+                    .environment_at(node)
+                    .is_some_and(|sig| sig.verbatim_body)
+                    && node
+                        .children()
+                        .any(|child| child.kind() == SyntaxKind::COMMAND)
+                || node.children_with_tokens().any(|element| {
+                    element.as_token().is_some_and(|t| {
+                        matches!(
+                            t.kind(),
+                            SyntaxKind::EXCLUDED_BODY
+                                | SyntaxKind::FOREIGN_TEXT
+                                | SyntaxKind::FOREIGN_KEYWORD
+                                | SyntaxKind::FOREIGN_FUNCTION
+                                | SyntaxKind::FOREIGN_COMMENT
+                                | SyntaxKind::DELEGATED_CODE
+                        )
+                    })
+                }))
+    {
+        return Ir::verbatim(node.text().to_string());
+    }
+    // These regions retain active syntax for analysis, but their authored
+    // whitespace is literal output. Preserve it before any layout routing.
+    if cx.token_lists.contains(node.text_range())
+        || node.kind() == SyntaxKind::ENVIRONMENT
+            && cx
+                .signatures
+                .environment_at(node)
+                .is_some_and(|sig| sig.verbatim_body)
+            && node
+                .children()
+                .find(|child| child.kind() == SyntaxKind::BEGIN)
+                .and_then(|begin| tex_ls_parser::ast::environment_name(&begin))
+                .as_deref()
+                == Some("alltt")
+    {
+        return Ir::verbatim(node.text().to_string());
+    }
     // Directive-suppressed content is reproduced, never laid out. Checked first,
     // above every routing decision, so no arm below can claim a node the author
     // turned the formatter off over.

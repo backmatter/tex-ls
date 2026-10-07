@@ -74,6 +74,9 @@ fn reparse_one_paragraph(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) ->
     }
 
     let old = base.text.get(start..end)?;
+    if old.contains("\\ifx") {
+        return None;
+    }
     let local = Edit {
         range: edit.range.start.checked_sub(start)?..edit.range.end.checked_sub(start)?,
         insert: edit.insert.clone(),
@@ -90,7 +93,8 @@ fn reparse_one_paragraph(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) ->
     // paragraph matters to its bytes, a fresh fragment parse will not reproduce
     // the paragraph and the tier refuses. Unchanged commands inside the fragment
     // then make the lexer exit state change by exactly the same transitions.
-    let old_parsed = parse_fragment_with_ctx(old, base.ctx, base.config, base.implicit_expl);
+    let context = base.ctx.rebased_for_fragment(start);
+    let old_parsed = parse_fragment_with_ctx(old, &context, base.config, base.implicit_expl);
     if !old_parsed.errors.is_empty() {
         return None;
     }
@@ -99,7 +103,7 @@ fn reparse_one_paragraph(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) ->
         return None;
     }
 
-    let parsed = parse_fragment_with_ctx(&new, base.ctx, base.config, base.implicit_expl);
+    let parsed = parse_fragment_with_ctx(&new, &context, base.config, base.implicit_expl);
     if !parsed.errors.is_empty() {
         return None;
     }
@@ -164,6 +168,9 @@ fn reparse_paragraph_seam(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -
     let start = usize::from(range.start());
     let end = usize::from(range.end());
     let old = base.text.get(start..end)?;
+    if old.contains("\\ifx") {
+        return None;
+    }
     let local = Edit {
         range: edit.range.start.checked_sub(start)?..edit.range.end.checked_sub(start)?,
         insert: edit.insert.clone(),
@@ -178,12 +185,13 @@ fn reparse_paragraph_seam(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -
         .map(|element| element.to_owned())
         .collect();
     let expected = GreenNode::new(SyntaxKind::ROOT.into(), old_green);
-    let old_parsed = parse_fragment_with_ctx(old, base.ctx, base.config, base.implicit_expl);
+    let context = base.ctx.rebased_for_fragment(start);
+    let old_parsed = parse_fragment_with_ctx(old, &context, base.config, base.implicit_expl);
     if old_parsed.green != expected || !old_parsed.errors.is_empty() {
         return None;
     }
 
-    let parsed = parse_fragment_with_ctx(&new, base.ctx, base.config, base.implicit_expl);
+    let parsed = parse_fragment_with_ctx(&new, &context, base.config, base.implicit_expl);
     let errors = replaced_errors(base.errors, range, &parsed.errors, edit)?;
     let replacement: Vec<GreenElement> = parsed
         .green

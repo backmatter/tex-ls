@@ -62,11 +62,17 @@ pub fn rename(
     }
     let uri = path_to_uri(path)?;
     let idx = snapshot.file_line_index(file, enc);
-    let mut changes = HashMap::new();
-    for (range, _) in occurrences(model, key) {
-        push_edit(&mut changes, &uri, &idx, range, name);
-    }
-    finalize_rename(changes)
+    let ranges: Vec<_> = occurrences(model, key)
+        .into_iter()
+        .map(|(range, _)| range)
+        .collect();
+    finalize_rename(edits_for_locations(
+        lsp_ranges(&idx, &ranges).into_iter().map(|range| Location {
+            uri: uri.clone(),
+            range,
+        }),
+        name,
+    ))
 }
 
 pub use tex_ls_analysis::bib::render::expanded;

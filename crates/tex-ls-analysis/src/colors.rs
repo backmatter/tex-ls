@@ -23,8 +23,28 @@ fn trimmed(range: TextRange, text: &str) -> (TextRange, &str) {
 }
 
 pub fn literal_colors(root: &SyntaxNode) -> Vec<LiteralColor> {
+    literal_colors_with_sites(root, &tex_ls_parser::semantic::scan_definition_sites(root))
+}
+
+pub fn literal_colors_with_sites(
+    root: &SyntaxNode,
+    sites: &[tex_ls_parser::semantic::DefSite],
+) -> Vec<LiteralColor> {
+    let operands =
+        tex_ls_parser::semantic::context::PrimitiveOperandContexts::from_definition_sites(
+            root, sites,
+        );
+    literal_colors_with_operands(root, &operands)
+}
+
+pub fn literal_colors_with_operands(
+    root: &SyntaxNode,
+    operands: &tex_ls_parser::semantic::context::PrimitiveOperandContexts,
+) -> Vec<LiteralColor> {
+    let protected = tex_ls_parser::semantic::context::TokenListContexts::new(root);
     root.descendants()
         .filter(|n| n.kind() == SyntaxKind::COMMAND)
+        .filter(|node| !protected.contains(node.text_range()) && !operands.contains_head(node))
         .filter_map(|node| {
             let name = command_name(&node)?;
             if !matches!(name.as_str(), "definecolor" | "providecolor") {
@@ -92,4 +112,23 @@ pub fn literal_colors(root: &SyntaxNode) -> Vec<LiteralColor> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printed_color_heads_are_ignored_and_nested_live_declarations_remain() {
+        let source = r"\meaning\definecolor{fake}{HTML}{FF0000}\detokenize{\definecolor{printed}{HTML}{FFFFFF}}\meaning\ref{\definecolor{nested}{HTML}{00FF00}}\definecolor{live}{HTML}{0000FF}";
+        let root = tex_ls_parser::parser::parse(source).syntax();
+        let colors = literal_colors(&root);
+        assert_eq!(colors.len(), 2);
+        assert_eq!(colors[0].rgb, [0., 1., 0.]);
+        assert_eq!(colors[1].rgb, [0., 0., 1.]);
+        assert_eq!(
+            &source[usize::from(colors[0].range.start())..usize::from(colors[0].range.end())],
+            "00FF00"
+        );
+    }
 }

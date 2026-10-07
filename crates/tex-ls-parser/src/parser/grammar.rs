@@ -25,7 +25,7 @@ use std::borrow::Cow;
 use crate::parser::conditional;
 use crate::parser::core::SyntaxError;
 use crate::parser::events::Event;
-use crate::parser::lexer::{ParseCtx, Token};
+use crate::parser::lexer::{ParseCtx, PrimitiveOperandScan, Token};
 use crate::semantic::signature::{
     ArgKind, ArgSpec, ArgumentDomain, builtin, match_arg_slot, match_verbatim_arg_slot,
 };
@@ -117,7 +117,7 @@ fn debug_assert_balanced(events: &[Event]) {
                 depth -= 1;
                 debug_assert!(depth >= 0, "parser emitted a Finish with no open node");
             }
-            Event::Tok(_) | Event::SubTok { .. } => {}
+            Event::Tok(_) | Event::RekindTok { .. } | Event::SubTok { .. } => {}
         }
     }
     debug_assert_eq!(
@@ -589,6 +589,8 @@ struct Parser<'t> {
     /// [`Self::at_block_end`] and the bracket/optional guards read it to keep
     /// any construct from consuming past the frame.
     macrocode_end: Option<usize>,
+    /// A hard boundary for recovery inside an embedded TeX or inline code region.
+    region_end: Option<usize>,
     /// Brace tokens inside the current `macrocode` body with no match within
     /// the chunk. A `macrocode` chunk is macro code: a definition regularly
     /// opens a `{` in one chunk and closes it in a later one (`\def\foo#1{%` …
@@ -639,6 +641,13 @@ struct Parser<'t> {
     /// Replacement groups after a primitive definition's name and parameters.
     /// Their tokens are stored code even when the name is an unbraced control word.
     def_body_groups: std::collections::HashSet<usize>,
+    /// Opening braces owned by source-proved primitive detokenize heads. Kept
+    /// independently of argument attachment, which may decline a blank line.
+    token_list_groups: std::collections::HashSet<usize>,
+    primitive_detokenize_heads: std::collections::HashSet<usize>,
+    /// Copied or inspected command names do not delimit environments. The
+    /// ordered index keeps this check bounded for every grammar gate.
+    primitive_operand_heads: Vec<usize>,
     /// Token indices of *environment-alias openers* — bare control words whose
     /// definition body is exactly `\begin{X}` — mapped to the target environment
     /// `X` (issue #109). Pre-scanned in [`Self::new`] for the same reason as
@@ -784,6 +793,23 @@ struct Parser<'t> {
 impl<'t> Parser<'t> {
     fn new(tokens: &'t [Token], ctx: &'t ParseCtx) -> Self {
         let pre = PreScan::run(tokens, ctx);
+        let mut operands = PrimitiveOperandScan::default();
+        let mut primitive_detokenize_heads = std::collections::HashSet::new();
+        let mut primitive_operand_heads = Vec::new();
+        let mut operand_offset = 0;
+        for (index, token) in tokens.iter().enumerate() {
+            let operand = operands.observe_at(token.kind, &token.text, ctx, operand_offset);
+            operand_offset += token.text.len();
+            if operand {
+                primitive_operand_heads.push(index);
+            }
+            if !operand
+                && token.kind == SyntaxKind::CONTROL_WORD
+                && token.text.get(1..) == Some("detokenize")
+            {
+                primitive_detokenize_heads.insert(index);
+            }
+        }
         Self {
             tokens,
             ctx,
@@ -802,6 +828,7 @@ impl<'t> Parser<'t> {
             open_envs: Vec::new(),
             group_opens: Vec::new(),
             macrocode_end: None,
+            region_end: None,
             plain_braces: std::collections::HashSet::new(),
             plain_braces_version: 0,
             expl_toggles: pre.expl_toggles,
@@ -809,6 +836,9 @@ impl<'t> Parser<'t> {
             conditional_openers: pre.conditional_openers,
             def_parameter_dollars: pre.def_parameter_dollars,
             def_body_groups: pre.def_body_groups,
+            token_list_groups: std::collections::HashSet::new(),
+            primitive_detokenize_heads,
+            primitive_operand_heads,
             last_alias_closer: pre
                 .alias_closers
                 .keys()
@@ -850,7 +880,10 @@ impl<'t> Parser<'t> {
     /// input, so an out-of-range index is "no flow word here", not a bug.
     fn conditional_flow_at(&self, idx: usize) -> Option<conditional::FlowWord> {
         let t = self.tokens.get(idx)?;
-        if t.kind != SyntaxKind::CONTROL_WORD || self.in_expl_region(idx) {
+        if t.kind != SyntaxKind::CONTROL_WORD
+            || self.in_expl_region(idx)
+            || self.is_primitive_operand(idx)
+        {
             return None;
         }
         t.text.strip_prefix('\\').and_then(conditional::flow_word)
@@ -977,11 +1010,17 @@ impl<'t> Parser<'t> {
 
     fn kind(&self) -> Option<SyntaxKind> {
         self.step();
+        if self.at_end() {
+            return None;
+        }
         self.tokens.get(self.pos).map(|t| t.kind)
     }
 
     fn nth_kind(&self, n: usize) -> Option<SyntaxKind> {
         self.step();
+        if self.region_end.is_some_and(|end| self.pos + n >= end) {
+            return None;
+        }
         self.tokens.get(self.pos + n).map(|t| t.kind)
     }
 
@@ -993,11 +1032,17 @@ impl<'t> Parser<'t> {
     }
 
     fn at_end(&self) -> bool {
-        self.pos >= self.tokens.len()
+        self.pos >= self.tokens.len() || self.region_end.is_some_and(|end| self.pos >= end)
     }
 
     fn at_command(&self, name: &str) -> bool {
-        self.kind() == Some(SyntaxKind::CONTROL_WORD) && self.text() == name
+        self.kind() == Some(SyntaxKind::CONTROL_WORD)
+            && self.text() == name
+            && !self.is_primitive_operand(self.pos)
+    }
+
+    fn is_primitive_operand(&self, pos: usize) -> bool {
+        self.primitive_operand_heads.binary_search(&pos).is_ok()
     }
 
     /// True if the `\begin`/`\end` at token index `pos` reads as a LaTeX
@@ -1013,6 +1058,9 @@ impl<'t> Parser<'t> {
     /// macro data — statically unpairable — so it too stays a plain command
     /// (the group attaches as an ordinary argument).
     fn env_name_follows(&self, pos: usize) -> bool {
+        if self.is_primitive_operand(pos) {
+            return false;
+        }
         let s = self.scan_trivia(pos + 1, CommentMode::Skip);
         if s.saw_blank_line || s.next_kind != Some(SyntaxKind::L_BRACE) {
             return false;
@@ -1066,8 +1114,39 @@ impl<'t> Parser<'t> {
 
     fn bump(&mut self) {
         debug_assert!(!self.at_end(), "bump past end of input");
-        self.events.push(Event::Tok(self.pos));
+        if self.stringified_parameter() {
+            self.events.push(Event::RekindTok {
+                idx: self.pos,
+                kind: SyntaxKind::HASH,
+            });
+        } else {
+            self.events.push(Event::Tok(self.pos));
+        }
         self.pos += 1;
+    }
+
+    fn stringified_parameter(&self) -> bool {
+        if !(self.in_def_body || self.in_primitive_body)
+            || self.tokens[self.pos].kind != SyntaxKind::STRINGIFIED_TOKEN
+            || self.tokens[self.pos].text != "#"
+        {
+            return false;
+        }
+        // Parameter substitution precedes primitive expansion. Keep a proved
+        // stored placeholder, including doubled nested-definition markers,
+        // rather than claiming that the source hash itself is printed.
+        let mut next = self.pos + 1;
+        while self
+            .tokens
+            .get(next)
+            .is_some_and(|token| token.kind == SyntaxKind::HASH)
+        {
+            next += 1;
+        }
+        self.tokens.get(next).is_some_and(|token| {
+            token.kind == SyntaxKind::WORD
+                && matches!(token.text.as_bytes().first(), Some(b'1'..=b'9'))
+        })
     }
 
     fn open(&mut self, kind: SyntaxKind) {
@@ -1447,7 +1526,21 @@ impl<'t> Parser<'t> {
 
     fn text_element(&mut self) {
         let Some(k) = self.kind() else { return };
+        if self.is_primitive_operand(self.pos) {
+            if k == SyntaxKind::CONTROL_WORD {
+                self.command();
+            } else {
+                self.bump();
+            }
+            return;
+        }
         match k {
+            SyntaxKind::ESCAPE_OPEN => {
+                self.embedded_region(SyntaxKind::EMBEDDED_TEX, SyntaxKind::ESCAPE_CLOSE)
+            }
+            SyntaxKind::CODE_OPEN => {
+                self.embedded_region(SyntaxKind::INLINE_CODE, SyntaxKind::CODE_CLOSE)
+            }
             k if Self::is_trivia(k) => self.bump(),
             SyntaxKind::CONTROL_WORD => {
                 // Inside a definition body or an expl3 region, `\begin`/`\end`
@@ -1591,6 +1684,18 @@ impl<'t> Parser<'t> {
     /// `[…]` argument — its `[` is the delimiter it sizes (`\Big[ x \Big]`),
     /// mirroring the `\left`/`\right` special case.
     fn command(&mut self) {
+        if self.is_primitive_operand(self.pos) {
+            self.operand_command(ArgumentDomain::Unknown);
+            return;
+        }
+        if self.primitive_detokenize_heads.contains(&self.pos)
+            && !self.ctx.is_suppressed("detokenize")
+        {
+            let scan = self.scan_trivia(self.pos + 1, CommentMode::Skip);
+            if scan.next_kind == Some(SyntaxKind::L_BRACE) {
+                self.token_list_groups.insert(scan.next);
+            }
+        }
         let bare_input = self.text() == "\\input";
         let accepts_definition_star = matches!(
             self.text(),
@@ -1679,7 +1784,18 @@ impl<'t> Parser<'t> {
             Some(plan) => self.attach_expl3_arguments(plan),
             None => self.attach_arguments(bracket, builtin_args),
         }
+        if self.kind() == Some(SyntaxKind::CODE_OPEN) {
+            self.embedded_region(SyntaxKind::INLINE_CODE, SyntaxKind::CODE_CLOSE);
+        }
         self.in_def_body = saved;
+        self.close();
+    }
+
+    fn operand_command(&mut self, domain: ArgumentDomain) {
+        self.open(SyntaxKind::COMMAND);
+        self.bump();
+        // Keep the name navigable without applying its signature or flags.
+        self.attach_arguments_with_default(BracketPolicy::Greedy, None, domain);
         self.close();
     }
 
@@ -1746,6 +1862,15 @@ impl<'t> Parser<'t> {
     ///   optional/mandatory slots without consulting signature arity, while a
     ///   standalone long `[…]` remains ordinary text.
     fn attach_arguments(&mut self, bracket: BracketPolicy, args: Option<&[ArgSpec]>) {
+        self.attach_arguments_with_default(bracket, args, ArgumentDomain::Unknown);
+    }
+
+    fn attach_arguments_with_default(
+        &mut self,
+        bracket: BracketPolicy,
+        args: Option<&[ArgSpec]>,
+        default_domain: ArgumentDomain,
+    ) {
         let mut slot = 0usize;
         loop {
             let (next, paragraph_break) = self.peek_meaningful();
@@ -1763,7 +1888,7 @@ impl<'t> Parser<'t> {
                     self.skip_trivia();
                     let domain = args
                         .and_then(|args| match_arg_slot(args, &mut slot, ArgKind::Brace))
-                        .map_or(ArgumentDomain::Unknown, |spec| spec.domain);
+                        .map_or(default_domain, |spec| spec.domain);
                     self.argument_group(domain);
                 }
                 Some(SyntaxKind::L_BRACKET) => {
@@ -1814,7 +1939,7 @@ impl<'t> Parser<'t> {
                     self.skip_trivia();
                     let domain = args
                         .and_then(|args| match_arg_slot(args, &mut slot, ArgKind::Bracket))
-                        .map_or(ArgumentDomain::Unknown, |spec| spec.domain);
+                        .map_or(default_domain, |spec| spec.domain);
                     self.argument_optional(domain, allow_paragraphs);
                 }
                 // A verbatim-argument command's body (`\url{…}`, `\lstinline|…|`,
@@ -1887,6 +2012,7 @@ impl<'t> Parser<'t> {
 
     fn argument_group(&mut self, domain: ArgumentDomain) {
         debug_assert_eq!(self.kind(), Some(SyntaxKind::L_BRACE));
+        let token_list = self.token_list_groups.contains(&self.pos);
         let saved_primitive = self.in_primitive_body;
         let primitive_body = self.def_body_groups.contains(&self.pos);
         self.in_primitive_body = saved_primitive || primitive_body;
@@ -1899,13 +2025,22 @@ impl<'t> Parser<'t> {
         self.open(SyntaxKind::GROUP);
         self.bump(); // {
         self.group_opens.push(self.pos - 1);
+        if token_list {
+            self.open(SyntaxKind::TOKEN_LIST);
+        }
         loop {
             match self.kind() {
                 None => {
+                    if token_list {
+                        self.close();
+                    }
                     self.error_at(opener, "unclosed `{`");
                     break;
                 }
                 Some(SyntaxKind::R_BRACE) => {
+                    if token_list {
+                        self.close();
+                    }
                     self.bump();
                     break;
                 }
@@ -2354,6 +2489,19 @@ impl<'t> Parser<'t> {
         if name
             .as_deref()
             .is_some_and(|n| self.ctx.is_verbatim_environment(n))
+            || matches!(
+                self.kind(),
+                Some(
+                    SyntaxKind::VERBATIM_BODY
+                        | SyntaxKind::EXCLUDED_BODY
+                        | SyntaxKind::FOREIGN_TEXT
+                        | SyntaxKind::FOREIGN_KEYWORD
+                        | SyntaxKind::FOREIGN_FUNCTION
+                        | SyntaxKind::FOREIGN_COMMENT
+                        | SyntaxKind::DELEGATED_CODE
+                        | SyntaxKind::ESCAPE_OPEN
+                )
+            )
         {
             self.verbatim_body(name.as_deref().expect("verbatim name"));
         } else if name
@@ -2507,6 +2655,26 @@ impl<'t> Parser<'t> {
     /// until the matching `\end{name}`. The lexer has already collapsed the body
     /// into a single `VERBATIM_BODY` token; this loop also serves as a fallback.
     fn verbatim_body(&mut self, name: &str) {
+        // Legacy delimiter aliases can reach this fallback without a lexer
+        // capture. Those tokens remain opaque. Only source-proven captures
+        // and included comments expose active elements here.
+        let active = name == "comment"
+            || self.tokens[self.pos..]
+                .iter()
+                .take_while(|t| t.text != "\\end")
+                .any(|t| {
+                    matches!(
+                        t.kind,
+                        SyntaxKind::VERBATIM_BODY
+                            | SyntaxKind::EXCLUDED_BODY
+                            | SyntaxKind::FOREIGN_TEXT
+                            | SyntaxKind::FOREIGN_KEYWORD
+                            | SyntaxKind::FOREIGN_FUNCTION
+                            | SyntaxKind::FOREIGN_COMMENT
+                            | SyntaxKind::DELEGATED_CODE
+                            | SyntaxKind::ESCAPE_OPEN
+                    )
+                });
         loop {
             match self.kind() {
                 None => break,
@@ -2516,9 +2684,40 @@ impl<'t> Parser<'t> {
                 {
                     break;
                 }
+                _ if active => self.element(),
                 _ => self.bump(),
             }
         }
+    }
+
+    fn embedded_region(&mut self, node: SyntaxKind, close: SyntaxKind) {
+        let open = self.kind();
+        let mut depth = 0;
+        let end = self.tokens[self.pos..]
+            .iter()
+            .position(|token| {
+                if Some(token.kind) == open {
+                    depth += 1;
+                }
+                if token.kind == close {
+                    depth -= 1;
+                }
+                depth == 0
+            })
+            .map(|offset| self.pos + offset)
+            .unwrap_or(self.tokens.len());
+        let saved = self.region_end;
+        self.region_end = Some(saved.map_or(end, |limit| limit.min(end)));
+        self.open(node);
+        self.bump();
+        while !self.at_end() && self.kind() != Some(close) {
+            self.element();
+        }
+        self.region_end = saved;
+        if self.kind() == Some(close) {
+            self.bump();
+        }
+        self.close();
     }
 
     /// A `\end` with no matching open environment at this level.

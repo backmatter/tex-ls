@@ -238,6 +238,7 @@
     "lstlisting": { "args": [{ "kind": "opt", "content": "keyval" }], "verbatimBody": true, "block": true, "labelKey": true },
     "minted": { "args": [{ "kind": "opt", "content": "keyval" }, "req"], "verbatimBody": true, "block": true },
     "codeexample": { "args": [{ "kind": "opt", "content": "keyval" }], "verbatimBody": true, "block": true },
+    "comment": { "verbatimBody": true, "block": true },
     "oldcomments": { "verbatimBody": true, "block": true },
     "ltxcode": { "args": [{ "kind": "opt", "content": "keyval" }], "verbatimBody": true, "block": true },
     "ltxexample": { "args": [{ "kind": "opt", "content": "keyval" }], "verbatimBody": true, "block": true },

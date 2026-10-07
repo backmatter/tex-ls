@@ -11,11 +11,12 @@ pub fn analyze_bib(
 ) -> Option<Vec<Diagnostic>> {
     let file = snapshot.lookup_file(path)?;
     let idx = snapshot.file_line_index(file, enc);
+    let mut positions = idx.position_cursor();
     let mut diags: Vec<Diagnostic> = snapshot
         .bib_parse_diagnostics(file)
         .iter()
         .map(|d| Diagnostic {
-            range: byte_range_to_lsp(&idx, d.start, d.end),
+            range: byte_range_to_lsp_with_cursor(&mut positions, d.start, d.end),
             severity: Some(DiagnosticSeverity::Error),
             source: Some("tex-ls".to_owned()),
             message: d.message.clone().into(),
@@ -24,7 +25,8 @@ pub fn analyze_bib(
         .collect();
     for d in snapshot.bib_lint_findings(file) {
         if rules.is_active(d.rule) {
-            diags.push(lint_to_lsp(&idx, d.clone(), false, path));
+            let range = byte_range_to_lsp_with_cursor(&mut positions, d.start, d.end);
+            diags.push(lint_to_lsp_with_range(&idx, d.clone(), false, path, range));
         }
     }
     Some(diags)
@@ -49,6 +51,17 @@ pub fn lint_to_lsp(
     latex_rules: bool,
     self_path: &Path,
 ) -> Diagnostic {
+    let range = byte_range_to_lsp(idx, d.start, d.end);
+    lint_to_lsp_with_range(idx, d, latex_rules, self_path, range)
+}
+
+pub(crate) fn lint_to_lsp_with_range(
+    idx: &LineIndex,
+    d: tex_ls_analysis::linter::Diagnostic,
+    latex_rules: bool,
+    self_path: &Path,
+    range: Range,
+) -> Diagnostic {
     let base = if latex_rules {
         LATEX_RULES_DOC_URL
     } else {
@@ -65,7 +78,7 @@ pub fn lint_to_lsp(
         _ => "",
     };
     Diagnostic {
-        range: byte_range_to_lsp(idx, d.start, d.end),
+        range,
         severity: Some(severity_to_lsp(d.severity)),
         code: Some(Code::String(d.rule.to_owned())),
         code_description,
@@ -204,11 +217,12 @@ pub fn analyze_tex(
     // The file's normalized identity, which keys the cross-file resolvers.
     let lint_path = snapshot.file_path(file).to_path_buf();
     let idx = snapshot.file_line_index(file, enc);
+    let mut positions = idx.position_cursor();
     let mut diags: Vec<Diagnostic> = snapshot
         .parse_diagnostics(file)
         .iter()
         .map(|d| Diagnostic {
-            range: byte_range_to_lsp(&idx, d.start, d.end),
+            range: byte_range_to_lsp_with_cursor(&mut positions, d.start, d.end),
             severity: Some(DiagnosticSeverity::Error),
             source: Some("tex-ls".to_owned()),
             message: d.message.clone().into(),
@@ -217,7 +231,14 @@ pub fn analyze_tex(
         .collect();
     for d in snapshot.latex_lint_findings(file) {
         if rules.is_active(d.rule) {
-            diags.push(lint_to_lsp(&idx, d.clone(), true, &lint_path));
+            let range = byte_range_to_lsp_with_cursor(&mut positions, d.start, d.end);
+            diags.push(lint_to_lsp_with_range(
+                &idx,
+                d.clone(),
+                true,
+                &lint_path,
+                range,
+            ));
         }
     }
     Some(diags)

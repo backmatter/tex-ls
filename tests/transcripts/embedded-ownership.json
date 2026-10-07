@@ -1,0 +1,1087 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "semanticTokens": {
+          "requests": {
+            "full": true
+          },
+          "tokenTypes": [
+            "macro",
+            "type",
+            "variable",
+            "property",
+            "keyword",
+            "string",
+            "number",
+            "namespace",
+            "texText",
+            "texLiteral",
+            "texPath",
+            "texMath",
+            "comment"
+          ],
+          "tokenModifiers": [
+            "declaration",
+            "texBold",
+            "texItalic"
+          ],
+          "formats": [
+            "relative"
+          ]
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-0.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{python}\ndef square(x):\n    return x * x\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-0.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-0.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-1.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[escapeinside=||]{python}\nx = 1 |\\ref{eq:live}|\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-1.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-1.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-1.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 12
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-2.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[escapeinside=||]{python}\nx = \"|\\ref{eq:literal}|\"\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-2.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-2.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-3.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[escapeinside=||]{python}\n# |\\ref{eq:literal}|\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-3.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-3.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-4.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[mathescape]{python}\n# formula $x_1 + 42$\nx = \"$x_1 + 42$\"\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-4.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-4.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-5.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[texcomments]{python}\n# See \\ref{eq:live}\nx = 1\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-5.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-5.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-5.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-6.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-6.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-6.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-6.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 14
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-7.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\nx = \"(*@\\ref{eq:literal}@*)\"\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-7.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-7.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-7.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 13
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-8.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=Python,escapeinside={(*@}{@*)}]\n# (*@\\ref{eq:live}@*)\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-8.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-8.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-8.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 10
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-9.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{lstlisting}[language=Python,mathescape]\nx = $\\ref{eq:live}$\n# $\\ref{eq:live}$\nx = \"$\\ref{eq:literal}$\"\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-9.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-9.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-9.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 11
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-10.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\lstset{language=Python,escapeinside={(*@}{@*)}}\n\\begin{lstlisting}\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-10.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-10.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-10.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 14
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-11.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\lstdefinestyle{demo}{language=Python,escapeinside={(*@}{@*)}}\n\\begin{lstlisting}[style=demo]\nx = 1 (*@\\ref{eq:live}@*)\n\\end{lstlisting}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-11.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-11.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-11.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 14
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-12.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\newminted{python}{linenos}\n\\begin{pythoncode}\nx = \"\\ref{eq:literal}\"\n\\end{pythoncode}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-12.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-12.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-13.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\newmintinline[pyinline]{python}{}\n\\pyinline|\"\\ref{eq:literal}\"|"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-13.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-13.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-14.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\lstnewenvironment{pycode}{\\lstset{language=Python}}{}\n\\begin{pycode}\nx = \"\\ref{eq:literal}\"\n\\end{pycode}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-14.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-14.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-15.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{Verbatim}[commandchars=\\\\\\{\\}]\nSee \\ref{eq:live}\n\\end{Verbatim}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-15.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-15.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-15.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 9
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-16.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\DefineShortVerb{\\|}\n|\\ref{eq:literal}|"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-16.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-16.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-17.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\includecomment{comment}\n\\begin{comment}\nSee \\ref{eq:live}\n\\end{comment}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-17.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-17.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-17.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 9
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-18.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\excludecomment{private}\n\\begin{private}\n\\ref{eq:literal}\n\\end{private}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-18.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-18.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-19.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{comment}\nprinted \\end{comment} suffix\n\\ref{eq:literal}\n\\end{comment}\nSee \\ref{eq:live}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-19.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-19.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-19.tex"
+        },
+        "position": {
+          "line": 4,
+          "character": 9
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-20.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\catcode`\\%=12\n% See \\ref{eq:live}\n\\catcode`\\%=14"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-20.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-20.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-20.tex"
+        },
+        "position": {
+          "line": 1,
+          "character": 11
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-21.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\catcode`\\$=12\n$x+1$\n\\catcode`\\$=3"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-21.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-21.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-22.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\catcode`\\@=11\n\\demo@name\n\\catcode`\\@=12\n\\demo@name"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-22.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-22.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-23.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "{\\makeatletter \\demo@name}\n\\demo@name"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-23.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-23.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-24.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "{\\ExplSyntaxOn \\demo:n}\n\\demo:n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-24.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-24.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-25.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\ifexample\n\\catcode`\\%=12\n\\else\n\\catcode`\\%=14\n\\fi\n% See \\ref{eq:maybe}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-25.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-25.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-26.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}{\\projectlanguage}\nx = \"\\ref{eq:literal}\"\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-26.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-26.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-27.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[escapeinside=\\projectescape]{python}\nx = 1 |\\ref{eq:maybe}|\n\\end{minted}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-27.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-27.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-28.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\begin{minted}[escapeinside=||]{python}\nx = 1 |\\ref{eq:maybe}\n\\end{minted}\n\\ref{eq:live}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-28.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-28.tex"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/references",
+      "params": {
+        "textDocument": {
+          "uri": "file:///embedded/case-28.tex"
+        },
+        "position": {
+          "line": 3,
+          "character": 5
+        },
+        "context": {
+          "includeDeclaration": true
+        }
+      },
+      "request": true
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 
 pub mod builder;
 pub mod completion;
+pub mod context;
 pub mod define;
 pub mod doc;
 pub mod expl3;
@@ -91,6 +92,24 @@ impl SemanticModel {
     /// Build the model under a project's declared ref/cite command aliases.
     pub fn build_with_declarations(root: &SyntaxNode, declared: &ResolvedDeclarations) -> Self {
         builder::build_with_declarations(root, declared)
+    }
+
+    /// Reuse definition sites from the same source tree.
+    pub fn build_with_declarations_and_sites(
+        root: &SyntaxNode,
+        declared: &ResolvedDeclarations,
+        sites: &[DefSite],
+    ) -> Self {
+        builder::build_with_declarations_and_sites(root, declared, sites)
+    }
+
+    /// Reuse operand ownership already proved from this source tree.
+    pub fn build_with_declarations_and_operands(
+        root: &SyntaxNode,
+        declared: &ResolvedDeclarations,
+        operands: &context::PrimitiveOperandContexts,
+    ) -> Self {
+        builder::build_with_declarations_and_operands(root, declared, operands)
     }
 
     pub fn labels(&self) -> &[LabelDef] {

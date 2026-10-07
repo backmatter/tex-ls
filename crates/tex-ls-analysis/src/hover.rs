@@ -29,6 +29,9 @@ pub fn signature_target_at(root: &SyntaxNode, offset: usize) -> Option<SigTarget
     };
 
     for token in [left, right].into_iter().flatten() {
+        if tex_ls_parser::semantic::context::in_token_list(&token) {
+            continue;
+        }
         if matches!(
             token.kind(),
             SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL

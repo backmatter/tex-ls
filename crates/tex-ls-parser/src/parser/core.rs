@@ -13,7 +13,7 @@ use crate::declarations::ResolvedDeclarations;
 use crate::parser::grammar;
 use crate::parser::lexer::{LatexFlavor, LexConfig, ParseCtx, lex_with, lex_with_implicit_expl};
 use crate::parser::tree_builder::build_tree;
-use crate::semantic::define::scan_definitions;
+use crate::semantic::define::{DefSiteKind, scan_definition_sites, scan_definitions_with_operands};
 use crate::semantic::signature::builtin;
 use crate::syntax::SyntaxNode;
 
@@ -103,11 +103,13 @@ pub fn parse_with_declarations_resolved(
     let config = config.into();
     let mut seed = ParseCtx::default();
     seed.overlay_declarations(declared);
+    seed.reparse_guard = super::embedded::ReparseGuard::for_source(input);
 
     let pass1 = parse_with(input, &seed, config);
     let mut ctx = parse_ctx(&pass1.syntax());
     // Declared wins over scanned, so the overlay is applied *after* the scan.
     ctx.overlay_declarations(declared);
+    ctx.reparse_guard = seed.reparse_guard;
     if ctx == seed {
         return (pass1, ctx);
     }
@@ -142,7 +144,7 @@ pub(crate) fn parse_fragment_with_ctx(
 
 /// Scan `root` for user definitions and collect the facts pass 2 needs into a
 /// [`ParseCtx`]. Each scanned signature's verbatim flag is already resolved
-/// (`scan_definitions`); a command's `args` hold its leading, non-verbatim
+/// (`scan_definitions_with_operands`); a command's `args` hold its leading, non-verbatim
 /// arguments and an environment's `args` its (all leading) arguments — the exact
 /// shapes the lexer needs.
 ///
@@ -159,17 +161,38 @@ pub(crate) fn parse_fragment_with_ctx(
 /// `\renewcommand` can do is admit an unused alias (one wasted pass, never a missed
 /// pairing).
 fn parse_ctx(root: &SyntaxNode) -> ParseCtx {
-    let db = scan_definitions(root);
+    let sites = scan_definition_sites(root);
+    let operands =
+        crate::semantic::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
+    let db = scan_definitions_with_operands(root, &operands);
     let mut ctx = ParseCtx::default();
+    // Editor-only declaration shapes can replace a primitive or listing
+    // factory without contributing a source signature. The already-proved
+    // sites are authoritative for these overrides in the second parse.
+    for site in &sites {
+        if site.kind == DefSiteKind::Command
+            && (matches!(site.name.as_str(), "string" | "detokenize")
+                || super::lexer::primitive_operand_reader(&site.name)
+                || super::embedded::observes_settings_command(&site.name))
+        {
+            if super::lexer::primitive_operand_reader(&site.name) {
+                ctx.suppress_reader_after(site.name.clone(), usize::from(site.name_range.start()));
+            } else {
+                ctx.suppress(site.name.clone());
+            }
+        }
+    }
     for name in db.command_names() {
         match db.command(name) {
             Some(sig) if sig.verbatim => ctx.insert(SmolStr::new(name), sig.args.to_vec()),
             // Redefined non-verbatim but shadowing a built-in raw-argument command:
             // suppress the built-in capture.
             Some(_)
-                if builtin()
-                    .command(name)
-                    .is_some_and(|sig| sig.verbatim || sig.args.iter().any(|arg| arg.verbatim)) =>
+                if matches!(name, "detokenize" | "string")
+                    || super::embedded::observes_settings_command(name)
+                    || builtin().command(name).is_some_and(|sig| {
+                        sig.verbatim || sig.args.iter().any(|arg| arg.verbatim)
+                    }) =>
             {
                 ctx.suppress(SmolStr::new(name));
             }
@@ -179,6 +202,8 @@ fn parse_ctx(root: &SyntaxNode) -> ParseCtx {
     for name in db.environment_names() {
         if let Some(sig) = db.environment(name).filter(|sig| sig.verbatim_body) {
             ctx.insert_environment(SmolStr::new(name), sig.args.to_vec());
+        } else {
+            ctx.suppress_environment(SmolStr::new(name));
         }
     }
     // Gated on there being any alias at all: this is an extra tree walk, and the
@@ -392,5 +417,39 @@ mod tests {
         );
         assert!(!parse.errors.is_empty(), "an unclosed environment reports");
         assert_eq!(reconstruct(input), input);
+    }
+
+    #[test]
+    fn reader_overrides_apply_only_after_the_definition() {
+        use crate::syntax::SyntaxKind;
+        for source in [
+            r"\meaning\begin{equation}\ref{first}\renewcommand{\meaning}[1]{#1}\meaning\begin{equation}x\end{equation}",
+            r"\ifx a\begin{equation}\ref{first}\fi\renewcommand{\ifx}[1]{#1}\ifx a\begin{equation}x\end{equation}",
+        ] {
+            let parsed = parse(source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            assert_eq!(parsed.syntax().text().to_string(), source);
+            assert_eq!(
+                parsed
+                    .syntax()
+                    .descendants()
+                    .filter(|node| node.kind() == SyntaxKind::ENVIRONMENT)
+                    .count(),
+                1,
+                "{source}"
+            );
+        }
+        let source = r"\[\meaning\]\renewcommand{\meaning}[1]{#1}x\]";
+        let parsed = parse(source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert_eq!(
+            parsed
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::MATH)
+                .count(),
+            1
+        );
     }
 }

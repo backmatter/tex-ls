@@ -373,6 +373,11 @@ impl Parser<'_> {
         while i < end {
             self.tick_scan();
             let t = &self.tokens[i];
+            if self.is_primitive_operand(i) {
+                newlines = 0;
+                i += 1;
+                continue;
+            }
             match t.kind {
                 SyntaxKind::NEWLINE => {
                     newlines += 1;
@@ -702,6 +707,9 @@ impl Parser<'_> {
     /// a plain command must not become an `END` here, or the `NAME_GROUP`
     /// [`Self::alias_environment`] then asks for is not there.
     pub(super) fn closer_target(&self, idx: usize) -> Option<&str> {
+        if self.is_primitive_operand(idx) {
+            return None;
+        }
         if let Some(target) = self.alias_closers.get(&idx) {
             return Some(target.as_str());
         }

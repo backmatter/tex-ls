@@ -39,6 +39,22 @@ use reparse_harness::{
 /// keystroke can reach. These are where the interesting edits live; the corpus
 /// sweep is breadth.
 const HAZARD_SNIPPETS: &[&str] = &[
+    concat!(
+        "\\makeatletter\\def\\test@name{a}\\makeatother\n",
+        "Padding words keep local edits away from the source switches in the preamble.\n",
+        "Ordinary prose with Unicode 日本語 and $alphabet+x^23_i$.\n"
+    ),
+    concat!(
+        "\\ExplSyntaxOn\\cs_new:Npn \\test:n #1 {#1}\\ExplSyntaxOff\n",
+        "Padding words keep local edits away from the source switches in the preamble.\n",
+        "Ordinary prose with $alphabet+x^23_i$ and \\textbf{printed letters}.\n"
+    ),
+    concat!(
+        "\\ExplSyntaxOn\n",
+        "Padding words keep local edits away from the source switches in the preamble.\n",
+        "word_name $alphabet+x^23_i$ \\test_name:n {letters}\n\\ExplSyntaxOff"
+    ),
+    "\\MakeShortVerb{\\a}\na\n",
     "\\def\\enddisplaymath{\\]\\@ignoretrue}\n\\] after.\n",
     "\\gdef\\close#1${\\) #1}\n\\let\\alias\\def\\ordinary{\\]}\n",
     "\\let\\?=\\def\\ordinary{\\]}\n\\def\\close{\\]}\n",
@@ -759,5 +775,215 @@ fn incomplete_math_and_recovery_prefixes_remain_lossless() {
                 "{kind}: {prefix:?}"
             );
         }
+    }
+}
+
+#[test]
+fn literal_modes_use_the_full_parser_until_fragment_equivalence_is_proved() {
+    for source in [
+        "\\begin{alltt}\n% $ x_1 \\ref{real}\n\\end{alltt}\n",
+        "\\detokenize{\\verb| \\ref{fake} $x_1$}\n",
+        "\\verb|unfinished \\ref{fake}\n\\ref{real}\n",
+    ] {
+        let at = source.find("ref").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        let changed = edit.apply(source);
+        let full = tex_ls_parser::parser::parse(&changed);
+        if let Some(incremental) = reparse_once(source, &edit) {
+            assert_eq!(incremental.green, full.green);
+            assert_eq!(incremental.errors, full.errors);
+        }
+        assert_eq!(full.syntax().text().to_string(), changed);
+    }
+}
+
+#[test]
+fn ifx_operand_count_and_spacing_edits_cannot_retain_stale_captures() {
+    for (source, needle, replacement) in [
+        (r"\ifx a\verb|text|\fi", "a", "ab"),
+        (r"\ifx ab\verb|text|\fi", "ab", "a"),
+        (r"\ifx a \verb|text|\fi", "a ", "a"),
+        (r"\ifx\! \verb|text|\fi", r"\! ", r"\!"),
+        ("\\ifx a% comment\n\\verb|text|\\fi", "\n", "\n\n"),
+        ("\\ifx\n a\\verb|text|\\fi", "a", "ab"),
+        (r"$\ifx$\verb|text|", r"\ifx", r"\ifxa"),
+    ] {
+        let at = source.find(needle).unwrap();
+        let edit = Edit {
+            range: at..at + needle.len(),
+            insert: replacement.into(),
+        };
+        let changed = edit.apply(source);
+        let full = tex_ls_parser::parser::parse(&changed);
+        let incremental = reparse_once(source, &edit);
+        if let Some(incremental) = &incremental {
+            assert_eq!(incremental.green, full.green, "{source}");
+            assert_eq!(incremental.errors, full.errors, "{source}");
+        }
+        assert!(
+            incremental.is_none(),
+            "ifx operand edits require a full parse: {source}"
+        );
+        assert_eq!(full.syntax().text().to_string(), changed);
+    }
+}
+
+#[test]
+fn literal_c_name_factory_override_edits_match_full_parse() {
+    let source = r"\ExplSyntaxOn\cs_set:cpn{newmintinline}#1{#1}\ExplSyntaxOff\newmintinline[meaning]{python}{}\meaning\newcommand{\bad}[1]{#1}\newcommand{\real}[1]{#1}";
+    let at = source.find("newmintinline").unwrap();
+    let disabled = source.replacen("newmintinline", "otherfactory", 1);
+    for (text, edit) in [
+        (
+            source,
+            Edit {
+                range: at..at + "newmintinline".len(),
+                insert: "otherfactory".into(),
+            },
+        ),
+        (
+            disabled.as_str(),
+            Edit {
+                range: at..at + "otherfactory".len(),
+                insert: "newmintinline".into(),
+            },
+        ),
+    ] {
+        let changed = edit.apply(text);
+        let full = tex_ls_parser::parser::parse(&changed);
+        assert_eq!(full.syntax().text().to_string(), changed);
+        if changed == source {
+            assert!(full.errors.is_empty(), "{:?}", full.errors);
+            assert!(
+                tex_ls_parser::semantic::scan_definition_sites(&full.syntax())
+                    .iter()
+                    .all(|site| site.name != "meaning" && site.name != "bad")
+            );
+        }
+        if let Some(incremental) = reparse_once(text, &edit) {
+            assert_eq!(incremental.green, full.green);
+            assert_eq!(incremental.errors, full.errors);
+        }
+    }
+}
+
+#[test]
+fn ordered_reader_overrides_remain_valid_across_prose_and_fragment_edits() {
+    for source in [
+        "Before \\meaning\\begin{equation}\n\\renewcommand{\\meaning}[1]{#1}\nAfter \\meaning\\begin{equation}x+y\\end{equation}\n",
+        "Before \\ifx a\\verb|literal|\\fi\n\\renewcommand{\\ifx}[1]{#1}\nAfter $x+y$\n",
+        "Before \\let\\copy\\ref{fake}\n\\renewcommand{\\let}[1]{#1}\nAfter $a_b$\n",
+    ] {
+        for at in source
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(source.len()))
+        {
+            let edit = Edit {
+                range: at..at,
+                insert: "x".into(),
+            };
+            let changed = edit.apply(source);
+            let full = tex_ls_parser::parser::parse(&changed);
+            if let Some(incremental) = reparse_once(source, &edit) {
+                assert_eq!(incremental.green, full.green, "{source:?} at {at}");
+                assert_eq!(incremental.errors, full.errors, "{source:?} at {at}");
+            }
+            assert_eq!(full.syntax().text().to_string(), changed);
+        }
+        let edit = Edit {
+            range: 1..1,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(source, &edit).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn embedded_ownership_edits_match_full_parsing() {
+    let cases: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/embedded-coloring.json")).unwrap();
+    for case in cases.as_array().unwrap() {
+        let source = case["source"].as_str().unwrap();
+        for at in source
+            .char_indices()
+            .map(|(at, _)| at)
+            .chain(std::iter::once(source.len()))
+        {
+            let edit = Edit {
+                range: at..at,
+                insert: "x".into(),
+            };
+            let changed = edit.apply(source);
+            let full = tex_ls_parser::parser::parse(&changed);
+            if let Some(incremental) = reparse_once(source, &edit) {
+                assert_eq!(incremental.green, full.green, "{} at {at}", case["name"]);
+                assert_eq!(incremental.errors, full.errors, "{} at {at}", case["name"]);
+            }
+            assert_eq!(full.syntax().text().to_string(), changed);
+        }
+    }
+}
+
+#[test]
+fn cached_lexical_guards_preserve_local_prose_and_math_proofs() {
+    for prefix in [
+        "\\makeatletter\\def\\local@name{value}\\makeatother",
+        "\\ExplSyntaxOn\\cs_new:Npn \\local:n #1 {#1}\\ExplSyntaxOff",
+        "\\begingroup\\makeatletter\\endgroup",
+    ] {
+        let text = format!(
+            "{prefix}\n{}\nOrdinary alphabetic prose.\nMath $alphabet + x^23_i$.\n",
+            "padding ".repeat(20)
+        );
+        for (needle, offset) in [("Ordinary", 3), ("alphabet +", 3), ("23_i", 2)] {
+            let at = text.find(needle).unwrap() + offset;
+            let edit = Edit {
+                range: at..at,
+                insert: "z".into(),
+            };
+            let declared = ResolvedDeclarations::default();
+            let config = config();
+            let (parsed, ctx) = parse_with_declarations_resolved(&text, config, &declared);
+            let base = ReparseBase::from_parts(
+                &text,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                config,
+                &declared,
+            );
+            let changed = edit.apply(&text);
+            let result =
+                reparse(&base, &edit, &changed).expect("local proof must retain the fast path");
+            let full = parse_with_declarations_resolved(&changed, config, &declared).0;
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+        }
+    }
+}
+
+#[test]
+fn alphabetic_shortverb_and_new_lexical_triggers_decline() {
+    for (text, needle, insert) in [
+        ("\\MakeShortVerb{\\a}\na\n", "\na", "a"),
+        ("ordinary \\catcod prose", "catcod", "e"),
+        ("ordinary \\makeatlette prose", "makeatlette", "r"),
+        ("\\begin{minted}{pytho}\ncode\n\\end{minted}", "{pytho", "n"),
+    ] {
+        let at = text.find(needle).unwrap() + needle.len();
+        let edit = Edit {
+            range: at..at,
+            insert: insert.into(),
+        };
+        let declared = ResolvedDeclarations::default();
+        let config = config();
+        let (parsed, ctx) = parse_with_declarations_resolved(text, config, &declared);
+        let base =
+            ReparseBase::from_parts(text, &parsed.green, &parsed.errors, &ctx, config, &declared);
+        assert!(reparse(&base, &edit, &edit.apply(text)).is_none());
     }
 }

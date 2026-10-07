@@ -74,7 +74,7 @@ impl ResponsePolicy {
             let types = self.semantic_types();
             if !types.is_empty() {
                 capabilities.semantic_tokens_provider = Some(serde_json::from_value(json!({
-                    "legend":{"tokenTypes":types,"tokenModifiers":[]},
+                    "legend":{"tokenTypes":types,"tokenModifiers":self.semantic_modifiers()},
                     "full": self.capabilities.pointer("/textDocument/semanticTokens/requests/full").is_some_and(|v| v == true || v.is_object()),
                     "range": self.capabilities.pointer("/textDocument/semanticTokens/requests/range").is_some_and(|value| value == true || value.is_object())
                 })).expect("semantic token options"));
@@ -85,14 +85,40 @@ impl ResponsePolicy {
     }
 
     fn semantic_types(&self) -> Vec<&'static str> {
-        crate::semantic_tokens::TYPES
+        let supports = |kind: &str| {
+            self.capabilities
+                .pointer("/textDocument/semanticTokens/tokenTypes")
+                .and_then(Value::as_array)
+                .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(kind)))
+        };
+        let mut types = Vec::new();
+        for &kind in crate::semantic_tokens::TYPES {
+            if kind == "texEmbedded" && self.supports("/experimental/texEmbeddedHighlighting") {
+                continue;
+            }
+            let supported = if supports(kind) {
+                Some(kind)
+            } else {
+                crate::semantic_tokens::fallback(kind).filter(|kind| supports(kind))
+            };
+            if let Some(kind) = supported
+                && !types.contains(&kind)
+            {
+                types.push(kind);
+            }
+        }
+        types
+    }
+
+    fn semantic_modifiers(&self) -> Vec<&'static str> {
+        crate::semantic_tokens::MODIFIERS
             .iter()
             .copied()
             .filter(|kind| {
                 self.capabilities
-                    .pointer("/textDocument/semanticTokens/tokenTypes")
+                    .pointer("/textDocument/semanticTokens/tokenModifiers")
                     .and_then(Value::as_array)
-                    .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(kind)))
+                    .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(kind)))
             })
             .collect()
     }
@@ -119,20 +145,48 @@ impl ResponsePolicy {
         match method {
             "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
                 let types = self.semantic_types();
+                let modifiers = self.semantic_modifiers();
                 if let Some(data) = result.get_mut("data").and_then(Value::as_array_mut) {
-                    let mut output = Vec::new();
+                    let delegated = self.supports("/experimental/texEmbeddedHighlighting");
+                    let type_indices: Vec<_> = crate::semantic_tokens::TYPES
+                        .iter()
+                        .map(|kind| {
+                            if *kind == "texEmbedded" && delegated {
+                                return None;
+                            }
+                            types
+                                .iter()
+                                .position(|supported| supported == kind)
+                                .or_else(|| {
+                                    crate::semantic_tokens::fallback(kind).and_then(|fallback| {
+                                        types.iter().position(|supported| *supported == fallback)
+                                    })
+                                })
+                        })
+                        .collect();
+                    let modifier_bits: Vec<_> = crate::semantic_tokens::MODIFIERS
+                        .iter()
+                        .map(|kind| {
+                            modifiers
+                                .iter()
+                                .position(|supported| supported == kind)
+                                .map_or(0, |bit| 1u32 << bit)
+                        })
+                        .collect();
+                    // Compact into the existing payload. Large responses must not
+                    // retain two complete arrays while remapping the legend.
+                    let mut output = 0;
                     let (mut line, mut column, mut last_line, mut last_column) = (0, 0, 0, 0);
-                    for token in data.as_chunks::<5>().0 {
+                    for input in (0..data.len() / 5 * 5).step_by(5) {
+                        let token = &data[input..input + 5];
                         let delta = token[0].as_u64().unwrap_or(0);
                         line += delta;
                         column =
                             if delta == 0 { column } else { 0 } + token[1].as_u64().unwrap_or(0);
                         let kind = token[3].as_u64().unwrap_or(u64::MAX) as usize;
-                        if let Some(index) = crate::semantic_tokens::TYPES
-                            .get(kind)
-                            .and_then(|kind| types.iter().position(|x| x == kind))
-                        {
-                            output.extend([
+                        if let Some(&Some(index)) = type_indices.get(kind) {
+                            let bits = token[4].as_u64().unwrap_or(0);
+                            let mapped = [
                                 json!(line - last_line),
                                 json!(if line == last_line {
                                     column - last_column
@@ -141,12 +195,22 @@ impl ResponsePolicy {
                                 }),
                                 token[2].clone(),
                                 json!(index),
-                                json!(0),
-                            ]);
+                                json!(
+                                    modifier_bits
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(bit, _)| bits & (1 << bit) != 0)
+                                        .fold(0u32, |bits, (_, mapped)| bits | mapped)
+                                ),
+                            ];
+                            for (index, value) in mapped.into_iter().enumerate() {
+                                data[output + index] = value;
+                            }
+                            output += 5;
                             (last_line, last_column) = (line, column);
                         }
                     }
-                    *data = output;
+                    data.truncate(output);
                 }
             }
             "textDocument/completion" => {
@@ -638,6 +702,49 @@ fn plain_text(markdown: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_holes_remove_both_blanket_semantic_coverage_and_literal_overlay() {
+        for enabled in [false, true] {
+            let policy = ResponsePolicy::new(
+                &json!({"capabilities":{"experimental":{"texEmbeddedHighlighting":enabled},"textDocument":{"semanticTokens":{"tokenTypes":["macro","texText","texLiteral"],"tokenModifiers":[]}}}}),
+            );
+            let mut result = json!({"data":[0,0,4,0,0,1,0,10,13,0,1,0,4,0,0]});
+            policy.response("textDocument/semanticTokens/full", None, &mut result);
+            let expected = if enabled {
+                json!([0, 0, 4, 0, 0, 2, 0, 4, 0, 0])
+            } else {
+                json!([0, 0, 4, 0, 0, 1, 0, 10, 2, 0, 1, 0, 4, 0, 0])
+            };
+            assert_eq!(result["data"], expected);
+        }
+    }
+
+    #[test]
+    fn semantic_purposes_and_modifiers_negotiate_without_shifting_positions() {
+        let policy = ResponsePolicy::new(
+            &json!({"capabilities":{"textDocument":{"semanticTokens":{
+                "tokenTypes":["macro","string","operator"],"tokenModifiers":["texItalic","declaration"]
+            }}}}),
+        );
+        assert_eq!(policy.semantic_types(), ["macro", "string", "operator"]);
+        assert_eq!(policy.semantic_modifiers(), ["declaration", "texItalic"]);
+        let mut result = json!({"data":[0,0,4,8,0,0,4,2,0,1,0,2,5,10,0,1,0,1,11,4]});
+        policy.response("textDocument/semanticTokens/full", None, &mut result);
+        assert_eq!(result, json!({"data":[0,4,2,0,1,0,2,5,1,0,1,0,1,2,2]}));
+    }
+
+    #[test]
+    fn embedded_keyword_and_function_roles_keep_standard_semantics() {
+        let policy =
+            ResponsePolicy::new(&json!({"capabilities":{"textDocument":{"semanticTokens":{
+                "tokenTypes":["keyword","function"], "tokenModifiers":["declaration"]
+            }}}}));
+        assert_eq!(policy.semantic_types(), ["keyword", "function"]);
+        let mut result = json!({"data":[0,0,3,4,0,0,4,6,14,1]});
+        policy.response("textDocument/semanticTokens/full", None, &mut result);
+        assert_eq!(result["data"], json!([0, 0, 3, 0, 0, 0, 4, 6, 1, 1]));
+    }
 
     #[test]
     fn diagnostic_markup_is_negotiated_on_every_report_and_action_route() {

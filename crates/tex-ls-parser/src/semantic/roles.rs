@@ -351,6 +351,24 @@ impl IncludeOnly {
 }
 
 pub fn include_only(root: &crate::syntax::SyntaxNode) -> IncludeOnly {
+    let sites = super::scan_definition_sites(root);
+    let operands = super::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
+    let overridden_at = sites
+        .iter()
+        .filter(|site| site.kind == super::DefSiteKind::Command && site.name == "includeonly")
+        .map(|site| site.name_range.start())
+        .min();
+    include_only_with_ownership(root, |command| {
+        !operands.contains_head(command)
+            && !overridden_at.is_some_and(|start| command.text_range().start() >= start)
+    })
+}
+
+/// Reuse a caller's source ownership proof without scanning definition sites.
+pub fn include_only_with_ownership(
+    root: &crate::syntax::SyntaxNode,
+    allows: impl Fn(&crate::syntax::SyntaxNode) -> bool,
+) -> IncludeOnly {
     use crate::ast::{command_name, nth_group_inner};
     use crate::syntax::SyntaxKind;
     let mut filter = IncludeOnly::Unrestricted;
@@ -359,6 +377,7 @@ pub fn include_only(root: &crate::syntax::SyntaxNode) -> IncludeOnly {
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
     {
         if command_name(&command).as_deref() != Some("includeonly")
+            || !allows(&command)
             || command
                 .ancestors()
                 .skip(1)
@@ -552,6 +571,57 @@ fn loads_biblatex(command: &crate::syntax::SyntaxNode) -> bool {
 mod tests {
     use super::*;
     use crate::{ast::command_name, parser::parse};
+
+    #[test]
+    fn includeonly_uses_only_filters_before_a_local_override() {
+        for (source, expected) in [
+            (
+                r"\renewcommand{\includeonly}[1]{#1}\includeonly{printed}",
+                IncludeOnly::Unrestricted,
+            ),
+            (
+                r"\let\includeonly\relax\includeonly{printed}",
+                IncludeOnly::Unrestricted,
+            ),
+            (
+                r"\includeonly{kept}\renewcommand{\includeonly}[1]{#1}\includeonly{printed}",
+                IncludeOnly::Literal(vec!["kept".into()]),
+            ),
+            (
+                r"\includeonly{kept}\let\includeonly\relax\includeonly{printed}",
+                IncludeOnly::Literal(vec!["kept".into()]),
+            ),
+            (
+                r"\detokenize{\renewcommand{\includeonly}[1]{#1}}\includeonly{kept}",
+                IncludeOnly::Literal(vec!["kept".into()]),
+            ),
+            (r"\let\copy\includeonly{printed}", IncludeOnly::Unrestricted),
+            (r"\meaning\includeonly{printed}", IncludeOnly::Unrestricted),
+            (r"\show\includeonly{printed}", IncludeOnly::Unrestricted),
+            (r"\noexpand\includeonly{printed}", IncludeOnly::Unrestricted),
+            (
+                r"\NewCommandCopy{\copy}{\includeonly}{printed}",
+                IncludeOnly::Unrestricted,
+            ),
+            (
+                r"\ifx\relax\includeonly{printed}\fi",
+                IncludeOnly::Unrestricted,
+            ),
+            (r"\ifx a\includeonly{printed}\fi", IncludeOnly::Unrestricted),
+            (
+                r"\meaning\includeonly{\includeonly{kept}}",
+                IncludeOnly::Unrestricted,
+            ),
+        ] {
+            let root = parse(source).syntax();
+            assert_eq!(include_only(&root), expected, "{source}");
+            assert_eq!(
+                crate::semantic::SemanticModel::build(&root).include_only(),
+                &expected,
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn biblatex_style_options_ignore_comment_contents() {

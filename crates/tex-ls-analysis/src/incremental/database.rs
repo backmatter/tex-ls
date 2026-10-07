@@ -246,6 +246,20 @@ impl Database {
         path: &Path,
         text: impl IntoSourceText,
     ) -> SourceInput {
+        let (file, added) = self.upsert_file_in_unpublished(project, path, text);
+        if added {
+            self.sync_project_files(project);
+        }
+        file
+    }
+
+    /// The caller must publish membership before exposing the resulting state.
+    pub(super) fn upsert_file_in_unpublished(
+        &mut self,
+        project: ProjectId,
+        path: &Path,
+        text: impl IntoSourceText,
+    ) -> (SourceInput, bool) {
         self.project(project);
         let key = normalize_path(path);
         let mut text = text.into_source_text();
@@ -276,12 +290,11 @@ impl Database {
             }
         }
         if let Some(file) = self.find_input(source, project) {
-            return file;
+            return (file, false);
         }
         let file = self.insert_file(project, key, text, version);
-        self.sync_project_files(project);
         self.revision += 1;
-        file
+        (file, true)
     }
     fn insert_file(
         &mut self,
@@ -325,7 +338,7 @@ impl Database {
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files
     }
-    fn sync_project_files(&mut self, project: ProjectId) {
+    pub(super) fn sync_project_files(&mut self, project: ProjectId) {
         let files: Vec<_> = self
             .tracked_files_in(project)
             .into_iter()

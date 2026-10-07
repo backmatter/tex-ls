@@ -131,6 +131,10 @@ pub fn lint_document_with_kind(
     lint_with(registry(), &ctx)
 }
 
+pub(crate) fn lint_document_context(ctx: &RuleContext<'_>) -> Vec<Diagnostic> {
+    lint_with(registry(), ctx)
+}
+
 /// The shared driver, generic over which [`RuleRegistry`] to run — the full set
 /// ([`registry`]) for reporting, or the fix-emitting subset ([`fixable_registry`])
 /// for the `--fix` loop. Borrowing a cached registry means the dispatch table is
@@ -148,6 +152,9 @@ fn lint_with(reg: &RuleRegistry, ctx: &RuleContext<'_>) -> Vec<Diagnostic> {
     // can subscribe to e.g. `COMMENT` or `WORD`.
     if reg.any_node_rules || !visitors.is_empty() {
         for el in ctx.root.descendants_with_tokens() {
+            if ctx.is_operand_head(&el) {
+                continue;
+            }
             for &i in &reg.by_kind[el.kind() as usize] {
                 reg.rules[i].check(&el, ctx, &mut diagnostics);
             }
@@ -191,6 +198,30 @@ mod tests {
 
     fn rules_of(src: &str) -> Vec<&'static str> {
         lint(src).iter().map(|d| d.rule).collect()
+    }
+
+    #[test]
+    fn copied_heads_do_not_offer_call_fixes_but_nested_calls_still_do() {
+        for source in [
+            r"\meaning\LaTeX text",
+            r"\show\bf",
+            r"\noexpand\bf",
+            r"\let\copy\bf",
+            r"\meaning\]",
+            r"\ifx\bf\relax\fi",
+        ] {
+            let diagnostics = lint(source);
+            assert!(
+                !diagnostics.iter().any(|diagnostic| matches!(
+                    diagnostic.rule,
+                    "swallowed-space" | "deprecated-command" | "unclosed-math-delimiter"
+                )),
+                "{source}: {diagnostics:?}"
+            );
+        }
+        let source = r"\meaning\textbf{{\bf real}}";
+        assert!(rules_of(source).contains(&"deprecated-command"));
+        assert!(rules_of(r"\LaTeX text").contains(&"swallowed-space"));
     }
 
     #[test]

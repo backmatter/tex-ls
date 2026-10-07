@@ -1,6 +1,8 @@
 //! Standard file operations over captured, root-scoped file observations.
 use super::*;
-use tex_ls_analysis::{external::command_directories, source::normalize_path};
+use tex_ls_analysis::{external::command_directories_with_roles, source::normalize_path};
+
+type RangeKey = (u32, u32, u32, u32);
 
 /// Refuse a batch when an affected spelling cannot be interpreted uniquely.
 /// Edits address pre-move URIs, as required by workspace/willRenameFiles.
@@ -9,7 +11,16 @@ pub fn will_rename(
     files: &[(PathBuf, PathBuf)],
     encoding: PositionEncoding,
 ) -> Option<WorkspaceEdit> {
+    let mut destinations = HashMap::new();
+    let mut moved_bases = HashSet::new();
+    for (old, new) in files {
+        destinations.entry(old.as_path()).or_insert(new.as_path());
+        if old.parent() != new.parent() {
+            moved_bases.insert(old.as_path());
+        }
+    }
     let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    let mut seen: HashMap<Uri, HashMap<RangeKey, usize>> = HashMap::new();
     for snapshot in snapshots {
         if files
             .iter()
@@ -25,30 +36,38 @@ pub fn will_rename(
             let text = snapshot.file_text(source);
             let tree = snapshot.parsed_tree(source);
             let mut references = snapshot.document_links(source);
+            let roles = tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
+                &tree,
+                snapshot.definition_sites(source),
+                snapshot.file_operand_contexts(source),
+            );
+            let mut root_affected = None;
             // includeonly is a build selector, not a dependency or clickable link.
             // Its literal spellings must nevertheless follow the selected files.
             for command in tree.descendants().filter(|node| {
                 node.kind() == SyntaxKind::COMMAND
                     && tex_ls_parser::ast::command_name(node).as_deref() == Some("includeonly")
+                    && roles.allows(node)
                     && !node
                         .ancestors()
                         .skip(1)
                         .any(|parent| parent.kind() == SyntaxKind::COMMAND)
             }) {
-                let affects_root = snapshot
-                    .resolve_labels()
-                    .candidate_roots(&path)
-                    .iter()
-                    .map(PathBuf::as_path)
-                    .chain(std::iter::once(path.as_path()))
-                    .any(|root| {
-                        files.iter().any(|(old, _)| {
+                let affects_root = *root_affected.get_or_insert_with(|| {
+                    snapshot
+                        .resolve_labels()
+                        .candidate_roots(&path)
+                        .iter()
+                        .map(PathBuf::as_path)
+                        .chain(std::iter::once(path.as_path()))
+                        .any(|root| {
                             snapshot
                                 .resolve_labels()
                                 .namespace_members(root)
-                                .contains(&old.as_path())
+                                .iter()
+                                .any(|member| destinations.contains_key(member))
                         })
-                    });
+                });
                 if context.is_none() && affects_root {
                     return None;
                 }
@@ -79,17 +98,17 @@ pub fn will_rename(
             if references.is_empty() {
                 continue;
             }
+            let idx = snapshot.file_line_index(source, encoding);
+            let mut positions = idx.position_cursor();
+            references.sort_by_key(|reference| reference.range.start());
             // Moving a compilation root or import source changes outgoing bases.
             // Such a move needs a complete post-move interpretation first.
-            if files
-                .iter()
-                .any(|(old, new)| old == &path && old.parent() != new.parent())
-            {
+            if moved_bases.contains(path.as_path()) {
                 return None;
             }
             for reference in references {
-                let Some((_, destination)) = files.iter().find(|(old, _)| old == &reference.target)
-                else {
+                snapshot.check_cancelled();
+                let Some(&destination) = destinations.get(reference.target.as_path()) else {
                     continue;
                 };
                 let context = context?;
@@ -98,13 +117,15 @@ pub fn will_rename(
                 }
                 let raw =
                     &text[usize::from(reference.range.start())..usize::from(reference.range.end())];
-                let command = tree
-                    .descendants()
-                    .filter(|node| {
-                        node.kind() == SyntaxKind::COMMAND
-                            && node.text_range().contains_range(reference.range)
-                    })
-                    .min_by_key(|node| node.text_range().len())?;
+                let command =
+                    tex_ls_parser::syntax::token_at_offset(&tree, reference.range.start())
+                        .right_biased()?
+                        .parent_ancestors()
+                        .filter(|node| {
+                            node.kind() == SyntaxKind::COMMAND
+                                && node.text_range().contains_range(reference.range)
+                        })
+                        .min_by_key(|node| node.text_range().len())?;
                 let mut spellings = Vec::new();
                 for base in &context.bases {
                     let directories = if tex_ls_parser::ast::command_name(&command).as_deref()
@@ -112,12 +133,12 @@ pub fn will_rename(
                     {
                         vec![context.root_directory.clone()]
                     } else {
-                        command_directories(
-                            &tree,
+                        command_directories_with_roles(
                             &command,
                             Some(base),
                             Some(&context.root_directory),
                             &context.graphics,
+                            &roles,
                         )
                     };
                     for directory in directories {
@@ -132,7 +153,7 @@ pub fn will_rename(
                             continue;
                         }
                         let mut spelling = if Path::new(raw).is_absolute() {
-                            destination.clone()
+                            destination.to_path_buf()
                         } else {
                             relative_path(destination, &directory)?
                         };
@@ -168,17 +189,24 @@ pub fn will_rename(
                     spelling = format!("{{{spelling}}}");
                 }
                 let edit = TextEdit {
-                    range: lsp_range(&LineIndex::with_encoding(text, encoding), reference.range),
+                    range: lsp_range_with_cursor(&mut positions, reference.range),
                     new_text: spelling,
                 };
-                let entries = changes.entry(path_to_uri(&path)?).or_default();
-                if entries
-                    .iter()
-                    .any(|other| other.range == edit.range && other.new_text != edit.new_text)
-                {
-                    return None;
-                }
-                if !entries.contains(&edit) {
+                let uri = path_to_uri(&path)?;
+                let spans = seen.entry(uri.clone()).or_default();
+                let entries = changes.entry(uri).or_default();
+                let key = (
+                    edit.range.start.line,
+                    edit.range.start.character,
+                    edit.range.end.line,
+                    edit.range.end.character,
+                );
+                if let Some(&slot) = spans.get(&key) {
+                    if entries[slot].new_text != edit.new_text {
+                        return None;
+                    }
+                } else {
+                    spans.insert(key, entries.len());
                     entries.push(edit);
                 }
             }
@@ -228,6 +256,126 @@ pub fn decode_files(params: &serde_json::Value) -> Option<Vec<(PathBuf, PathBuf)
 mod tests {
     use super::*;
     use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn includeonly_rename_preserves_printed_arguments_and_preceding_real_filters() {
+        let root = Path::new(fixture_path!("/files/main.tex"));
+        let old = Path::new(fixture_path!("/files/a.tex"));
+        let new = Path::new(fixture_path!("/files/b.tex"));
+        for (prefix, expected_prefix, count) in [
+            (
+                r"\renewcommand{\includeonly}[1]{#1}\includeonly{a}",
+                r"\renewcommand{\includeonly}[1]{#1}\includeonly{a}",
+                1,
+            ),
+            (
+                r"\let\includeonly\relax\includeonly{a}",
+                r"\let\includeonly\relax\includeonly{a}",
+                1,
+            ),
+            (
+                r"\includeonly{a}\renewcommand{\includeonly}[1]{#1}\includeonly{a}",
+                r"\includeonly{b}\renewcommand{\includeonly}[1]{#1}\includeonly{a}",
+                2,
+            ),
+            (
+                r"\detokenize{\includeonly{a}}",
+                r"\detokenize{\includeonly{a}}",
+                1,
+            ),
+            (r"\string\includeonly{a}", r"\string\includeonly{a}", 1),
+            (r"\let\copy\includeonly{a}", r"\let\copy\includeonly{a}", 1),
+            (r"\meaning\includeonly{a}", r"\meaning\includeonly{a}", 1),
+            (r"\show\includeonly{a}", r"\show\includeonly{a}", 1),
+            (r"\noexpand\includeonly{a}", r"\noexpand\includeonly{a}", 1),
+            (
+                r"\NewCommandCopy{\copy}{\includeonly}{a}",
+                r"\NewCommandCopy{\copy}{\includeonly}{a}",
+                1,
+            ),
+            (
+                r"\ifx\relax\includeonly{a}\fi",
+                r"\ifx\relax\includeonly{a}\fi",
+                1,
+            ),
+            (r"\ifx a\includeonly{a}\fi", r"\ifx a\includeonly{a}\fi", 1),
+            (r"\meaning\input{a}", r"\meaning\input{a}", 1),
+            (r"\let\copy\input{a}", r"\let\copy\input{a}", 1),
+            (
+                r"\meaning\input{\input{a}}",
+                r"\meaning\input{\input{b}}",
+                2,
+            ),
+        ] {
+            let source = format!("é😀 {prefix}\\input{{a}}");
+            let expected = format!("é😀 {expected_prefix}\\input{{b}}");
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(root, source.as_str(), None);
+            db.apply_change(old, "A", None);
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let changes = will_rename(&[db.snapshot()], &[(old.into(), new.into())], encoding)
+                    .unwrap()
+                    .changes
+                    .unwrap();
+                let edits = &changes[&path_to_uri(root).unwrap()];
+                assert_eq!(edits.len(), count, "{source}");
+                let index = LineIndex::with_encoding(&source, encoding);
+                let mut actual = source.clone();
+                for edit in edits.iter().rev() {
+                    let start = index.offset_at(edit.range.start.line, edit.range.start.character);
+                    let end = index.offset_at(edit.range.end.line, edit.range.end.character);
+                    actual.replace_range(start..end, &edit.new_text);
+                }
+                assert_eq!(actual, expected, "{encoding:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bulk_rename_keeps_exact_ranges_protected_text_and_snapshot_deduplication() {
+        let root = Path::new(fixture_path!("/files/main.tex"));
+        let a = Path::new(fixture_path!("/files/a.tex"));
+        let b = Path::new(fixture_path!("/files/b.tex"));
+        let next_a = Path::new(fixture_path!("/files/new-a.tex"));
+        let next_b = Path::new(fixture_path!("/files/new-b.tex"));
+        let active = format!(
+            "\\documentclass{{article}}\\includeonly{{a}}\r\n{}",
+            "é😀 \\input{a}\\input{b}".repeat(96)
+        );
+        let protected = concat!(
+            "\\detokenize{\\input{a}}\\string\\input{b}",
+            "\\begin{verbatim}\n\\input{a}\n\\end{verbatim}",
+            "\\newcommand{\\input}[1]{#1}\\input{b}"
+        );
+        let source = active.clone() + protected;
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(root, source.as_str(), None);
+        db.apply_change(a, "A", None);
+        db.apply_change(b, "B", None);
+        let snapshot = db.snapshot();
+        let files = [(b.into(), next_b.into()), (a.into(), next_a.into())];
+        for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let idx = LineIndex::with_encoding(&source, enc);
+            let edits = will_rename(&[snapshot.clone(), snapshot.clone()], &files, enc)
+                .unwrap()
+                .changes
+                .unwrap();
+            let edits = &edits[&path_to_uri(root).unwrap()];
+            assert_eq!(edits.len(), 193);
+            let mut actual = source.clone();
+            for edit in edits.iter().rev() {
+                let start = idx.offset_at(edit.range.start.line, edit.range.start.character);
+                let end = idx.offset_at(edit.range.end.line, edit.range.end.character);
+                assert_eq!(edit.range, byte_range_to_lsp(&idx, start, end));
+                assert!(end <= active.len());
+                actual.replace_range(start..end, &edit.new_text);
+            }
+            assert_eq!(
+                actual,
+                active.replace("{a}", "{new-a}").replace("{b}", "{new-b}") + protected
+            );
+        }
+    }
 
     #[test]
     fn renames_preserve_bare_filenames_and_includeonly_build_participation() {

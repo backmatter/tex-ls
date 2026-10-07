@@ -46,6 +46,9 @@ impl MatchQuery {
     }
 
     pub(crate) fn score_text(&self, text: &str) -> Option<usize> {
+        if self.tokens.is_empty() {
+            return Some(0);
+        }
         let search = text.to_lowercase();
         self.tokens.iter().try_fold(0usize, |total, token| {
             score(token, &search).map(|score| total + score)
@@ -101,6 +104,33 @@ pub fn rank(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn empty_and_whitespace_queries_keep_zero_scores() {
+        for query in ["", " ", "\t\n", "\u{2003}"] {
+            assert_eq!(
+                MatchQuery::new(query).score_text("LONG Ünicode heading"),
+                Some(0)
+            );
+            let items = vec![
+                CompletionItem {
+                    label: "b".into(),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "a".into(),
+                    ..Default::default()
+                },
+            ];
+            let list = rank(items, query, &HashMap::new(), 100, false);
+            assert_eq!(
+                list.items
+                    .iter()
+                    .map(|item| item.label.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["a", "b"]
+            );
+        }
+    }
     #[test]
     fn full_fields_unicode_and_provenance_precede_the_cap_deterministically() {
         let items: Vec<_> = (0..300)
