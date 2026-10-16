@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [0.1.4](https://github.com/backmatter/tex-ls/compare/v0.1.3...v0.1.4) - 2026-10-16
+
+### Fixed
+- Handle closed macOS sockets and normalize citation origins
+- Refresh restored packages and correct native path handling
+- Harden language features and reorganize implementation
+- Improve semantic highlighting and language server performance
+
 - Reduce repeated parsing and project scans during completion, highlighting,
   diagnostics, navigation, formatting, and bulk edits. Bound retained request caches
   and reuse source facts after incremental updates.
