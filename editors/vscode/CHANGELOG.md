@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.1.4](https://github.com/backmatter/tex-ls/compare/v0.1.3...v0.1.4) - 2026-10-16
+
+### Fixed
+- Handle closed macOS sockets and normalize citation origins
+- Refresh restored packages and correct native path handling
+- Harden language features and reorganize implementation
+- Improve semantic highlighting and language server performance
+
+- Reduce repeated parsing and project scans during completion, highlighting,
+  diagnostics, navigation, formatting, and bulk edits. Bound retained request caches
+  and reuse source facts after incremental updates.
+- Improve lossless parsing and full/incremental equivalence for malformed input,
+  macro definitions, docstrip sources, literal bodies, and embedded code.
+- Distinguish prose, literal content, paths, and math in semantic highlighting.
+  Add declaration and text-style modifiers, Python listing colors, and embedded
+  grammar support for explicit C, C++, JavaScript, TypeScript, JSON, CSS, and HTML.
+- Preserve comments and protected layout during formatting. Batch safe fixes and
+  range edits without changing their meaning or splitting Unicode characters.
+- Improve bibliography key and string navigation, completion, rename, and
+  diagnostics across loaded resources, including literal entry dependencies and
+  Biber aliases. Decline edits when resolution is ambiguous.
+- Offer package-load quick fixes for supported commands in plain `article`,
+  `report`, and `book` documents with verified installed package sources. Recognize
+  `.clo` files and refresh package assistance after installation changes.
+- Add semantic-token delta responses and extend native/browser parity coverage.
+  Reject malformed requests safely and cancel stale native rename previews.
+- Fix project discovery, source acquisition, watcher refresh, compiler diagnostics,
+  source relocation, and cleanup across native and browser hosts.
+
 ## [0.1.3](https://github.com/backmatter/tex-ls/compare/v0.1.2...v0.1.3) - 2026-10-01
 
 ### Added
