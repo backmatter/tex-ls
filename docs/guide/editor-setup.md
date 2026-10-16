@@ -21,6 +21,8 @@ document's directory. If that inferred directory is a filesystem root, it watche
 only direct children. Open an explicit workspace folder or configure client file
 watching for nested dependencies of a document saved directly at the root.
 Compiler artifact candidates remain watched at any depth.
+Installed package sources also refresh after deletion and recreation, so package
+assistance can recover without reopening the document.
 
 ## Neovim
 

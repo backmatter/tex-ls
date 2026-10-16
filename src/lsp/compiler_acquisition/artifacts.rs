@@ -381,7 +381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let actual = dir.path().join("physical.bin");
         write(&actual, "\\newlabel{main}{{1}{1}}\\@input{child.aux}");
-        let child = dir.path().join("child.aux");
+        let child = dir.path().canonicalize().unwrap().join("child.aux");
         write(&child, "\\newlabel{child}{{2}{1}}");
         let log = dir.path().join("main.log");
         let aux = dir.path().join("main.aux");
@@ -493,66 +493,82 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn compiler_watches_preserve_non_utf8_physical_alias_paths() {
-        use std::os::unix::ffi::OsStringExt;
+    fn compiler_watches_preserve_native_physical_alias_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        let actual = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"physical\xff.aux".to_vec()));
-        write(&actual, "\\newlabel{key}{{1}{1}}");
-        std::os::unix::fs::symlink(&actual, main.with_extension("aux")).unwrap();
-        let mut db = IncrementalDatabase::default();
-        db.apply_change(&main, "\\label{key}", None);
-        let project = db.project_id();
-        let watches = acquire_compiler(&mut db, project, &main, &BuildConfig::default());
-        assert!(
-            watches.contains(&actual.canonicalize().unwrap()),
-            "the physical build artifact remains observable"
-        );
-        assert!(!watches.contains(&PathBuf::from(actual.to_string_lossy().into_owned())));
+        for (index, name) in crate::test_native_paths::native_names(
+            dir.path(),
+            "physical-λ.aux",
+            b"physical\xff.aux",
+        )
+        .into_iter()
+        .enumerate()
+        {
+            let main = dir.path().join(format!("main-{index}.tex"));
+            let actual = dir.path().join(name);
+            write(&actual, "\\newlabel{key}{{1}{1}}");
+            std::os::unix::fs::symlink(&actual, main.with_extension("aux")).unwrap();
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(&main, "\\label{key}", None);
+            let project = db.project_id();
+            let watches = acquire_compiler(&mut db, project, &main, &BuildConfig::default());
+            assert!(
+                watches.contains(&actual.canonicalize().unwrap()),
+                "the physical build artifact remains observable"
+            );
+            if actual.to_str().is_none() {
+                assert!(!watches.contains(&PathBuf::from(actual.to_string_lossy().into_owned())));
+            }
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn distinct_non_utf8_aux_paths_do_not_share_compiler_identity() {
+    fn distinct_native_aux_paths_do_not_share_compiler_identity() {
         use std::os::unix::ffi::OsStringExt;
         let dir = tempfile::tempdir().unwrap();
-        let first = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"part\xff.tex".to_vec()));
-        let second = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"part\xfe.tex".to_vec()));
-        write(&first.with_extension("aux"), "\\newlabel{first}{{1}{1}}");
-        write(&second.with_extension("aux"), "\\newlabel{second}{{2}{1}}");
-        let mut db = IncrementalDatabase::default();
-        db.apply_change(&first, "text", None);
-        db.apply_change(&second, "text", None);
-        let artifacts = acquire_artifacts(vec![
-            (
-                first.with_extension("aux"),
-                vec![first.with_extension("aux")],
-            ),
-            (
-                second.with_extension("aux"),
-                vec![second.with_extension("aux")],
-            ),
-        ]);
-        let token = db
-            .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
-            .unwrap();
-        db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
-            .unwrap();
-        let snapshot = db.snapshot();
-        let data = snapshot.aux_data(&[&first, &second], dir.path()).unwrap();
-        assert_eq!(
-            data.labels.len(),
-            2,
-            "distinct physical artifacts must not deduplicate lossily"
-        );
-        assert_eq!(data.labels["first"], "1");
-        assert_eq!(data.labels["second"], "2");
+        let mut names = vec![(
+            std::ffi::OsString::from("part-λ.tex"),
+            std::ffi::OsString::from("part-μ.tex"),
+        )];
+        if crate::test_native_paths::supports_non_utf8_names(dir.path()) {
+            names.push((
+                std::ffi::OsString::from_vec(b"part\xff.tex".to_vec()),
+                std::ffi::OsString::from_vec(b"part\xfe.tex".to_vec()),
+            ));
+        }
+        for (first, second) in names {
+            let first = dir.path().join(first);
+            let second = dir.path().join(second);
+            write(&first.with_extension("aux"), "\\newlabel{first}{{1}{1}}");
+            write(&second.with_extension("aux"), "\\newlabel{second}{{2}{1}}");
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(&first, "text", None);
+            db.apply_change(&second, "text", None);
+            let artifacts = acquire_artifacts(vec![
+                (
+                    first.with_extension("aux"),
+                    vec![first.with_extension("aux")],
+                ),
+                (
+                    second.with_extension("aux"),
+                    vec![second.with_extension("aux")],
+                ),
+            ]);
+            let token = db
+                .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
+                .unwrap();
+            db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
+                .unwrap();
+            let snapshot = db.snapshot();
+            let data = snapshot.aux_data(&[&first, &second], dir.path()).unwrap();
+            assert_eq!(
+                data.labels.len(),
+                2,
+                "distinct physical artifacts must not deduplicate lossily"
+            );
+            assert_eq!(data.labels["first"], "1");
+            assert_eq!(data.labels["second"], "2");
+        }
     }
 
     #[cfg(unix)]
@@ -599,51 +615,54 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn nested_aux_chains_preserve_non_utf8_directories_and_logical_aliases() {
-        use std::os::unix::ffi::OsStringExt;
+    fn nested_aux_chains_preserve_native_directories_and_logical_aliases() {
         let dir = tempfile::tempdir().unwrap();
-        let physical = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"physical\xff".to_vec()));
-        std::fs::create_dir(&physical).unwrap();
-        let physical_main = physical.join("main.aux");
-        write(
-            &physical_main,
-            "\\newlabel{main}{{1}{1}}\\@input{child.aux}",
-        );
-        write(&physical.join("child.aux"), "\\newlabel{child}{{2}{1}}");
-        let first = dir.path().join("first/main.tex");
-        let second = dir.path().join("second/main.tex");
-        for main in [&first, &second] {
-            std::fs::create_dir_all(main.parent().unwrap()).unwrap();
-            std::os::unix::fs::symlink(&physical_main, main.with_extension("aux")).unwrap();
-        }
-        let mut db = IncrementalDatabase::default();
-        db.apply_change(&first, "text", None);
-        db.apply_change(&second, "text", None);
-        let artifacts = acquire_artifacts(vec![
-            (
-                first.with_extension("aux"),
-                vec![first.with_extension("aux")],
-            ),
-            (
-                second.with_extension("aux"),
-                vec![second.with_extension("aux")],
-            ),
-        ]);
-        let token = db
-            .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
-            .unwrap();
-        db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
-            .unwrap();
-        let snapshot = db.snapshot();
-        for main in [&first, &second] {
-            let data = snapshot.aux_data(&[main], dir.path()).unwrap();
-            assert_eq!(
-                data.labels.get("child").map(String::as_str),
-                Some("2"),
-                "nested physical AUX facts remain reachable for each alias"
+        for (index, name) in
+            crate::test_native_paths::native_names(dir.path(), "physical-λ", b"physical\xff")
+                .into_iter()
+                .enumerate()
+        {
+            let physical = dir.path().join(name);
+            std::fs::create_dir(&physical).unwrap();
+            let physical_main = physical.join("main.aux");
+            write(
+                &physical_main,
+                "\\newlabel{main}{{1}{1}}\\@input{child.aux}",
             );
+            write(&physical.join("child.aux"), "\\newlabel{child}{{2}{1}}");
+            let first = dir.path().join(format!("first-{index}/main.tex"));
+            let second = dir.path().join(format!("second-{index}/main.tex"));
+            for main in [&first, &second] {
+                std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+                std::os::unix::fs::symlink(&physical_main, main.with_extension("aux")).unwrap();
+            }
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(&first, "text", None);
+            db.apply_change(&second, "text", None);
+            let artifacts = acquire_artifacts(vec![
+                (
+                    first.with_extension("aux"),
+                    vec![first.with_extension("aux")],
+                ),
+                (
+                    second.with_extension("aux"),
+                    vec![second.with_extension("aux")],
+                ),
+            ]);
+            let token = db
+                .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
+                .unwrap();
+            db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
+                .unwrap();
+            let snapshot = db.snapshot();
+            for main in [&first, &second] {
+                let data = snapshot.aux_data(&[main], dir.path()).unwrap();
+                assert_eq!(
+                    data.labels.get("child").map(String::as_str),
+                    Some("2"),
+                    "nested physical AUX facts remain reachable for each alias"
+                );
+            }
         }
     }
 

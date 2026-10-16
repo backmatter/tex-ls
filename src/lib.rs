@@ -13,3 +13,7 @@ use tex_ls_parser::{declarations, parser, semantic, syntax};
 
 pub mod format;
 pub mod package_source;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/support/native_paths.rs"]
+mod test_native_paths;

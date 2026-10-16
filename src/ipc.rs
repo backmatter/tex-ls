@@ -513,30 +513,65 @@ fn read_request(stream: &Stream, shutdown: &AtomicBool) -> Option<InverseSearchR
 
 /// Bound the entire frame, including peers that keep sending partial data.
 /// Short reads let shutdown interrupt an accepted connection as well as accept.
-fn read_frame(mut stream: &Stream, shutdown: Option<&AtomicBool>) -> Option<String> {
+fn read_frame(stream: &Stream, shutdown: Option<&AtomicBool>) -> Option<String> {
+    read_frame_result(stream, shutdown).ok()
+}
+
+fn read_frame_result(
+    mut stream: &Stream,
+    shutdown: Option<&AtomicBool>,
+) -> std::io::Result<String> {
     let deadline = std::time::Instant::now() + REPLY_TIMEOUT;
     let mut frame = Vec::new();
     let mut buffer = [0; 1024];
     loop {
         if shutdown.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-            return None;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "IPC frame read cancelled",
+            ));
         }
-        let remaining = deadline.checked_duration_since(std::time::Instant::now())?;
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("IPC frame deadline expired after {} bytes", frame.len()),
+                )
+            })?;
         stream
             .set_read_timeout(Some(remaining.min(READ_POLL)))
-            .ok()?;
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("set IPC read timeout after {} bytes: {error}", frame.len()),
+                )
+            })?;
         match stream.read(&mut buffer) {
-            Ok(0) => return None,
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "IPC peer closed after {} bytes without a newline",
+                        frame.len()
+                    ),
+                ));
+            }
             Ok(count) => {
                 let bytes = &buffer[..count];
                 let newline = bytes.iter().position(|byte| *byte == b'\n');
                 let end = newline.map_or(count, |index| index + 1);
                 if frame.len() + end > MAX_FRAME_BYTES {
-                    return None;
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "IPC frame exceeds its byte limit",
+                    ));
                 }
                 frame.extend_from_slice(&bytes[..end]);
                 if newline.is_some() {
-                    return String::from_utf8(frame).ok();
+                    return String::from_utf8(frame).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
+                    });
                 }
             }
             Err(error)
@@ -546,7 +581,12 @@ fn read_frame(mut stream: &Stream, shutdown: Option<&AtomicBool>) -> Option<Stri
                         | std::io::ErrorKind::TimedOut
                         | std::io::ErrorKind::Interrupted
                 ) => {}
-            Err(_) => return None,
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("read IPC frame after {} bytes: {error}", frame.len()),
+                ));
+            }
         }
     }
 }
@@ -736,43 +776,50 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn inverse_delivery_preserves_native_source_and_workspace_root() {
-        use std::os::unix::ffi::OsStringExt;
+        use std::os::unix::ffi::OsStrExt;
         let tmp = tempfile::tempdir().unwrap();
-        let root = tmp
-            .path()
-            .join(std::ffi::OsString::from_vec(b"project\xff".to_vec()));
-        std::fs::create_dir(&root).unwrap();
-        let source = root.join(std::ffi::OsString::from_vec(b"main\xfe.tex".to_vec()));
-        std::fs::write(&source, "text").unwrap();
-        let source = source.canonicalize().unwrap();
-        let dir = tmp.path().join("ipc");
-        let listener = std::sync::Arc::new(Listener::bind_in(&dir, vec![root.clone()]).unwrap());
-        let ads = read_advertisements(&dir).unwrap();
-        assert_eq!(ads[0].1.roots, vec![root]);
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let worker = {
-            let listener = listener.clone();
-            std::thread::spawn(move || {
-                let request = listener.accept_one().map(|(request, responder)| {
-                    let path = request.path;
-                    responder.accept();
-                    path
-                });
-                done_tx.send(request).unwrap();
-            })
-        };
-        let result = send_inverse_search_in(&dir, &source, 42, 7);
-        if result.is_err() {
-            listener.wake();
+        for name in crate::test_native_paths::native_names(tmp.path(), "project💡", b"project\xff")
+        {
+            let root = tmp.path().join(&name);
+            std::fs::create_dir(&root).unwrap();
+            let source_name = if name.to_str().is_some() {
+                std::ffi::OsStr::new("main💡.tex")
+            } else {
+                std::ffi::OsStr::from_bytes(b"main\xfe.tex")
+            };
+            let source = root.join(source_name);
+            std::fs::write(&source, "text").unwrap();
+            let source = source.canonicalize().unwrap();
+            let dir = tmp.path().join("ipc");
+            let listener =
+                std::sync::Arc::new(Listener::bind_in(&dir, vec![root.clone()]).unwrap());
+            let ads = read_advertisements(&dir).unwrap();
+            assert_eq!(ads[0].1.roots, vec![root]);
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = {
+                let listener = listener.clone();
+                std::thread::spawn(move || {
+                    let request = listener.accept_one().map(|(request, responder)| {
+                        let path = request.path;
+                        responder.accept();
+                        path
+                    });
+                    done_tx.send(request).unwrap();
+                })
+            };
+            let result = send_inverse_search_in(&dir, &source, 42, 7);
+            if result.is_err() {
+                listener.wake();
+            }
+            let received = done_rx.recv_timeout(Duration::from_secs(1));
+            if received.is_err() {
+                listener.wake();
+                done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            worker.join().unwrap();
+            assert!(result.is_ok(), "native inverse request must be delivered");
+            assert_eq!(received.unwrap(), Some(source));
         }
-        let received = done_rx.recv_timeout(Duration::from_secs(1));
-        if received.is_err() {
-            listener.wake();
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        }
-        worker.join().unwrap();
-        assert!(result.is_ok(), "native inverse request must be delivered");
-        assert_eq!(received.unwrap(), Some(source));
     }
 
     #[cfg(unix)]
@@ -815,69 +862,67 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unix_advertisement_preserves_non_utf8_socket_directory() {
-        use std::os::unix::ffi::OsStringExt;
+    fn unix_advertisement_preserves_native_socket_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp
-            .path()
-            .join(std::ffi::OsString::from_vec(b"ipc\xff".to_vec()));
-        let listener = Listener::bind_in(&dir, vec![]).expect("bind exact native directory");
-        let advertisements = read_advertisements(&dir).unwrap();
-        assert_eq!(advertisements.len(), 1);
-        let result = connect(&advertisements[0].1, READ_POLL);
-        // No accept thread is needed. Close both sockets and remove the exact
-        // native node even if old lossy cleanup cannot find it.
-        let connected = result.is_ok();
-        drop(result);
-        drop(listener);
-        let socket = dir.join(format!("{}.sock", std::process::id()));
-        let removed_on_drop = !socket.exists();
-        let _ = std::fs::remove_file(socket);
-        assert!(removed_on_drop, "drop must unlink the exact native socket");
-        assert!(
-            connected,
-            "published address must reach the bound native socket"
-        );
+        for name in crate::test_native_paths::native_names(tmp.path(), "ipc💡", b"ipc\xff") {
+            let dir = tmp.path().join(&name);
+            let listener = Listener::bind_in(&dir, vec![]).expect("bind exact native directory");
+            let advertisements = read_advertisements(&dir).unwrap();
+            assert_eq!(advertisements.len(), 1);
+            let result = connect(&advertisements[0].1, READ_POLL);
+            // No accept thread is needed. Close both sockets and remove the exact
+            // native node even if old lossy cleanup cannot find it.
+            let connected = result.is_ok();
+            drop(result);
+            drop(listener);
+            let socket = dir.join(format!("{}.sock", std::process::id()));
+            let removed_on_drop = !socket.exists();
+            let _ = std::fs::remove_file(socket);
+            assert!(removed_on_drop, "drop must unlink the exact native socket");
+            assert!(
+                connected,
+                "published address must reach the bound native socket"
+            );
+        }
     }
 
     #[cfg(unix)]
     #[test]
     fn unix_uri_listener_wake_and_drop_preserve_native_socket_path() {
-        use std::os::unix::ffi::OsStringExt;
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp
-            .path()
-            .join(std::ffi::OsString::from_vec(b"wake\xff".to_vec()));
-        let listener = std::sync::Arc::new(Listener::bind_in(&dir, vec![]).unwrap());
-        let socket = dir.join(format!("{}.sock", std::process::id()));
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (done_tx, done_rx) = std::sync::mpsc::channel();
-        let worker = {
-            let listener = listener.clone();
-            std::thread::spawn(move || {
-                started_tx.send(()).unwrap();
-                done_tx.send(listener.accept_one().is_none()).unwrap();
-            })
-        };
-        started_rx.recv().unwrap();
-        std::thread::sleep(Duration::from_millis(20));
-        listener.wake();
-        let completed = done_rx.recv_timeout(Duration::from_secs(1));
-        if completed.is_err() {
-            // Unblock the original exact socket on failure before joining.
-            let peer = SysStream::connect(&socket).unwrap();
-            drop(peer);
-            done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        for name in crate::test_native_paths::native_names(tmp.path(), "wake💡", b"wake\xff") {
+            let dir = tmp.path().join(&name);
+            let listener = std::sync::Arc::new(Listener::bind_in(&dir, vec![]).unwrap());
+            let socket = dir.join(format!("{}.sock", std::process::id()));
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let worker = {
+                let listener = listener.clone();
+                std::thread::spawn(move || {
+                    started_tx.send(()).unwrap();
+                    done_tx.send(listener.accept_one().is_none()).unwrap();
+                })
+            };
+            started_rx.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+            listener.wake();
+            let completed = done_rx.recv_timeout(Duration::from_secs(1));
+            if completed.is_err() {
+                // Unblock the original exact socket on failure before joining.
+                let peer = SysStream::connect(&socket).unwrap();
+                drop(peer);
+                done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            }
+            worker.join().unwrap();
+            drop(listener);
+            let removed = !socket.exists();
+            let _ = std::fs::remove_file(socket);
+            assert!(
+                completed.is_ok_and(|stopped| stopped),
+                "self-wake must unblock accept"
+            );
+            assert!(removed, "drop must unlink the native socket path");
         }
-        worker.join().unwrap();
-        drop(listener);
-        let removed = !socket.exists();
-        let _ = std::fs::remove_file(socket);
-        assert!(
-            completed.is_ok_and(|stopped| stopped),
-            "self-wake must unblock accept"
-        );
-        assert!(removed, "drop must unlink the native socket path");
     }
 
     /// Bind a listener in a fresh directory. Every test passes its directory
@@ -1248,10 +1293,24 @@ mod tests {
         assert_eq!(frame.len(), MAX_FRAME_BYTES);
         let writer = {
             let frame = frame.clone();
-            std::thread::spawn(move || peer.write_all(frame.as_bytes()).unwrap())
+            std::thread::spawn(move || peer.write_all(frame.as_bytes()))
         };
-        assert_eq!(read_frame(&accepted, None).as_deref(), Some(frame.as_str()));
-        writer.join().unwrap();
+        let received = read_frame_result(&accepted, None);
+        // Release the writer even if the reader rejected the frame early.
+        drop(accepted);
+        let written = writer.join().unwrap();
+        assert!(
+            written.is_ok(),
+            "boundary frame write failed: {written:?}; read error: {:?}",
+            received.as_ref().err()
+        );
+        let received = received.expect("read the exact-boundary Unicode IPC frame");
+        assert!(
+            received == frame,
+            "boundary frame differs: expected {} bytes, received {} bytes",
+            frame.len(),
+            received.len()
+        );
     }
 
     #[test]

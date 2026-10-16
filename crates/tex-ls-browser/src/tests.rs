@@ -875,7 +875,7 @@ fn semantic_delta_negotiates_reconstructs_and_forgets_closed_documents() {
 fn clients_without_delta_negotiation_do_not_create_token_baselines() {
     let mut session = Session::default();
     session.dispatch("initialize", json!({})).unwrap();
-    let uri = "file:///full-only.tex";
+    let uri = fixture_uri!("/full-only.tex");
     session.dispatch("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"latex","version":1,"text":"\\section{Title}"}})).unwrap();
     let full = session
         .dispatch(

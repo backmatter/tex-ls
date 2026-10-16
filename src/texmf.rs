@@ -192,7 +192,7 @@ impl InstalledPackages {
             .and_then(|name| name.to_str())
             .and_then(|name| state.index.as_ref()?.by_name.get(name))
             .is_some_and(|selected| selected == path);
-        if !deleted && selected {
+        if !deleted && selected && !state.forced_pending {
             return false;
         }
         state.watch_epoch += 1;
@@ -800,6 +800,43 @@ mod tests {
     }
 
     #[test]
+    fn recreation_supersedes_a_pending_deletion_refresh_even_when_old_index_selects_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("amstest.sty");
+        std::fs::write(&source, "original").unwrap();
+        let installed = InstalledPackages::from(TexmfConfig {
+            roots: vec![dir.path().to_owned()],
+            explicit_only: true,
+            use_kpsewhich: false,
+            ..Default::default()
+        });
+        let original = installed.index();
+        let generation = installed.generation();
+        // Hold the enumerator before publication. Its last complete index still
+        // selects this path, although the deletion made that index unavailable.
+        installed.state.lock().unwrap().checking = true;
+        std::fs::remove_file(&source).unwrap();
+        assert!(installed.watched_source_change(&source, true));
+        let deletion_epoch = installed.state.lock().unwrap().watch_epoch;
+        assert_eq!(original.by_name.get("amstest.sty"), Some(&source));
+        std::fs::write(&source, "restored").unwrap();
+        assert!(installed.watched_source_change(&source, false));
+        assert_eq!(
+            installed.state.lock().unwrap().watch_epoch,
+            deletion_epoch + 1,
+            "recreation must supersede the pending deletion enumeration"
+        );
+        assert!(installed.ready_index().is_none());
+        installed.refresh();
+        assert_eq!(installed.ready_index().unwrap().as_ref(), original.as_ref());
+        assert_eq!(installed.generation(), generation);
+        assert!(
+            !installed.watched_source_change(&source, false),
+            "ordinary selected-source writes still retain the ready filename index"
+        );
+    }
+
+    #[test]
     fn index_includes_format_and_bibliography_sources() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
@@ -948,19 +985,18 @@ mod ownership_tests {
 
     #[cfg(unix)]
     #[test]
-    fn recursive_texinputs_preserves_non_utf8_root_bytes() {
-        use std::os::unix::ffi::OsStringExt;
+    fn recursive_texinputs_preserves_native_root_bytes() {
         let dir = tempfile::tempdir().unwrap();
-        let root = dir
-            .path()
-            .join(std::ffi::OsString::from_vec(b"texmf\xff".to_vec()));
-        let source = root.join("nested/exact.sty");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, "").unwrap();
-        let mut recursive = root.as_os_str().to_os_string();
-        recursive.push("//");
-        let files = texinput_files(&recursive);
-        assert_eq!(files.get("exact.sty"), Some(&source));
+        for name in crate::test_native_paths::native_names(dir.path(), "texmf💡", b"texmf\xff") {
+            let root = dir.path().join(&name);
+            let source = root.join("nested/exact.sty");
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            std::fs::write(&source, "").unwrap();
+            let mut recursive = root.as_os_str().to_os_string();
+            recursive.push("//");
+            let files = texinput_files(&recursive);
+            assert_eq!(files.get("exact.sty"), Some(&source));
+        }
     }
 
     #[test]

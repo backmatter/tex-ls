@@ -430,7 +430,7 @@ mod tests {
         std::fs::create_dir(&physical).unwrap();
         let source = logical.join("main.tex");
         let actual = physical.join("main.aux");
-        let child = physical.join("child.aux");
+        let child = physical.canonicalize().unwrap().join("child.aux");
         std::fs::write(&actual, "\\@input{child.aux}").unwrap();
         std::os::unix::fs::symlink(&actual, source.with_extension("aux")).unwrap();
         let mut db = IncrementalDatabase::default();

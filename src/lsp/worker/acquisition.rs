@@ -436,35 +436,38 @@ impl Worker {
         }
         // Installed sources can belong to several workspace roots while their
         // physical path lies outside every root. Refresh each owning project.
-        let owners: std::collections::BTreeSet<_> = self
-            .projects
-            .projects()
-            .filter(|project| {
-                if self.source_version_at(*project, path).is_some() {
-                    return true;
-                }
-                // Deletion removes source membership, but a live preamble
-                // retains its failed location observation. A later watch event
-                // must refresh that project only while the installation still
-                // selects this exact path.
-                self.db.snapshot_for(*project).is_ok_and(|snapshot| {
-                    matches!(
-                        snapshot.location_kind(path),
-                        tex_ls_analysis::external::Observation::Absent
-                            | tex_ls_analysis::external::Observation::Error(_)
-                    ) && path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| {
-                            snapshot
-                                .texmf()
-                                .by_name
-                                .get(name)
-                                .is_some_and(|p| p == path)
-                        })
+        let owners: std::collections::BTreeSet<_> =
+            self.projects
+                .projects()
+                .filter(|project| {
+                    if self.source_version_at(*project, path).is_some() {
+                        return true;
+                    }
+                    // Deletion removes source membership and can remove the name
+                    // from the published installation index. Keep refreshing a
+                    // previously observed miss while this project's installation
+                    // owns its path, including before a new index is published.
+                    self.db.snapshot_for(*project).is_ok_and(|snapshot| {
+                        matches!(
+                            snapshot.location_kind(path),
+                            tex_ls_analysis::external::Observation::Absent
+                                | tex_ls_analysis::external::Observation::Error(_)
+                        ) && (self
+                            .discovery_anchors
+                            .get(project)
+                            .is_some_and(|(_, installed)| installed.contains_source_path(path))
+                            || path.file_name().and_then(|name| name.to_str()).is_some_and(
+                                |name| {
+                                    snapshot
+                                        .texmf()
+                                        .by_name
+                                        .get(name)
+                                        .is_some_and(|p| p == path)
+                                },
+                            ))
+                    })
                 })
-            })
-            .collect();
+                .collect();
         if !owners.is_empty() {
             let mut removed = false;
             for project in owners {

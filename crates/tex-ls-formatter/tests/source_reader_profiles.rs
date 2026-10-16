@@ -10,40 +10,44 @@ const RELEASE_SETUP: &str =
 
 #[test]
 fn qualified_readers_survive_formatting_without_changing_token_data() {
+    // Git may check out the included fixtures with CRLF. Construct uniformly LF
+    // and CRLF inputs below so Auto does not normalize an accidental mixture.
+    let comment_setup = COMMENT_SETUP.replace("\r\n", "\n");
+    let release_setup = RELEASE_SETUP.replace("\r\n", "\n");
     for (source, dtx) in [
         (
             format!(
-                "{COMMENT_SETUP}\\begin{{comment}}\n\\ref{{hidden}}\nignored \\end {{comment}} \\ref{{live}}\n"
+                "{comment_setup}\\begin{{comment}}\n\\ref{{hidden}}\nignored \\end {{comment}} \\ref{{live}}\n"
             ),
             false,
         ),
         (
             format!(
-                "%    \\begin{{macrocode}}\n{COMMENT_SETUP}%    \\end{{macrocode}}\n\\begin{{comment}}\n\\ref{{hidden}}\n  \\end {{comment}} \\ref{{live}}\n"
+                "%    \\begin{{macrocode}}\n{comment_setup}%    \\end{{macrocode}}\n\\begin{{comment}}\n\\ref{{hidden}}\n  \\end {{comment}} \\ref{{live}}\n"
             ),
             true,
         ),
         (
             format!(
-                "{RELEASE_SETUP}\\IncludeInRelease{{date}}[previous]%\n{{\\feature}}{{Literal \\verb and \\ref{{printed}}}}%\n\\ref{{live}}\n"
+                "{release_setup}\\IncludeInRelease{{date}}[previous]%\n{{\\feature}}{{Literal \\verb and \\ref{{printed}}}}%\n\\ref{{live}}\n"
             ),
             false,
         ),
         (
             format!(
-                "{RELEASE_SETUP}\\def\\releasedate{{2026/06/01}}\n\\IncludeInRelease{{\\releasedate}}[\\releasedate]{{\\verb}}{{Literal \\verb* and \\ref{{printed}}}}\\ref{{live}}\n"
+                "{release_setup}\\def\\releasedate{{2026/06/01}}\n\\IncludeInRelease{{\\releasedate}}[\\releasedate]{{\\verb}}{{Literal \\verb* and \\ref{{printed}}}}\\ref{{live}}\n"
             ),
             false,
         ),
         (
             format!(
-                "{RELEASE_SETUP}\\def\\releasedate{{2026/06/01}}\n\\IncludeInRelease{{2026/06/01}}{{% name\n  \\verb prefix\\releasedate}}{{Literal \\verb and \\ref{{printed}}}}\\ref{{live}}\n"
+                "{release_setup}\\def\\releasedate{{2026/06/01}}\n\\IncludeInRelease{{2026/06/01}}{{% name\n  \\verb prefix\\releasedate}}{{Literal \\verb and \\ref{{printed}}}}\\ref{{live}}\n"
             ),
             false,
         ),
         (
             format!(
-                "{RELEASE_SETUP}\\IncludeInRelease{{2026/06/01}}{{alphabet}}{{Literal \\verb and \\ref{{printed}}}}\n\\IncludeInRelease{{2026/06/01}}{{$plain}}{{Printed \\verb*}}\n\\IncludeInRelease{{2026/06/01}}{{Ωword}}{{Printed \\verb}}\\ref{{live}}\n"
+                "{release_setup}\\IncludeInRelease{{2026/06/01}}{{alphabet}}{{Literal \\verb and \\ref{{printed}}}}\n\\IncludeInRelease{{2026/06/01}}{{$plain}}{{Printed \\verb*}}\n\\IncludeInRelease{{2026/06/01}}{{Ωword}}{{Printed \\verb}}\\ref{{live}}\n"
             ),
             false,
         ),

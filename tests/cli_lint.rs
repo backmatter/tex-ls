@@ -13,6 +13,10 @@ use std::process::{Command, Output, Stdio};
 
 use tempfile::TempDir;
 
+#[cfg(unix)]
+#[path = "support/native_paths.rs"]
+mod native_paths;
+
 /// Triggers the `ellipsis` rule, which carries a safe fix (`...` → `\dots`).
 const FIXABLE: &str = "Wait ... what\n";
 const CLEAN: &str = "Nothing to see here.\n";
@@ -23,6 +27,9 @@ const OPT_IN_DASH: &str = "A global--local search.\n";
 fn json_path_serialization_failure_is_an_explicit_cli_error() {
     use std::os::unix::ffi::OsStringExt;
     let project = repo_dir();
+    if !native_paths::supports_non_utf8_names(project.path()) {
+        return;
+    }
     let source = project
         .path()
         .join(std::ffi::OsString::from_vec(b"source\xff.tex".to_vec()));
@@ -505,51 +512,51 @@ fn undefined_citation_resolves_bibinputs_bibliography() {
 #[cfg(unix)]
 #[test]
 fn undefined_citation_preserves_kpsewhich_native_path_bytes() {
-    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+    use std::os::unix::fs::PermissionsExt;
     let project = repo_dir();
     let data = TempDir::new().unwrap();
-    let directory = data
-        .path()
-        .join(std::ffi::OsString::from_vec(b"bib\xff".to_vec()));
-    std::fs::create_dir(&directory).unwrap();
-    let bibliography = directory.join("shared.bib");
-    std::fs::write(&bibliography, "@article{present, title={Present}}\n").unwrap();
-    std::fs::write(
-        project.path().join("doc.tex"),
-        "\\documentclass{article}\n\\bibliography{shared}\n\\begin{document}\n\\cite{present,missing}\n\\end{document}\n",
-    )
-    .unwrap();
-    let tool = data.path().join("kpsewhich");
-    std::fs::write(
-        &tool,
-        "#!/bin/sh\nprintf '%s\\n' \"$TEX_LS_TEST_BIB_PATH\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let output = lint_with_env(
-        project.path(),
-        &["--output=json", "--select=undefined-citation", "doc.tex"],
-        None,
-        &[
-            ("PATH", data.path()),
-            ("BIBINPUTS", Path::new("")),
-            ("TEX_LS_TEST_BIB_PATH", &bibliography),
-        ],
-    );
-    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let undefined = findings.as_array().unwrap();
-    assert_eq!(
-        undefined.len(),
-        1,
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
-    assert!(
-        undefined[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("missing")
-    );
+    for name in native_paths::native_names(data.path(), "bib💡", b"bib\xff") {
+        let directory = data.path().join(&name);
+        std::fs::create_dir(&directory).unwrap();
+        let bibliography = directory.join("shared.bib");
+        std::fs::write(&bibliography, "@article{present, title={Present}}\n").unwrap();
+        std::fs::write(
+            project.path().join("doc.tex"),
+            "\\documentclass{article}\n\\bibliography{shared}\n\\begin{document}\n\\cite{present,missing}\n\\end{document}\n",
+        )
+        .unwrap();
+        let tool = data.path().join("kpsewhich");
+        std::fs::write(
+            &tool,
+            "#!/bin/sh\nprintf '%s\\n' \"$TEX_LS_TEST_BIB_PATH\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = lint_with_env(
+            project.path(),
+            &["--output=json", "--select=undefined-citation", "doc.tex"],
+            None,
+            &[
+                ("PATH", data.path()),
+                ("BIBINPUTS", Path::new("")),
+                ("TEX_LS_TEST_BIB_PATH", &bibliography),
+            ],
+        );
+        let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let undefined = findings.as_array().unwrap();
+        assert_eq!(
+            undefined.len(),
+            1,
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(
+            undefined[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing")
+        );
+    }
 }
 
 #[cfg(unix)]

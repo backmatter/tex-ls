@@ -1850,6 +1850,111 @@ mod audit_scheduler_tests {
     }
 
     #[test]
+    fn recreated_installed_source_refreshes_only_projects_with_observed_misses() {
+        use tex_ls_analysis::external::{
+            ExternalInputKind, ExternalInputs, FileInputs, LocationKind, LocationObservation,
+            Observation,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let installed_root = dir.path().join("installed");
+        std::fs::create_dir(&installed_root).unwrap();
+        let source = installed_root.join("restored.sty");
+        let unrelated = installed_root.join("unrelated.sty");
+        let roots: Vec<_> = ["first", "second", "unobserved"]
+            .into_iter()
+            .map(|name| dir.path().join(name))
+            .collect();
+        let mut db = IncrementalDatabase::default();
+        let projects = ProjectRegistry::from_roots(&mut db, &roots);
+        let installed: InstalledPackages = crate::texmf::TexmfConfig {
+            roots: vec![installed_root],
+            explicit_only: true,
+            use_kpsewhich: false,
+            ..Default::default()
+        }
+        .into();
+        assert!(installed.index().by_name.is_empty());
+        let mut owners = Vec::new();
+        let mut anchors = Vec::new();
+        for (index, root) in roots.iter().enumerate() {
+            let main = root.join("main.tex");
+            let project = projects.select(&main, None).unwrap();
+            db.apply_project_change(project, &main, "text", None)
+                .unwrap();
+            if index < 2 {
+                let token = db
+                    .begin_external_refresh(project, ExternalInputKind::Files)
+                    .unwrap();
+                db.apply_external_inputs(
+                    token,
+                    ExternalInputs::Files(FileInputs {
+                        locations: vec![(
+                            source.clone(),
+                            LocationObservation {
+                                kind: Observation::Absent,
+                                ..Default::default()
+                            },
+                        )],
+                        file_resolution: vec![(source.clone(), Observation::Absent)],
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+                owners.push(project);
+            }
+            anchors.push((project, (main, installed.clone())));
+        }
+        let pool = task_pool::TaskPool::new("restored-installed-source", 1);
+        let (out_tx, _) = unbounded();
+        let (done_tx, _) = unbounded();
+        let mut worker = test_worker(
+            db,
+            projects,
+            out_tx,
+            done_tx,
+            pool.spawner(),
+            Default::default(),
+        );
+        worker.discovery_anchors.extend(anchors);
+        std::fs::write(&source, "restored source").unwrap();
+        worker.apply_watched_change(&source, false);
+        assert_eq!(worker.files_inflight, owners.iter().copied().collect());
+        while !worker.files_inflight.is_empty() {
+            let completed = worker
+                .file_acquisition
+                .rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert!(owners.contains(&completed.project));
+            worker.complete_files(completed);
+        }
+        for project in owners {
+            let snapshot = worker.db.snapshot_for(project).unwrap();
+            let file = snapshot
+                .lookup_file(&source)
+                .expect("restored installed source");
+            assert_eq!(snapshot.file_text(file), "restored source");
+            assert_eq!(
+                snapshot.location_kind(&source),
+                Observation::Present(LocationKind::File)
+            );
+            let resolved = snapshot.resolve_file(&tex_ls_analysis::external::FileCandidates::new(
+                source.to_str().unwrap(),
+                &[],
+                false,
+                None,
+            ));
+            assert_eq!(resolved.target, Observation::Present(source.clone()));
+        }
+        std::fs::write(&unrelated, "unrequested source").unwrap();
+        worker.apply_watched_change(&unrelated, false);
+        assert!(
+            worker.files_inflight.is_empty(),
+            "unobserved installation files must not be acquired"
+        );
+    }
+
+    #[test]
     fn deleted_watched_source_cannot_be_revived_by_an_older_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.tex");

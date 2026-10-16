@@ -158,6 +158,7 @@ pub(super) fn for_context(
     context: Option<&CompletionContext>,
 ) -> Option<lsp_types::CompletionList> {
     let file = snapshot.lookup_file(path)?;
+    let path = snapshot.file_path(file);
     match context {
         Some(CompletionContext::CitationKey { prefix }) => {
             let root = snapshot.parsed_tree(file);

@@ -265,7 +265,13 @@ Artifact polling compares content fingerprints because
 size and mtime can miss rebuilds. TEXMF discovery runs independently with bounded
 process deadlines. Each settings value shares immutable installation indexes.
 Background checks refresh database/directory fingerprints approximately every five
-seconds while requests retain the previous complete index. Explicit-only discovery
+seconds while requests retain the previous complete index.
+Watch-triggered refreshes withhold the old index until enumeration completes.
+Recreation supersedes a pending deletion even if the last complete index still
+names the file. Previously observed missing sources remain refreshable for each
+project whose installation owns their path, before the new filename index is
+published. Unobserved installation files do not trigger source reads.
+Explicit-only discovery
 ignores automatic roots and TEXINPUTS; relative roots resolve at the scoped native
 configuration boundary. TEXINPUTS accepts literal native directory paths, including
 Windows short names containing `~`; a trailing `//` enables recursive lookup. Browser applications supply inputs through the
@@ -623,6 +629,8 @@ hide a later higher-ranked result. Descriptions and resolve payloads are constru
 for selected candidates; glossary search descriptions are bounded and cards resolve
 lazily. Exhaustive and bounded citation completion share the same resource traversal
 and first-definer policy; only selected candidates need response materialization.
+Both use the registered logical source path for resolve metadata, including when
+the caller supplied another native spelling of that path.
 
 Native and browser hosts retain semantic-token baselines for negotiated delta
 clients only after successful, accepted response adaptation. Delta responses splice the negotiated integer array.
@@ -786,5 +794,9 @@ JSON; the corpus gate validates the JSON schema, coverage, counts and exit statu
 losslessness, progress, full/incremental equivalence, and formatting idempotence.
 Host transcripts compare native and actual WASM behavior in UTF-8 and UTF-16,
 with ambient TEXMF discovery disabled unless the fixture supplies an installation.
+Native path IO scenarios use Unicode names on every supported filesystem and also
+exercise invalid UTF-8 names where the fixture filesystem accepts them. The native
+test helper accepts only macOS EILSEQ as that capability limit; other setup errors
+fail. Serialization-only native-byte cases run without a filesystem precondition.
 Optional corpus, typesetting, and [performance checks](../../benches/README.md) cover
 larger workloads. Use native Cargo, rustup, Python, and Node commands.

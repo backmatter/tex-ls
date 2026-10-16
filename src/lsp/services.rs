@@ -283,9 +283,34 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unicode_native_entries_remain_available_in_directory_listings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("directory💡")).unwrap();
+        std::fs::write(dir.path().join("source💡.tex"), "text").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("directory💡"), dir.path().join("link💡"))
+            .unwrap();
+        let Observation::Present(contents) = location(dir.path(), true).directory else {
+            panic!("directory listing is available");
+        };
+        assert!(contents.complete);
+        assert_eq!(contents.entries.len(), 3);
+        assert_eq!(
+            contents.entries.get("source💡.tex"),
+            Some(&LocationKind::File)
+        );
+        for name in ["directory💡", "link💡"] {
+            assert_eq!(contents.entries.get(name), Some(&LocationKind::Directory));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn unrepresentable_broken_symlink_does_not_invalidate_utf8_listing() {
         use std::os::unix::ffi::OsStringExt;
         let dir = tempfile::tempdir().unwrap();
+        if !crate::test_native_paths::supports_non_utf8_names(dir.path()) {
+            return;
+        }
         let link = dir
             .path()
             .join(std::ffi::OsString::from_vec(b"bad\xff".to_vec()));
@@ -313,6 +338,9 @@ mod tests {
     fn directory_completion_skips_unrepresentable_native_names() {
         use std::os::unix::ffi::OsStringExt;
         let dir = tempfile::tempdir().unwrap();
+        if !crate::test_native_paths::supports_non_utf8_names(dir.path()) {
+            return;
+        }
         for name in [b"invalid\xff.tex".to_vec(), b"valid\xfe.tex".to_vec()] {
             std::fs::create_dir(dir.path().join(std::ffi::OsString::from_vec(name))).unwrap();
         }
