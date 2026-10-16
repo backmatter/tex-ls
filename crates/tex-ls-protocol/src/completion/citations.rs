@@ -98,6 +98,7 @@ pub(super) fn exhaustive(
     citations: &ResolvedCitations,
     origin: &Path,
 ) -> Vec<CompletionItem> {
+    let origin = registered_origin(snapshot, origin);
     let mut items = Vec::new();
     visit(snapshot, citations, origin, |candidate| {
         items.push(candidate.materialize(origin, ""));
@@ -113,6 +114,7 @@ fn select(
     namespace: &str,
     limit: usize,
 ) -> lsp_types::CompletionList {
+    let origin = registered_origin(snapshot, origin);
     let matcher = completion_rank::MatchQuery::new(query);
     let mut selected = completion_rank::BoundedRank::new(limit);
     visit(
@@ -149,6 +151,12 @@ fn select(
         item_defaults: None,
         apply_kind: None,
     }
+}
+
+fn registered_origin<'a>(snapshot: &'a Analysis, origin: &'a Path) -> &'a Path {
+    snapshot
+        .lookup_file(origin)
+        .map_or(origin, |file| snapshot.file_path(file))
 }
 
 pub(super) fn for_context(
@@ -198,12 +206,86 @@ pub(super) fn for_context(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{cite_completion_items, compute_completion_impl};
+    use super::super::{cite_completion_items, compute_bib_completion, compute_completion_impl};
     use super::*;
     use crate::convert::path_to_uri;
     use lsp_types::Position;
     use std::collections::HashMap;
     use tex_ls_analysis::{incremental::IncrementalDatabase, text::PositionEncoding};
+
+    #[test]
+    fn citation_resolve_origins_use_registered_paths_across_input_spellings() {
+        let tex = Path::new(fixture_path!("/citation-origin/./main.tex"));
+        let bib = Path::new(fixture_path!("/citation-origin/./refs.bib"));
+        let source =
+            r"\documentclass{article}\usepackage{biblatex}\addbibresource{refs.bib}\cite{pa}";
+        let library = "@misc{paper,title={Paper}}\n@misc{child,xdata={pa}}";
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(tex, source, None);
+        db.apply_change(bib, library, None);
+        let snapshot = db.snapshot();
+        for (text, bibliography, spellings) in [
+            (
+                source,
+                false,
+                [
+                    fixture_path!("/citation-origin/main.tex"),
+                    fixture_path!("/citation-origin/./main.tex"),
+                    fixture_path!("/citation-origin/nested/../main.tex"),
+                ],
+            ),
+            (
+                library,
+                true,
+                [
+                    fixture_path!("/citation-origin/refs.bib"),
+                    fixture_path!("/citation-origin/./refs.bib"),
+                    fixture_path!("/citation-origin/nested/../refs.bib"),
+                ],
+            ),
+        ] {
+            let at = text.rfind("pa").unwrap() + 2;
+            for spelling in spellings {
+                let path = Path::new(spelling);
+                let file = snapshot.lookup_file(path).unwrap();
+                let expected_origin = serde_json::to_value(snapshot.file_path(file)).unwrap();
+                let items = if bibliography {
+                    compute_bib_completion(&snapshot, path, at)
+                } else {
+                    cite_completion_items(&snapshot, snapshot.resolve_citations(), path)
+                };
+                assert!(!items.is_empty(), "{spelling}: bibliography={bibliography}");
+                for item in items {
+                    assert_eq!(item.data.unwrap()["lint_path"], expected_origin);
+                }
+                let (line, character) = snapshot
+                    .file_line_index(file, PositionEncoding::Utf16)
+                    .position(at);
+                let uri = path_to_uri(path).unwrap();
+                let bounded = compute_completion_impl(
+                    &snapshot,
+                    &uri,
+                    path,
+                    PositionEncoding::Utf16,
+                    Position::new(line, character),
+                    true,
+                );
+                let exhaustive = compute_completion_impl(
+                    &snapshot,
+                    &uri,
+                    path,
+                    PositionEncoding::Utf16,
+                    Position::new(line, character),
+                    false,
+                );
+                assert!(!bounded.items.is_empty());
+                assert_eq!(bounded, exhaustive, "{spelling}");
+                for item in bounded.items {
+                    assert_eq!(item.data.unwrap()["lint_path"], expected_origin);
+                }
+            }
+        }
+    }
 
     #[test]
     fn vocabulary_preserves_backend_identity_first_definer_and_manual_precedence() {

@@ -128,6 +128,7 @@ pub fn compute_bib_completion(
     let Some(file) = snapshot.lookup_file(path) else {
         return Vec::new();
     };
+    let path = snapshot.file_path(file);
     let root = snapshot.parsed_bib_tree(file);
     if tex_ls_analysis::bib::completion::dependency_key_completion(&root, offset).is_some()
         && tex_ls_analysis::bib::completion::dependency_key_completion_for_backend(

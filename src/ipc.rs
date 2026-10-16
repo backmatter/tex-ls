@@ -539,15 +539,29 @@ fn read_frame_result(
                     format!("IPC frame deadline expired after {} bytes", frame.len()),
                 )
             })?;
-        stream
-            .set_read_timeout(Some(remaining.min(READ_POLL)))
-            .map_err(|error| {
-                std::io::Error::new(
-                    error.kind(),
-                    format!("set IPC read timeout after {} bytes: {error}", frame.len()),
-                )
-            })?;
-        match stream.read(&mut buffer) {
+        let timeout_error = |error: std::io::Error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("set IPC read timeout after {} bytes: {error}", frame.len()),
+            )
+        };
+        let read = match stream.set_read_timeout(Some(remaining.min(READ_POLL))) {
+            Ok(()) => stream.read(&mut buffer),
+            Err(error) => {
+                #[cfg(target_os = "macos")]
+                {
+                    if error.raw_os_error() != Some(22) {
+                        return Err(timeout_error(error));
+                    }
+                    read_after_timeout_error(stream, &mut buffer, error).map_err(timeout_error)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    return Err(timeout_error(error));
+                }
+            }
+        };
+        match read {
             Ok(0) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
@@ -588,6 +602,29 @@ fn read_frame_result(
                 ));
             }
         }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(unix, test)))]
+fn read_after_timeout_error(
+    mut stream: &Stream,
+    buffer: &mut [u8],
+    timeout_error: std::io::Error,
+) -> std::io::Result<usize> {
+    if timeout_error.raw_os_error() != Some(22) {
+        return Err(timeout_error);
+    }
+    // Darwin rejects socket options after a Unix peer closes, even while its
+    // receive buffer contains data. Read those bytes without trusting that the
+    // failed timeout was installed. This private connection has no concurrent IO.
+    stream.set_nonblocking(true)?;
+    let read = stream.read(buffer);
+    stream.set_nonblocking(false).map_err(|error| {
+        std::io::Error::other(format!("restore blocking IPC connection: {error}"))
+    })?;
+    match read {
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Err(timeout_error),
+        result => result,
     }
 }
 
@@ -1270,6 +1307,69 @@ mod tests {
             expired_while_sending,
             "partial bytes must not reset the deadline"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_setup_fallback_drains_closed_peer_bytes_and_eof() {
+        let (mut peer, accepted) = SysStream::pair().unwrap();
+        let frame = "queued💡frame\n".as_bytes();
+        peer.write_all(frame).unwrap();
+        drop(peer);
+        let mut received = Vec::new();
+        loop {
+            let mut buffer = [0; 3];
+            let count = read_after_timeout_error(
+                &accepted,
+                &mut buffer,
+                std::io::Error::from_raw_os_error(22),
+            )
+            .unwrap();
+            if count == 0 {
+                break;
+            }
+            received.extend_from_slice(&buffer[..count]);
+        }
+        assert_eq!(received, frame);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn timeout_setup_fallback_does_not_wait_on_a_live_empty_peer() {
+        let (peer, accepted) = SysStream::pair().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let result = read_after_timeout_error(
+                &accepted,
+                &mut [0; 8],
+                std::io::Error::from_raw_os_error(22),
+            );
+            done_tx.send((result, accepted)).unwrap();
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(1));
+        // Always unblock a broken implementation before joining its reader.
+        drop(peer);
+        reader.join().unwrap();
+        let (result, _accepted) = completed.expect("fallback must not await live peer data");
+        assert_eq!(result.unwrap_err().raw_os_error(), Some(22));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn other_timeout_setup_errors_do_not_read_queued_bytes() {
+        let (mut peer, mut accepted) = SysStream::pair().unwrap();
+        peer.write_all(b"queued").unwrap();
+        drop(peer);
+        let error = read_after_timeout_error(
+            &accepted,
+            &mut [0; 8],
+            std::io::Error::from_raw_os_error(13),
+        )
+        .unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(13));
+        let mut received = [0; 6];
+        accepted.read_exact(&mut received).unwrap();
+        assert_eq!(&received, b"queued");
     }
 
     #[test]

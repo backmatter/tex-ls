@@ -348,6 +348,9 @@ change triggers an immediate scan.
 
 Inverse-search IPC bounds request and response frames to 64 KiB and uses three-second
 frame deadlines. Shutdown interrupts accepted clients that have not completed a request.
+On macOS, a closed peer can leave readable bytes while timeout updates fail with
+`EINVAL`. A nonblocking read drains those bytes and restores blocking mode before
+continuing. A read that would wait retains the timeout setup error.
 Connection attempts are bounded too, with a short timeout for the shutdown wake.
 The native Unix socket helper stays outside the shared engine. Failed requests retain
 live advertisements; only missing or refused endpoints are removed as stale.
@@ -631,6 +634,7 @@ lazily. Exhaustive and bounded citation completion share the same resource trave
 and first-definer policy; only selected candidates need response materialization.
 Both use the registered logical source path for resolve metadata, including when
 the caller supplied another native spelling of that path.
+BibTeX backend and completion-context checks use that same registered path.
 
 Native and browser hosts retain semantic-token baselines for negotiated delta
 clients only after successful, accepted response adaptation. Delta responses splice the negotiated integer array.
