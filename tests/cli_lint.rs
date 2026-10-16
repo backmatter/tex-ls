@@ -18,6 +18,37 @@ const FIXABLE: &str = "Wait ... what\n";
 const CLEAN: &str = "Nothing to see here.\n";
 const OPT_IN_DASH: &str = "A global--local search.\n";
 
+#[cfg(unix)]
+#[test]
+fn json_path_serialization_failure_is_an_explicit_cli_error() {
+    use std::os::unix::ffi::OsStringExt;
+    let project = repo_dir();
+    let source = project
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source\xff.tex".to_vec()));
+    std::fs::write(&source, FIXABLE).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_tex-ls"))
+        .arg("--no-config")
+        .arg("lint")
+        .arg("--output=json")
+        .arg("--select=ellipsis")
+        .arg(&source)
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "failed reports must not look clean"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("serialize"));
+}
+
 #[test]
 fn unknown_commands_respect_root_package_loads() {
     let dir = repo_dir();
@@ -219,7 +250,7 @@ fn default_output_keeps_findings_on_stderr() {
 
 /// `-` is the explicit stdin spelling here too, and `--fix` has nowhere to write
 /// it back (issue #111 added the spelling; the no-paths-at-a-terminal gate it
-/// pairs with is unit-tested in `main.rs`).
+/// pairs with is unit-tested in `src/commands/inputs.rs`).
 #[test]
 fn dash_lints_stdin() {
     let dir = repo_dir();
@@ -295,7 +326,7 @@ fn json_is_never_colored() {
 }
 
 /// A declaration block naming an environment the document's own text gives no
-/// way to recognize as verbatim (`AGENTS.md` decision #12).
+/// way to recognize as verbatim.
 const DECLARES_VERBATIM: &str = "[environments.mycode]\nlike = 'lstlisting'\n";
 
 /// The same `...` the `ellipsis` rule flags in prose, inside that environment.
@@ -457,6 +488,56 @@ fn undefined_citation_resolves_bibinputs_bibliography() {
         .iter()
         .filter(|finding| finding["rule"] == "undefined-citation")
         .collect();
+    assert_eq!(
+        undefined.len(),
+        1,
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        undefined[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn undefined_citation_preserves_kpsewhich_native_path_bytes() {
+    use std::os::unix::{ffi::OsStringExt, fs::PermissionsExt};
+    let project = repo_dir();
+    let data = TempDir::new().unwrap();
+    let directory = data
+        .path()
+        .join(std::ffi::OsString::from_vec(b"bib\xff".to_vec()));
+    std::fs::create_dir(&directory).unwrap();
+    let bibliography = directory.join("shared.bib");
+    std::fs::write(&bibliography, "@article{present, title={Present}}\n").unwrap();
+    std::fs::write(
+        project.path().join("doc.tex"),
+        "\\documentclass{article}\n\\bibliography{shared}\n\\begin{document}\n\\cite{present,missing}\n\\end{document}\n",
+    )
+    .unwrap();
+    let tool = data.path().join("kpsewhich");
+    std::fs::write(
+        &tool,
+        "#!/bin/sh\nprintf '%s\\n' \"$TEX_LS_TEST_BIB_PATH\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let output = lint_with_env(
+        project.path(),
+        &["--output=json", "--select=undefined-citation", "doc.tex"],
+        None,
+        &[
+            ("PATH", data.path()),
+            ("BIBINPUTS", Path::new("")),
+            ("TEX_LS_TEST_BIB_PATH", &bibliography),
+        ],
+    );
+    let findings: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let undefined = findings.as_array().unwrap();
     assert_eq!(
         undefined.len(),
         1,

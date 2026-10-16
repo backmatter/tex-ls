@@ -48,6 +48,24 @@ impl Model {
         &self.string_uses
     }
 
+    /// Case-insensitive string matches, with definitions before uses.
+    /// Each range retains its authored spelling and byte position.
+    pub fn string_occurrences<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> impl Iterator<Item = (rowan::TextRange, bool)> + 'a {
+        self.string_defs()
+            .iter()
+            .filter(move |site| site.name.eq_ignore_ascii_case(key))
+            .map(|site| (site.range, true))
+            .chain(
+                self.string_uses()
+                    .iter()
+                    .filter(move |site| site.name.eq_ignore_ascii_case(key))
+                    .map(|site| (site.range, false)),
+            )
+    }
+
     /// Returns entries whose cite key duplicates an earlier entry in this file.
     pub fn duplicate_keys(&self) -> impl Iterator<Item = &Entry> {
         self.entries.iter().filter(|entry| entry.duplicate)
@@ -139,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn string_occurrences_keep_duplicates_case_and_definition_first_order() {
+        let source = "@book{k,publisher=CuP}\n@string{cup={A}}\n@string{CUP={B}}\n@book{j,publisher=cup,year=other}";
+        let model = model_of(source);
+        let found: Vec<_> = model
+            .string_occurrences("cUp")
+            .map(|(range, definition)| (&source[range], definition))
+            .collect();
+        assert_eq!(
+            found,
+            [("cup", true), ("CUP", true), ("CuP", false), ("cup", false)]
+        );
+        assert_eq!(model.string_occurrences("missing").count(), 0);
+    }
+
+    #[test]
     fn string_def_collected() {
         let model = model_of("@string{cup = {Cambridge University Press}}\n");
         assert_eq!(model.string_defs().len(), 1);
@@ -201,5 +234,35 @@ mod tests {
             .collect();
         assert_eq!(uses, vec!["pub"]);
         assert!(model.string_uses()[0].resolved);
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+    #[test]
+    fn dependencies_keep_exact_list_spans_and_refuse_scalar_lists_or_expressions() {
+        let source = "@misc{child,crossref={parent},xdata={ first,第二 },related=names,ids={alternate}}@misc{bad,crossref={a,b}}";
+        let model = Model::build(&crate::bib::parse(source).syntax());
+        let deps = &model.entries()[0].dependencies;
+        assert_eq!(
+            deps.iter()
+                .map(|dep| (dep.field.as_str(), dep.key.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("crossref", Some("parent")),
+                ("xdata", Some("first")),
+                ("xdata", Some("第二")),
+                ("related", None),
+                ("ids", Some("alternate"))
+            ]
+        );
+        for dep in deps.iter().filter(|dep| dep.key.is_some()) {
+            assert_eq!(
+                &source[usize::from(dep.range.start())..usize::from(dep.range.end())],
+                dep.key.as_ref().unwrap().as_str()
+            );
+        }
+        assert!(model.entries()[1].dependencies[0].key.is_none());
     }
 }

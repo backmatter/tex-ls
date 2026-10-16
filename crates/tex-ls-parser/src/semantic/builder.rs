@@ -13,9 +13,7 @@ use smol_str::SmolStr;
 
 use rowan::{NodeOrToken, TextRange, TextSize};
 
-use crate::ast::{
-    AstNode, Group, Optional, child, command_name, first_group_range, nth_group_inner,
-};
+use crate::ast::{AstNode, Group, Optional, child, command_name, nth_group, nth_group_inner};
 use crate::declarations::ResolvedDeclarations;
 use crate::semantic::label::{CitationRef, ColorDef, GlossaryDef, LabelDef, LabelRef};
 use crate::semantic::pkgmeta;
@@ -27,7 +25,7 @@ pub fn build(root: &SyntaxNode) -> SemanticModel {
     build_with_declarations(root, &ResolvedDeclarations::default())
 }
 
-/// Build the semantic model while honoring project-declared ref/cite aliases.
+/// Build the semantic model while honoring project-declared key aliases.
 pub fn build_with_declarations(
     root: &SyntaxNode,
     declared: &ResolvedDeclarations,
@@ -73,7 +71,6 @@ pub fn build_with_declarations_and_operands(
         let Some(name) = command_name(&command) else {
             continue;
         };
-        let semantic_name = declared.command_like(&name).unwrap_or(&name);
         // Recorded before the key-collecting arms below, and independently of
         // them: an alias whose first group holds no extractable key still takes a
         // key argument, and the name-based gates must see it.
@@ -85,7 +82,7 @@ pub fn build_with_declarations_and_operands(
                 .insert(SmolStr::new(name.as_str()));
         }
 
-        if collect_key_command(&mut model, &command, &name, semantic_name) {
+        if collect_key_command(&mut model, &command, &name, declared) {
             continue;
         } else if pkgmeta::provides_kind(&name).is_some() {
             // Package/class self-identification — first `\Provides…` wins (a file
@@ -118,7 +115,7 @@ fn collect_key_command(
     model: &mut SemanticModel,
     command: &SyntaxNode,
     name: &str,
-    semantic_name: &str,
+    declared: &ResolvedDeclarations,
 ) -> bool {
     let mut recognized = false;
     for index in 0..command
@@ -126,14 +123,17 @@ fn collect_key_command(
         .filter(|node| node.kind() == SyntaxKind::GROUP)
         .count()
     {
-        let Some(kind) = key_argument_role(semantic_name, index) else {
+        let Some(kind) = declared.command_key_role(name, index) else {
             continue;
         };
         recognized = true;
         let Some((inner_range, inner)) = nth_group_inner(command, index) else {
             continue;
         };
-        if matches!(kind, ArgumentRole::Citation(CiteCommand::Nocite)) && inner.trim() == "*" {
+        if matches!(kind, ArgumentRole::Citation(CiteCommand::Nocite))
+            && inner.trim() == "*"
+            && declared.command_key_prefix(name).is_empty()
+        {
             model.nocite_all = true;
             continue;
         }
@@ -144,16 +144,28 @@ fn collect_key_command(
             _ => false,
         };
         for (key, key_range) in key_spans(&inner, inner_range, split) {
-            let key = SmolStr::new(key);
+            let prefix = declared.command_key_prefix(name);
+            if !prefix.is_empty() && !crate::declarations::is_literal_key_suffix(key) {
+                continue;
+            }
+            let key = if prefix.is_empty() {
+                SmolStr::new(key)
+            } else {
+                format!("{prefix}{key}").into()
+            };
+            let definition_range = nth_group(command, index).map_or_else(
+                || command.text_range(),
+                |group| TextRange::new(command.text_range().start(), group.text_range().end()),
+            );
             match kind {
                 ArgumentRole::BibliographyItem => model.bibitems.push(crate::semantic::BibItem {
                     name: key,
-                    range: first_group_range(command),
+                    range: definition_range,
                     key_range,
                 }),
                 ArgumentRole::Label => model.labels.push(LabelDef {
                     name: key,
-                    range: first_group_range(command),
+                    range: definition_range,
                     key_range,
                     referenced: false,
                 }),
@@ -167,13 +179,13 @@ fn collect_key_command(
                 ArgumentRole::GlossaryDefinition(kind) => model.glossary_defs.push(GlossaryDef {
                     key,
                     kind,
-                    range: first_group_range(command),
+                    range: definition_range,
                     key_range,
                 }),
                 ArgumentRole::ColorDefinition(kind) => model.color_defs.push(ColorDef {
                     name: key,
                     kind,
-                    range: first_group_range(command),
+                    range: definition_range,
                     key_range,
                 }),
                 ArgumentRole::GlossaryUse => {
@@ -387,22 +399,14 @@ pub fn key_argument_command(name: &str) -> bool {
 /// separated; otherwise the whole inner is one key (`\label`, single-key refs).
 /// Surrounding whitespace is trimmed (TeX ignores it around these keys) and empty
 /// keys are dropped. `inner_range` is the byte span of `inner`, so each key's range
-/// is sliced off it by offset — exact because trimming removes only single-byte
-/// ASCII whitespace.
+/// is sliced off it by byte offset, including multibyte whitespace.
 fn key_spans(inner: &str, inner_range: TextRange, split: bool) -> Vec<(&str, TextRange)> {
     let base = inner_range.start();
-    let mut out = Vec::new();
     if split {
-        // Track each comma-segment's byte offset within `inner` (the segment text
-        // plus one byte for the comma that followed it).
-        let mut seg_off = 0usize;
-        for segment in inner.split(',') {
-            if let Some((key, lo, hi)) = trimmed_span(segment) {
-                out.push((key, key_range(base, seg_off + lo, seg_off + hi)));
-            }
-            seg_off += segment.len() + 1;
-        }
-    } else if let Some((key, lo, hi)) = trimmed_span(inner) {
+        return crate::syntax::comma_separated_spans(inner, base).collect();
+    }
+    let mut out = Vec::new();
+    if let Some((key, lo, hi)) = trimmed_span(inner) {
         out.push((key, key_range(base, lo, hi)));
     }
     out
@@ -452,10 +456,79 @@ mod tests {
     use crate::parser::parse;
     use crate::syntax::SyntaxNode;
 
-    use super::{CiteCommand, build, cite_command};
+    use super::{CiteCommand, build, build_with_declarations, cite_command};
 
     fn model(src: &str) -> crate::semantic::SemanticModel {
         build(&SyntaxNode::new_root(parse(src).green))
+    }
+
+    #[test]
+    fn declared_key_wrappers_keep_canonical_identities_and_source_suffix_spans() {
+        let declared: crate::declarations::Declarations = serde_json::from_str(
+            r#"{"commands":{
+            "defkey":{"like":"label","argument-index":1,"prefix":"sec:"},
+            "usekey":{"like":"cref","argument-index":1,"prefix":"sec:"},
+            "defgloss":{"like":"newglossaryentry","argument-index":1,"prefix":"term:"},
+            "usegloss":{"like":"gls","prefix":"term:"}
+        }}"#,
+        )
+        .unwrap();
+        let declared = declared.resolve().unwrap();
+        let source = r"\defkey{ignored}{intro}\usekey{ignored}{intro, next}\defgloss{ignored}{word}\usegloss{word}\usekey{ignored}{\dynamic}\usekey{ignored}{active~}\usekey{ignored}{align&}\usekey{ignored}{escape^}\usekey{ignored}{$math$}";
+        let root = crate::parser::parse(source).syntax();
+        let model = build_with_declarations(&root, &declared);
+        assert_eq!(model.labels()[0].name, "sec:intro");
+        assert_eq!(
+            &source[usize::from(model.labels()[0].key_range.start())
+                ..usize::from(model.labels()[0].key_range.end())],
+            "intro"
+        );
+        assert_eq!(
+            &source[usize::from(model.labels()[0].range.start())
+                ..usize::from(model.labels()[0].range.end())],
+            r"\defkey{ignored}{intro}"
+        );
+        assert_eq!(
+            model
+                .refs()
+                .iter()
+                .map(|site| site.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sec:intro", "sec:next"]
+        );
+        assert_eq!(model.glossary_defs()[0].key, "term:word");
+        assert_eq!(model.glossary_uses()[0].key, "term:word");
+        assert_eq!(
+            crate::parser::parse_with_declarations(
+                source,
+                crate::parser::LexConfig::default(),
+                &declared
+            )
+            .green,
+            crate::parser::parse(source).green
+        );
+    }
+
+    #[test]
+    fn prefixed_nocite_star_is_a_literal_key_not_a_project_wildcard() {
+        let declared: crate::declarations::Declarations = serde_json::from_str(
+            r#"{"commands":{
+            "localnocite":{"like":"nocite","prefix":"ns:"},
+            "allnocite":{"like":"nocite"}
+        }}"#,
+        )
+        .unwrap();
+        let declared = declared.resolve().unwrap();
+        let prefixed = build_with_declarations(
+            &crate::parser::parse(r"\localnocite{*}").syntax(),
+            &declared,
+        );
+        assert!(!prefixed.nocite_all);
+        assert_eq!(prefixed.citations()[0].name, "ns:*");
+        let wildcard =
+            build_with_declarations(&crate::parser::parse(r"\allnocite{*}").syntax(), &declared);
+        assert!(wildcard.nocite_all);
+        assert!(wildcard.citations().is_empty());
     }
 
     #[test]

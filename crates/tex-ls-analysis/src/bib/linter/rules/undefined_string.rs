@@ -6,11 +6,8 @@
 //! twelve month macros. A [`Severity::Warning`]; report-only (the fix is to define
 //! the macro or correct the name, a tex-ls-level edit left to the author).
 //!
-//! **Single-file caveat:** in a multi-file bibliography the macro may be defined in
-//! another `.bib`, so this can false-positive across files — the same trade-off
-//! [`unused-string`](super::unused_string) carries. It is sound for the common
-//! self-contained `.bib`, which is where a typo'd or undefined macro is worth
-//! surfacing. A cross-file `@string` resolver is out of scope for this slice.
+//! Loaded bibliography resources share definitions within their compilation roots.
+//! Incomplete rooted projects suppress absence claims; standalone files use local defs.
 
 use std::path::PathBuf;
 
@@ -36,10 +33,7 @@ impl BibRule for UndefinedString {
     }
 
     fn description(&self) -> &'static str {
-        "Report a string macro with no definition in the file. The twelve month macros `jan` \
-         through `dec` are predefined. Cross-file string resolution is not supported, so a \
-         definition in another bibliography may produce a false positive. No automatic fix is \
-         offered."
+        "Report a string macro used in a field or preamble with no definition in its loaded bibliography resources. The twelve month macros `jan` through `dec` are predefined. Incomplete rooted projects suppress this warning; standalone files check local definitions. No automatic fix is offered."
     }
 
     fn examples(&self) -> &'static [Example] {
@@ -48,6 +42,12 @@ impl BibRule for UndefinedString {
 
     fn check_file(&self, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
         for use_ in ctx.model.undefined_string_uses() {
+            if ctx.project.is_some_and(|project| {
+                project.scoped
+                    && (!project.complete || project.defined_strings.contains(use_.name.as_str()))
+            }) {
+                continue;
+            }
             sink.push(Diagnostic {
                 rule: self.id(),
                 severity: self.default_severity(),
@@ -65,24 +65,13 @@ impl BibRule for UndefinedString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bib::parse;
-    use crate::bib::semantic::Model;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = parse(src).syntax();
-        let model = Model::build(&root);
-        let ctx = BibRuleContext {
-            project: None,
-            path: std::path::Path::new("x.bib"),
-            root: &root,
-            source: src,
-            model: &model,
-            db: crate::bib::semantic::builtin(),
-            suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),
-        };
-        let mut out = Vec::new();
-        UndefinedString.check_file(&ctx, &mut out);
-        out
+        crate::bib::linter::test_support::with_context(src, |_root, ctx| {
+            let mut out = Vec::new();
+            UndefinedString.check_file(ctx, &mut out);
+            out
+        })
     }
 
     #[test]

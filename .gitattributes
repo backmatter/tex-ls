@@ -7,6 +7,7 @@ crates/*/tests/fixtures/**/*.tex eol=lf
 crates/*/tests/fixtures/**/*.bib eol=lf
 crates/*/tests/fixtures/**/*.sty eol=lf
 crates/*/tests/fixtures/**/*.cls eol=lf
+crates/*/tests/fixtures/**/*.clo eol=lf
 crates/*/tests/fixtures/**/*.dtx eol=lf
 crates/*/tests/fixtures/**/*.ins eol=lf
 crates/tex-ls-parser/tests/corpus/** eol=lf

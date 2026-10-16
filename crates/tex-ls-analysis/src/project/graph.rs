@@ -11,10 +11,10 @@
 //!   unchanged project + backdated per-file facts means its memo is reused.
 //!
 //! [`IncludeGraph::build`] is the **pure** algorithm (no salsa, no disk); the
-//! salsa query is a thin wrapper. The pure layer is where the future consumers
-//! (label/ref resolution, cross-file `\newcommand` scope) will plug in: the
-//! graph lands "harness + graph only," directly testable, awaiting a consumer to
-//! designate the document root.
+//! salsa query is a thin wrapper. Root views interpret include connectivity for
+//! label and citation namespaces, while package dependency post-order supplies
+//! the signature overlay order. Both traversals keep their state off the call
+//! stack, independent of the parser's syntax-depth bound.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -593,24 +593,24 @@ impl PackageGraph {
     /// top. A load cycle is terminated by the visited set.
     pub fn transitively_loaded(&self, start: &Path) -> Vec<PathBuf> {
         let mut order = Vec::new();
-        let mut visited: HashSet<PathBuf> = HashSet::new();
-        visited.insert(start.to_path_buf());
-        self.collect_loaded(start, &mut visited, &mut order);
-        order
-    }
-
-    fn collect_loaded(
-        &self,
-        node: &Path,
-        visited: &mut HashSet<PathBuf>,
-        order: &mut Vec<PathBuf>,
-    ) {
-        for load in self.loads(node) {
-            if visited.insert(load.to.clone()) {
-                self.collect_loaded(&load.to, visited, order);
-                order.push(load.to.clone());
+        let mut visited: HashSet<&Path> = HashSet::new();
+        visited.insert(start);
+        // Retain the parent's next edge while descending so sibling ordering
+        // and visited-on-entry match the recursive post-order exactly.
+        let mut pending = vec![(start, self.loads(start).iter())];
+        while let Some((_, edges)) = pending.last_mut() {
+            if let Some(load) = edges.next() {
+                if visited.insert(load.to.as_path()) {
+                    pending.push((load.to.as_path(), self.loads(&load.to).iter()));
+                }
+            } else {
+                let (node, _) = pending.pop().unwrap();
+                if !pending.is_empty() {
+                    order.push(node.to_path_buf());
+                }
             }
         }
+        order
     }
 }
 
@@ -1266,6 +1266,102 @@ mod tests {
             }]
         );
         assert!(g.loaded_by(Path::new("/p/mypkg.dtx")).is_empty());
+    }
+
+    #[test]
+    fn deep_package_postorder_does_not_use_the_call_stack() {
+        let paths: Vec<_> = (0..65_536)
+            .map(|index| PathBuf::from(format!("/p/{index:05}.sty")))
+            .collect();
+        let mut files: Vec<_> = paths
+            .iter()
+            .enumerate()
+            .map(|(index, path)| PackageFileFacts {
+                path: path.clone(),
+                package_edges: paths
+                    .get(index + 1)
+                    .map(|next| PackageEdgeKey {
+                        kind: PackageKind::RequirePackage,
+                        target: PackageTarget::Path(next.clone()),
+                    })
+                    .into_iter()
+                    .collect(),
+            })
+            .collect();
+        let expected: Vec<_> = paths[1..].iter().rev().cloned().collect();
+        assert_eq!(
+            PackageGraph::build(&files).transitively_loaded(&paths[0]),
+            expected
+        );
+        files
+            .last_mut()
+            .unwrap()
+            .package_edges
+            .push(PackageEdgeKey {
+                kind: PackageKind::RequirePackage,
+                target: PackageTarget::Path(paths[32_768].clone()),
+            });
+        assert_eq!(
+            PackageGraph::build(&files).transitively_loaded(&paths[0]),
+            expected
+        );
+    }
+
+    #[test]
+    fn package_postorder_matches_bounded_recursive_reference() {
+        fn visit(node: usize, edges: &[Vec<usize>], seen: &mut [bool], order: &mut Vec<usize>) {
+            for &next in &edges[node] {
+                if !seen[next] {
+                    seen[next] = true;
+                    visit(next, edges, seen, order);
+                    order.push(next);
+                }
+            }
+        }
+        let paths: Vec<_> = (0..12)
+            .map(|index| PathBuf::from(format!("/p/{index}.sty")))
+            .collect();
+        let mut random = 0x42fa_916d_u32;
+        for _ in 0..256 {
+            let edges: Vec<Vec<usize>> = (0..paths.len())
+                .map(|_| {
+                    (0..paths.len())
+                        .filter(|_| {
+                            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            random >> 28 < 3
+                        })
+                        .collect()
+                })
+                .collect();
+            let files: Vec<_> = edges
+                .iter()
+                .enumerate()
+                .map(|(index, targets)| PackageFileFacts {
+                    path: paths[index].clone(),
+                    package_edges: targets
+                        .iter()
+                        .map(|&target| PackageEdgeKey {
+                            kind: PackageKind::RequirePackage,
+                            target: PackageTarget::Path(paths[target].clone()),
+                        })
+                        .collect(),
+                })
+                .collect();
+            let graph = PackageGraph::build(&files);
+            for start in 0..paths.len() {
+                let mut seen = vec![false; paths.len()];
+                seen[start] = true;
+                let mut expected = Vec::new();
+                visit(start, &edges, &mut seen, &mut expected);
+                assert_eq!(
+                    graph.transitively_loaded(&paths[start]),
+                    expected
+                        .iter()
+                        .map(|&index| paths[index].clone())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
     }
 
     #[test]

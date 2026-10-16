@@ -35,6 +35,8 @@ pub struct Database {
     pub(super) storage: salsa::Storage<Self>,
     pub(super) epoch: u64,
     pub(super) revision: u64,
+    #[cfg(test)]
+    pub(super) rebuild_count: usize,
     pub(super) default_project: ProjectId,
     pub(super) projects: Arc<HashMap<ProjectId, ProjectInput>>,
     pub(super) identities: Arc<HashMap<SourceId, HashMap<ProjectId, SourceInput>>>,
@@ -74,6 +76,8 @@ impl Database {
             storage: salsa::Storage::new(None),
             epoch: NEXT_EPOCH.fetch_add(1, Ordering::Relaxed),
             revision: 0,
+            #[cfg(test)]
+            rebuild_count: 0,
             default_project,
             projects: Arc::default(),
             identities: Arc::default(),
@@ -133,6 +137,15 @@ impl Database {
         self.source_declarations
             .get(&(project, normalize_path(path)))
             .unwrap_or_else(|| self.project(project).declarations(self))
+    }
+
+    pub fn source_declaration_override_in(
+        &self,
+        project: ProjectId,
+        path: &Path,
+    ) -> Option<&ResolvedDeclarations> {
+        self.source_declarations
+            .get(&(project, normalize_path(path)))
     }
     pub fn set_declarations(&mut self, declared: ResolvedDeclarations) -> bool {
         self.set_project_declarations(self.default_project, declared)
@@ -395,6 +408,10 @@ impl Database {
             self.default_project
         };
         let mut next = Self::empty(default_project);
+        #[cfg(test)]
+        {
+            next.rebuild_count = self.rebuild_count + 1;
+        }
         next.acquisitions = self
             .acquisitions
             .iter()

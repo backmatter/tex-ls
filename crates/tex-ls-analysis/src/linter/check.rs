@@ -28,7 +28,7 @@ use super::suppression::SuppressionMap;
 /// `\makeatletter` ([`Package`](crate::parser::LatexFlavor::Package)) and a
 /// `.dtx` runs the docstrip mode; a bare
 /// [`LatexFlavor`](crate::parser::LatexFlavor) coerces in. `declared` is the
-/// project's declaration block (`AGENTS.md` decision #12), so a declared
+/// project's declaration block, so a declared
 /// `\bea`/`\eea` pair is an environment here exactly as it is under `tex-ls
 /// format`; pass [`ResolvedDeclarations::default`] where no project config
 /// governs.

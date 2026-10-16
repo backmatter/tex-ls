@@ -1,7 +1,26 @@
 //! Native acquisition. All I/O finishes before the feature snapshot is captured.
-use super::*;
-use tex_ls_analysis::external::*;
-use tex_ls_analysis::incremental::ProjectId;
+#[cfg(test)]
+use super::file_acquisition;
+#[cfg(test)]
+use crate::texmf::InstalledPackages;
+use lsp_types::Position;
+use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::{collections::HashSet, sync::Arc};
+use tex_ls_analysis::{
+    external::{
+        DirectoryContents, LocationKind, LocationObservation, Observation, completion_directories,
+    },
+    incremental::Analysis,
+    source::file_kind_or_tex,
+    text::PositionEncoding,
+};
+#[cfg(test)]
+use tex_ls_analysis::{
+    external::{ExternalInputKind, ExternalInputs, FileInputs, InstalledMetadata},
+    incremental::{IncrementalDatabase, ProjectId},
+    text::IntoSourceText,
+};
 
 pub(super) fn location(path: &Path, list: bool) -> LocationObservation {
     let kind = match std::fs::metadata(path) {
@@ -21,17 +40,32 @@ pub(super) fn location(path: &Path, list: bool) -> LocationObservation {
                     ..Default::default()
                 };
                 for entry in entries {
-                    match entry.and_then(|entry| Ok((entry.file_name(), entry.file_type()?))) {
-                        Ok((name, kind)) => {
+                    match entry.and_then(|entry| {
+                        let Ok(name) = entry.file_name().into_string() else {
+                            // Completion edits cannot name non-UTF8 entries.
+                            return Ok(None);
+                        };
+                        let kind = entry.file_type()?;
+                        let directory = if kind.is_symlink() {
+                            // Match location probes, which follow symbolic links.
+                            // Only links need another metadata lookup.
+                            std::fs::metadata(entry.path())?.is_dir()
+                        } else {
+                            kind.is_dir()
+                        };
+                        Ok(Some((name, directory)))
+                    }) {
+                        Ok(Some((name, kind))) => {
                             contents.entries.insert(
-                                name.to_string_lossy().into_owned(),
-                                if kind.is_dir() {
+                                name,
+                                if kind {
                                     LocationKind::Directory
                                 } else {
                                     LocationKind::File
                                 },
                             );
                         }
+                        Ok(None) => {}
                         Err(_) => contents.complete = false,
                     }
                 }
@@ -242,161 +276,103 @@ fn acquire_referenced_sources(
     }
 }
 
-pub(super) fn compiler_members(
-    db: &IncrementalDatabase,
-    project: ProjectId,
-    path: &Path,
-    build: &BuildConfig,
-) -> Vec<(PathBuf, Vec<PathBuf>)> {
-    let members = {
-        let snapshot = db.snapshot_for(project).expect("registered project");
-        let resolution = snapshot.resolve_labels();
-        let mut namespace = namespace_of(resolution, path);
-        if let [root] = resolution.candidate_roots(path)
-            && !namespace.contains(&root.as_path())
-        {
-            namespace.insert(0, root.as_path());
-        }
-        let root_document = build
-            .root
-            .as_deref()
-            .or_else(|| root_document_of(&snapshot, &namespace))
-            .unwrap_or(path);
-        if !namespace.contains(&root_document) {
-            namespace.insert(0, root_document);
-        }
-        tex_ls_analysis::external::compiler_candidates_for_job(
-            &namespace,
-            root_document,
-            build.aux_dir.as_deref(),
-            build.job_name.as_deref(),
-        )
-    };
-    let members: Vec<(PathBuf, Vec<PathBuf>)> = members
-        .into_iter()
-        .flat_map(|(logical, candidates)| {
-            ["aux", "fls", "log"].into_iter().map(move |ext| {
-                (
-                    logical.with_extension(ext),
-                    candidates
-                        .iter()
-                        .map(|path| path.with_extension(ext))
-                        .collect(),
-                )
-            })
-        })
-        .collect();
-    members
-}
-
-#[cfg(test)]
-pub(super) fn acquire_compiler(
-    db: &mut IncrementalDatabase,
-    project: ProjectId,
-    path: &Path,
-    build: &BuildConfig,
-) -> Vec<PathBuf> {
-    let members = compiler_members(db, project, path, build);
-    let mut watches: Vec<_> = members
-        .iter()
-        .flat_map(|(_, paths)| paths.iter().cloned())
-        .collect();
-    let artifacts = acquire_artifacts(members);
-    // Include discovered AUX chains and physical aliases; missing candidates must
-    // remain watched so a first build is observable too.
-    watches.extend(artifacts.iter().filter_map(|(_, value)| match value {
-        Observation::Present(artifact) => Some(PathBuf::from(&artifact.identity)),
-        _ => None,
-    }));
-    watches.sort();
-    watches.dedup();
-    let token = db
-        .begin_external_refresh(project, ExternalInputKind::Compiler)
-        .expect("registered project");
-    db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
-        .expect("current acquisition");
-    watches
-}
-
-static COMPILER_PROBES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub(super) fn compiler_probes() -> u64 {
-    COMPILER_PROBES.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-pub(super) fn acquire_artifacts(
-    members: Vec<(PathBuf, Vec<PathBuf>)>,
-) -> Vec<(PathBuf, Observation<CompilerArtifact>)> {
-    let mut artifacts = Vec::new();
-    let mut pending: Vec<_> = members.into_iter().rev().collect();
-    let mut visited = HashSet::new();
-    let mut physical = HashMap::<PathBuf, CompilerArtifact>::new();
-    while let Some((logical, candidates)) = pending.pop() {
-        if !visited.insert(logical.clone()) {
-            continue;
-        }
-        let mut value = Observation::Absent;
-        for candidate in candidates {
-            COMPILER_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            match std::fs::metadata(&candidate) {
-                Ok(meta) if !meta.is_file() => {
-                    value = Observation::Error("Compiler artifact is not a regular file".into());
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => {
-                    value = Observation::Error(error.to_string());
-                    break;
-                }
-                _ => {}
-            }
-            match std::fs::read(&candidate) {
-                Ok(bytes) => {
-                    let actual = candidate.canonicalize().unwrap_or(candidate.clone());
-                    if let Some(artifact) = physical.get(&actual) {
-                        value = Observation::Present(artifact.clone());
-                        break;
-                    }
-                    let directory = physical
-                        .get(&actual.with_extension("fls"))
-                        .and_then(|artifact| artifact.recorder.as_ref())
-                        .map(|recorder| recorder.directory.as_path())
-                        .unwrap_or_else(|| logical.parent().unwrap_or(Path::new("")));
-                    let mut artifact = CompilerArtifact::from_text_in(
-                        &logical,
-                        &String::from_utf8_lossy(&bytes),
-                        actual.to_string_lossy().into_owned(),
-                        directory,
-                    );
-                    let parsed = &mut artifact.parsed;
-                    let base = actual.parent().unwrap_or(Path::new(""));
-                    for input in &mut parsed.inputs {
-                        let path = tex_ls_analysis::source::normalize_path(&base.join(&*input));
-                        *input = path.to_string_lossy().into_owned();
-                        pending.push((path.clone(), vec![path]));
-                    }
-
-                    physical.insert(actual, artifact.clone());
-                    value = Observation::Present(artifact);
-                    break;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    value = Observation::Error(error.to_string());
-                    break;
-                }
-            }
-        }
-        artifacts.push((logical, value));
-    }
-    artifacts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use smol_str::SmolStr;
-    use tex_ls_analysis::project::aux::*;
+    use tex_ls_protocol::{compute_completion, convert::path_to_uri};
+
+    #[cfg(unix)]
+    #[test]
+    fn unrepresentable_broken_symlink_does_not_invalidate_utf8_listing() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"bad\xff".to_vec()));
+        std::os::unix::fs::symlink(dir.path().join("missing"), link).unwrap();
+        std::fs::write(dir.path().join("valid.tex"), "text").unwrap();
+        let Observation::Present(contents) = location(dir.path(), true).directory else {
+            panic!("directory listing is available");
+        };
+        assert!(
+            contents.complete,
+            "unrepresentable entries do not affect the UTF8 listing"
+        );
+        assert_eq!(
+            contents
+                .entries
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["valid.tex"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_completion_skips_unrepresentable_native_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        for name in [b"invalid\xff.tex".to_vec(), b"valid\xfe.tex".to_vec()] {
+            std::fs::create_dir(dir.path().join(std::ffi::OsString::from_vec(name))).unwrap();
+        }
+        let valid = "valid\u{fffd}.tex";
+        std::fs::write(dir.path().join(valid), "text").unwrap();
+        let Observation::Present(contents) = location(dir.path(), true).directory else {
+            panic!("directory listing is available");
+        };
+        assert!(contents.complete);
+        assert_eq!(
+            contents.entries.len(),
+            1,
+            "lossy names must not become completion targets"
+        );
+        assert_eq!(contents.entries.get(valid), Some(&LocationKind::File));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_completion_offers_symbolic_links_to_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("linked")).unwrap();
+        let path = dir.path().join("main.tex");
+        let source = r"\input{li}";
+        let mut db = IncrementalDatabase::default();
+        db.apply_change(&path, source, None);
+        let project = db.project_id();
+        let installed = InstalledPackages::from(crate::texmf::TexmfConfig {
+            enabled: false,
+            ..Default::default()
+        });
+        let position = Position::new(0, (source.len() - 1) as u32);
+        acquire_files(
+            &mut db,
+            project,
+            &path,
+            Some((position, PositionEncoding::Utf16)),
+            &installed,
+            false,
+        );
+        let snapshot = db.snapshot();
+        let items = compute_completion(
+            &snapshot,
+            &path_to_uri(&path).unwrap(),
+            &path,
+            PositionEncoding::Utf16,
+            position,
+        );
+        let item = items
+            .items
+            .iter()
+            .find(|item| item.label == "linked")
+            .expect("a linked directory is a path completion candidate");
+        assert_eq!(item.kind, Some(lsp_types::CompletionItemKind::Folder));
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+            panic!("directory completion supplies a text edit");
+        };
+        assert_eq!(edit.new_text, "linked/");
+    }
 
     #[test]
     fn import_completion_and_inherited_graphics_use_the_same_search_context() {
@@ -510,301 +486,6 @@ mod tests {
         drop(snapshot);
         db.close_overlay(project, &leaf).unwrap();
         assert!(db.snapshot().lookup_file(&leaf).is_none());
-    }
-
-    #[derive(Default)]
-    struct Fixture;
-    impl Fixture {
-        fn data_for(
-            &self,
-            namespace: &[&Path],
-            root: &Path,
-            aux_dir: Option<&Path>,
-        ) -> Option<AuxData> {
-            let mut db = IncrementalDatabase::default();
-            let artifacts = acquire_artifacts(tex_ls_analysis::external::compiler_candidates(
-                namespace, root, aux_dir,
-            ));
-            let token = db
-                .begin_external_refresh(db.project_id(), ExternalInputKind::Compiler)
-                .unwrap();
-            db.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))
-                .unwrap();
-            db.snapshot().aux_data(namespace, root)
-        }
-    }
-
-    fn labels_of(text: &str) -> HashMap<SmolStr, String> {
-        parse_aux(text).data.labels
-    }
-
-    #[test]
-    fn simple_newlabel() {
-        let labels = labels_of("\\newlabel{sec:foo}{{1}{1}}\n");
-        assert_eq!(labels[&SmolStr::new("sec:foo")], "1");
-    }
-
-    #[test]
-    fn newlabel_with_caption_and_anchor_groups() {
-        let labels = labels_of("\\newlabel{thm:foo}{{1}{1}{Foo}{lemma.1}{}}\n");
-        assert_eq!(labels[&SmolStr::new("thm:foo")], "1");
-    }
-
-    #[test]
-    fn ntheorem_nested_braces_flatten() {
-        let labels = labels_of("\\newlabel{thm:test}{{1.{1}}{1}}\n");
-        assert_eq!(labels[&SmolStr::new("thm:test")], "1.1");
-    }
-
-    #[test]
-    fn caption_xref_group_is_skipped_for_the_page_number() {
-        // The first group holds a command, not text; the next textual group wins
-        // (texlab behavior).
-        let labels =
-            labels_of("\\newlabel{fig:qux}{{\\caption@xref {fig:qux}{ on input line 15}}{1}}\n");
-        assert_eq!(labels[&SmolStr::new("fig:qux")], "1");
-    }
-
-    #[test]
-    fn empty_groups_are_skipped() {
-        let labels = labels_of("\\newlabel{x}{{}{2}}\n");
-        assert_eq!(labels[&SmolStr::new("x")], "2");
-    }
-
-    #[test]
-    fn newlabel_without_number_is_absent() {
-        let labels = labels_of("\\newlabel{x}{{}{}}\n\\newlabel{y}{{\\relax}{}}\n");
-        assert!(labels.is_empty());
-    }
-
-    #[test]
-    fn truncated_entry_is_skipped_earlier_entries_survive() {
-        let labels = labels_of("\\newlabel{a}{{1}{1}}\n\\newlabel{b}{{2}{1}\n");
-        assert_eq!(labels.len(), 1);
-        assert_eq!(labels[&SmolStr::new("a")], "1");
-    }
-
-    #[test]
-    fn similarly_named_commands_do_not_match() {
-        let parsed = parse_aux("\\newlabelx{a}{{1}{1}}\n\\@inputonce{f.aux}\n");
-        assert!(parsed.data.labels.is_empty());
-        assert!(parsed.inputs.is_empty());
-    }
-
-    #[test]
-    fn at_input_targets_collected_in_order() {
-        let parsed = parse_aux("\\@input{ch1.aux}\n\\relax\n\\@input{ch2.aux}\n");
-        assert_eq!(parsed.inputs, vec!["ch1.aux", "ch2.aux"]);
-    }
-
-    #[test]
-    fn toc_contentsline_with_numberline() {
-        let toc = parse_aux(
-            "\\@writefile{toc}{\\contentsline {section}{\\numberline {1.2}Basics}{3}{section.1.2}}\n",
-        )
-        .data
-        .toc;
-        assert_eq!(toc.len(), 1);
-        assert_eq!(toc[0].level, "section");
-        assert_eq!(toc[0].number.as_deref(), Some("1.2"));
-        assert_eq!(toc[0].title, "Basics");
-    }
-
-    #[test]
-    fn starred_contentsline_has_no_number() {
-        let toc =
-            parse_aux("\\@writefile{toc}{\\contentsline {section}{Preface}{1}{section*.1}}\n")
-                .data
-                .toc;
-        assert_eq!(toc.len(), 1);
-        assert_eq!(toc[0].number, None);
-        assert_eq!(toc[0].title, "Preface");
-    }
-
-    #[test]
-    fn title_keeps_macro_source() {
-        let toc = parse_aux(
-            "\\@writefile{toc}{\\contentsline {section}{\\numberline {1}\\textsc  {Intro}}{1}{section.1}}\n",
-        )
-        .data
-        .toc;
-        assert_eq!(toc[0].title, "\\textsc  {Intro}");
-    }
-
-    #[test]
-    fn non_toc_writefile_streams_are_ignored() {
-        let parsed = parse_aux(
-            "\\@writefile{lof}{\\contentsline {figure}{\\numberline {1}{\\ignorespaces A chart}}{2}{figure.1}}\n",
-        );
-        assert!(parsed.data.toc.is_empty());
-    }
-
-    #[test]
-    fn escaped_braces_do_not_unbalance_groups() {
-        let labels = labels_of("\\newlabel{k}{{1}{1}{a \\{b\\} c}{s.1}{}}\n");
-        assert_eq!(labels[&SmolStr::new("k")], "1");
-    }
-
-    fn write(path: &Path, text: &str) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, text).unwrap();
-    }
-
-    #[test]
-    fn sibling_aux_is_found() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        write(&main, "\\documentclass{article}\n");
-        write(&dir.path().join("main.aux"), "\\newlabel{sec:a}{{1}{1}}\n");
-        let data = Fixture
-            .data_for(&[&main], dir.path(), None)
-            .expect("aux found");
-        assert_eq!(data.labels[&SmolStr::new("sec:a")], "1");
-    }
-
-    #[test]
-    fn missing_aux_yields_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        write(&main, "x\n");
-        assert_eq!(Fixture.data_for(&[&main], dir.path(), None), None);
-    }
-
-    #[test]
-    fn aux_dir_candidates_flat_and_relative() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        let chap = dir.path().join("chapters/one.tex");
-        write(&main, "x\n");
-        write(&chap, "x\n");
-        // latexmk -auxdir layout: root flat, includes under their relative path.
-        write(
-            &dir.path().join("build/main.aux"),
-            "\\newlabel{sec:root}{{1}{1}}\n",
-        );
-        write(
-            &dir.path().join("build/chapters/one.aux"),
-            "\\newlabel{sec:one}{{2}{3}}\n",
-        );
-        let data = Fixture
-            .data_for(&[&main, &chap], dir.path(), Some(Path::new("build")))
-            .expect("aux found");
-        assert_eq!(data.labels[&SmolStr::new("sec:root")], "1");
-        assert_eq!(data.labels[&SmolStr::new("sec:one")], "2");
-        write(
-            &main.with_extension("aux"),
-            "\\newlabel{sec:root}{{OLD}{1}}\n",
-        );
-        let data = Fixture
-            .data_for(&[&main, &chap], dir.path(), Some(Path::new("build")))
-            .unwrap();
-        assert_eq!(data.labels[&SmolStr::new("sec:root")], "1");
-        std::fs::remove_file(dir.path().join("build/main.aux")).unwrap();
-        assert!(
-            Fixture
-                .data_for(&[&main], dir.path(), Some(Path::new("build")))
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn at_input_chain_is_followed_with_cycles_guarded() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        write(&main, "x\n");
-        // main.aux → ch1.aux → main.aux (cycle); ch1 is *not* in the namespace.
-        write(
-            &dir.path().join("main.aux"),
-            "\\newlabel{a}{{1}{1}}\n\\@input{ch1.aux}\n",
-        );
-        write(
-            &dir.path().join("ch1.aux"),
-            "\\newlabel{b}{{2}{2}}\n\\@input{main.aux}\n",
-        );
-        let data = Fixture
-            .data_for(&[&main], dir.path(), None)
-            .expect("aux found");
-        assert_eq!(data.labels.len(), 2);
-        assert_eq!(data.labels[&SmolStr::new("b")], "2");
-    }
-
-    #[test]
-    fn refresh_uses_contents_even_when_size_and_mtime_match() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        write(&main, "x\n");
-        let aux = dir.path().join("main.aux");
-        write(&aux, "\\newlabel{a}{{1}{1}}\n");
-        let cache = Fixture;
-        let first = cache
-            .data_for(&[&main], dir.path(), None)
-            .expect("aux found");
-        assert_eq!(first.labels[&SmolStr::new("a")], "1");
-
-        // Preserve metadata while replacing bytes of the same length.
-        let old = std::fs::metadata(&aux).unwrap().modified().unwrap();
-        write(&aux, "\\newlabel{a}{{7}{1}}\n");
-        std::fs::File::options()
-            .write(true)
-            .open(&aux)
-            .unwrap()
-            .set_modified(old)
-            .unwrap();
-
-        let second = cache
-            .data_for(&[&main], dir.path(), None)
-            .expect("aux found");
-        assert_eq!(second.labels[&SmolStr::new("a")], "7");
-    }
-
-    #[test]
-    fn deep_aux_graphs_and_path_alias_cycles_are_complete() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        write(&main, "x");
-        write(&dir.path().join("main.aux"), "\\@input{0.aux}\n");
-        for n in 0..40 {
-            let next = if n == 39 {
-                "./main.aux".to_owned()
-            } else {
-                format!("{}.aux", n + 1)
-            };
-            write(
-                &dir.path().join(format!("{n}.aux")),
-                &format!("\\newlabel{{key{n}}}{{{{{n}}}{{1}}}}\n\\@input{{{next}}}\n"),
-            );
-        }
-        let data = Fixture.data_for(&[&main], dir.path(), None).unwrap();
-        assert_eq!(data.labels.len(), 40);
-        assert_eq!(data.labels[&SmolStr::new("key39")], "39");
-    }
-
-    #[test]
-    fn non_tex_members_are_skipped() {
-        let dir = tempfile::tempdir().unwrap();
-        let bib = dir.path().join("refs.bib");
-        write(&bib, "@article{a}\n");
-        write(&dir.path().join("refs.aux"), "\\newlabel{x}{{1}{1}}\n");
-        assert_eq!(Fixture.data_for(&[&bib], dir.path(), None), None);
-    }
-
-    #[test]
-    fn realistic_aux_mix() {
-        let text = "\\relax \n\
-                    \\providecommand\\hyper@newdestlabel[2]{}\n\
-                    \\@writefile{toc}{\\contentsline {section}{\\numberline {1}Intro}{1}{section.1}}\n\
-                    \\newlabel{sec:intro}{{1}{1}{Intro}{section.1}{}}\n\
-                    \\@writefile{lof}{\\contentsline {figure}{\\numberline {1}{\\ignorespaces X}}{2}{figure.1}}\n\
-                    \\newlabel{fig:x}{{1}{2}{X}{figure.1}{}}\n\
-                    \\@input{ch1.aux}\n\
-                    \\citation{knuth1984}\n\
-                    \\gdef \\@abspage@last{3}\n";
-        let parsed = parse_aux(text);
-        assert_eq!(parsed.data.labels.len(), 2);
-        assert_eq!(parsed.data.labels[&SmolStr::new("sec:intro")], "1");
-        assert_eq!(parsed.data.labels[&SmolStr::new("fig:x")], "1");
-        assert_eq!(parsed.data.toc.len(), 1);
-        assert_eq!(parsed.inputs, vec!["ch1.aux"]);
     }
 }
 
@@ -940,43 +621,5 @@ mod audit_acquisition_tests {
         assert!(db.resolve_labels().is_defined(&child, "parent"));
         std::fs::write(&main, "% !TeX root = chapters/ch.tex\n").unwrap();
         assert!(!acquire_parents(&mut db, project, &child, None));
-    }
-    #[test]
-    fn job_name_maps_artifacts_without_renaming_child_aux() {
-        let dir = tempfile::tempdir().unwrap();
-        let main = dir.path().join("main.tex");
-        let child = dir.path().join("child.tex");
-        std::fs::create_dir_all(dir.path().join("out")).unwrap();
-        std::fs::write(
-            dir.path().join("out/thesis.aux"),
-            "\\newlabel{main}{{7}{1}}\n\\@input{child.aux}",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("out/child.aux"),
-            "\\newlabel{child}{{8}{1}}",
-        )
-        .unwrap();
-        let mut db = IncrementalDatabase::default();
-        db.apply_change(
-            &main,
-            "\\documentclass{article}\\input{child}\\label{main}",
-            None,
-        );
-        db.apply_change(&child, "\\label{child}", None);
-        let project = db.project_id();
-        acquire_compiler(
-            &mut db,
-            project,
-            &child,
-            &BuildConfig {
-                aux_dir: Some("out".into()),
-                job_name: Some("thesis".into()),
-                ..Default::default()
-            },
-        );
-        let aux = db.aux_data(&[&main, &child], dir.path()).unwrap();
-        assert_eq!(aux.labels["main"], "7");
-        assert_eq!(aux.labels["child"], "8");
     }
 }

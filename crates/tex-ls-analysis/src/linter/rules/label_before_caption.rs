@@ -50,7 +50,7 @@
 //! caption specifically: inserting after a nested `subfigure`'s caption would
 //! move the label into that subfigure and relabel it.
 //!
-//! The fix owes correctness, never layout (AGENTS.md tenet 1). It re-inserts the
+//! The fix owes correctness, never layout. It re-inserts the
 //! label glued to its target and leaves the line break to the formatter. In a
 //! float, `\caption{…}\label{…}` is byte-equivalent to a separated spelling
 //! because the body is in vertical mode. In a list,
@@ -689,28 +689,17 @@ fn line_head(first: &SyntaxToken) -> Option<(usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if LabelBeforeCaption.interests().contains(&el.kind()) {
-                LabelBeforeCaption.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if LabelBeforeCaption.interests().contains(&el.kind()) {
+                    LabelBeforeCaption.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     fn fixed(src: &str) -> String {

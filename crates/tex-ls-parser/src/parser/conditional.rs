@@ -35,7 +35,7 @@
 //!
 //! Both are curated compiled-in facts, on the same footing as the verbatim and
 //! math environment tables: static lexical knowledge, never the mutable signature
-//! database (`AGENTS.md` decision #8). A missing entry costs a desynced stack in
+//! database. A missing entry costs a desynced stack in
 //! the linter and a demoted (never a mis-built) node in the parser, so the set
 //! extends freely.
 //!

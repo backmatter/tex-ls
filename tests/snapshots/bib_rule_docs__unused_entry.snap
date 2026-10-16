@@ -4,7 +4,7 @@ expression: render_rule_doc(rule.as_ref())
 ---
 ## `unused-entry`
 
-Hint when a bibliography entry is unused in every complete, rooted document that loads this file. Disabled by default for shared libraries. Wildcard citations count as use; incomplete or unrooted namespaces produce no hints.
+Hint when a bibliography entry is unused in every complete, rooted document that loads this file. Disabled by default for shared libraries. Wildcard citations and reachable literal entry dependencies count as use; incomplete or unrooted namespaces produce no hints.
 
 This rule is **disabled by default**; enable it with `select`.
 

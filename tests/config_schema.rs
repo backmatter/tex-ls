@@ -49,6 +49,8 @@ root = "main.tex"
 
 [commands.eqrefs]
 like = "cref"
+argument-index = 1
+prefix = "section:"
 
 [environments.myenv]
 like = "align"
@@ -189,6 +191,7 @@ fn schema_rejects_invalid_enums_and_types() {
         "[format]\nmath-wrap = 'never'",
         "[format]\nline-ending = 'cr'",
         "[lint]\nselect = 'duplicate-label'",
+        "[commands.wrapper]\nlike = 'label'\nargument-index = 256",
         "[environments.eqnarray]\nbegin = '\\bea'",
     ] {
         assert!(

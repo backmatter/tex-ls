@@ -7,4 +7,5 @@ node_modules/.bin/**
 **/*.map
 **/*.ts
 .vscode-test/**
+target/**
 *.vsix

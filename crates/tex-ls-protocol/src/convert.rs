@@ -1,5 +1,17 @@
 //! Convert operations.
-use super::*;
+use lsp_types::{Location, Position, Range, Uri};
+use rowan::TextRange;
+#[cfg(test)]
+use rowan::TextSize;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+use tex_ls_analysis::{
+    incremental::Analysis,
+    source::{FileKind, file_kind_or_tex},
+    text::{LineIndex, PositionEncoding},
+};
 
 /// Map a document URI to the path the salsa file cache is keyed by. For a `file:`
 /// URI this is the real filesystem path (percent-decoded), so `\input`/bib
@@ -164,6 +176,66 @@ pub fn byte_range_to_lsp(idx: &LineIndex, start: usize, end: usize) -> Range {
         start: Position::new(sl, sc),
         end: Position::new(el, ec),
     }
+}
+
+/// Build an LSP [`Location`] from a definer file's path and a byte range in its
+/// text. A path that cannot form a `file://` URI yields `None` (skipped).
+pub fn location_for(path: &Path, idx: &LineIndex, range: TextRange) -> Option<Location> {
+    Some(Location {
+        uri: path_to_uri(path)?,
+        range: byte_range_to_lsp(idx, usize::from(range.start()), usize::from(range.end())),
+    })
+}
+
+/// Drop duplicate locations (same URI + range), which can arise when several keys
+/// in a list command resolve to the same site.
+pub fn dedup_locations(locations: Vec<Option<Location>>) -> Vec<Location> {
+    let mut seen = HashSet::new();
+    locations
+        .into_iter()
+        .flatten()
+        .filter(|loc| seen.insert((loc.uri.as_str().to_owned(), loc.range.start, loc.range.end)))
+        .collect()
+}
+
+/// Group conversion by requested path, preserving alias URIs and response order.
+pub(crate) fn locations_for_ranges<'a>(
+    snapshot: &Analysis,
+    ranges: impl IntoIterator<Item = (&'a Path, TextRange)>,
+    encoding: PositionEncoding,
+) -> Vec<Option<Location>> {
+    let mut files: HashMap<&Path, Vec<(usize, TextRange)>> = HashMap::new();
+    let mut locations = Vec::new();
+    for (path, range) in ranges {
+        files
+            .entry(path)
+            .or_default()
+            .push((locations.len(), range));
+        locations.push(None);
+    }
+    for (path, mut ranges) in files {
+        let Some(file) = snapshot.lookup_file(path) else {
+            continue;
+        };
+        let Some(uri) = path_to_uri(path) else {
+            continue;
+        };
+        let index = snapshot.file_line_index(file, encoding);
+        let mut cursor = index.position_cursor();
+        if !ranges
+            .windows(2)
+            .all(|pair| pair[0].1.start() <= pair[1].1.start())
+        {
+            ranges.sort_unstable_by_key(|(_, range)| range.start());
+        }
+        for (slot, range) in ranges {
+            locations[slot] = Some(Location {
+                uri: uri.clone(),
+                range: lsp_range_with_cursor(&mut cursor, range),
+            });
+        }
+    }
+    locations
 }
 
 #[cfg(test)]

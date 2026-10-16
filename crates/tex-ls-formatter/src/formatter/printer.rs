@@ -9,6 +9,16 @@ use super::ir::Ir;
 use super::style::FormatStyle;
 use std::rc::Rc;
 
+#[cfg(test)]
+thread_local! {
+    static FIT_SEED_ITEMS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_fit_seed_item() {
+    FIT_SEED_ITEMS.with(|count| count.set(count.get() + 1));
+}
+
 /// Lexicographic cost for a source-break-aware paragraph layout.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct LayoutCost {
@@ -138,6 +148,50 @@ enum Cmd<'a> {
         index: usize,
         prefix: Option<ActivePrefix<'a>>,
     },
+}
+
+/// Read the printer stack in print order without inspecting later lines.
+struct RestSeeds<'a, 'stack> {
+    commands: std::iter::Rev<std::slice::Iter<'stack, Cmd<'a>>>,
+    fill: Option<(Mode, std::slice::Iter<'a, Ir>)>,
+}
+
+impl<'a, 'stack> RestSeeds<'a, 'stack> {
+    fn new(commands: &'stack [Cmd<'a>]) -> Self {
+        Self {
+            commands: commands.iter().rev(),
+            fill: None,
+        }
+    }
+}
+
+impl<'a> Iterator for RestSeeds<'a, '_> {
+    type Item = (Mode, bool, &'a Ir);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (mode, node) = loop {
+            if let Some((mode, parts)) = &mut self.fill {
+                if let Some(part) = parts.next() {
+                    break (*mode, part);
+                }
+                self.fill = None;
+            }
+            match self.commands.next()? {
+                Cmd::Node { mode, node, .. } => break (*mode, *node),
+                Cmd::Fill { mode, parts, .. } => {
+                    self.fill = Some((*mode, parts.iter()));
+                }
+                Cmd::PreferredFill {
+                    mode, atoms, index, ..
+                } => {
+                    break (*mode, &atoms[*index]);
+                }
+            }
+        };
+        #[cfg(test)]
+        record_fit_seed_item();
+        Some((mode, mode == Mode::Flat, node))
+    }
 }
 
 pub(crate) struct Printer {
@@ -648,6 +702,198 @@ impl Printer {
             .enumerate()
             .filter_map(|(i, &is_authored)| is_authored.then_some(gap_positions[i]))
             .collect();
+        // These costs depend only on the source gaps, not the candidate line.
+        // Precompute them instead of scanning authored anchors at every edge.
+        let mut anchor_counts = Vec::with_capacity(n);
+        anchor_counts.push(0usize);
+        for &authored in preferred {
+            anchor_counts.push(anchor_counts.last().copied().unwrap_or(0) + usize::from(authored));
+        }
+        let displacements: Vec<usize> = gap_positions
+            .iter()
+            .map(|&position| {
+                let at = authored_positions.partition_point(|&anchor| anchor < position);
+                authored_positions
+                    .get(at)
+                    .into_iter()
+                    .chain(
+                        at.checked_sub(1)
+                            .and_then(|prior| authored_positions.get(prior)),
+                    )
+                    .map(|&anchor| anchor.abs_diff(position))
+                    .min()
+                    .unwrap_or(0)
+            })
+            .collect();
+        let continuation_col = prefix.map_or(indent, |p| p.line.chars().count());
+        let next_authored_end =
+            (self.line_width.checked_add(1) == Some(continuation_col)).then(|| {
+                let mut ends = vec![n; n];
+                let mut next = n;
+                for gap in (0..n - 1).rev() {
+                    if preferred[gap] {
+                        next = gap + 1;
+                    }
+                    ends[gap] = next;
+                }
+                ends
+            });
+        let target = target.clamp(1, self.line_width.max(1));
+
+        let mut costs: Vec<Option<LayoutCost>> = vec![None; n + 1];
+        let mut previous: Vec<Option<usize>> = vec![None; n + 1];
+        costs[0] = Some(LayoutCost::default());
+
+        #[cfg(test)]
+        let mut edges = 0usize;
+        for start in 0..n {
+            let Some(base_cost) = costs[start] else {
+                continue;
+            };
+            let base_col = if start == 0 {
+                first_col
+            } else {
+                continuation_col
+            };
+            let mut last_fitting_length = None;
+            // Beyond width + one space, merging continuation lines strictly
+            // reduces overflow. At exactly width + one, suffix overflow is
+            // independent of breaks: preserving precisely the authored gaps
+            // uniquely minimizes changed_breaks. Both cases need only one edge.
+            let fixed_end = if start == 0 {
+                None
+            } else if continuation_col > self.line_width.saturating_add(1) {
+                Some(n)
+            } else {
+                next_authored_end.as_ref().map(|ends| ends[start])
+            };
+            let first_end = fixed_end.unwrap_or(start + 1);
+            let last_end = fixed_end.unwrap_or(n);
+            for end in first_end..=last_end {
+                #[cfg(test)]
+                {
+                    edges += 1;
+                }
+                let content_width = sums[end]
+                    .saturating_sub(sums[start])
+                    .saturating_add(end.saturating_sub(start + 1));
+                let length = base_col.saturating_add(content_width);
+                let next_length =
+                    (end < n).then(|| length.saturating_add(1).saturating_add(widths[end]));
+                let final_line = end == n;
+                let overflow = length.saturating_sub(self.line_width);
+                if overflow == 0 {
+                    last_fitting_length = Some(length);
+                } else if last_fitting_length
+                    .is_some_and(|fitting: usize| fitting.saturating_add(1) > continuation_col)
+                    || (last_fitting_length.is_none()
+                        && end > start + 1
+                        && continuation_col <= self.line_width)
+                {
+                    // Splitting at a fitting prefix of length L has less
+                    // overflow than joining the remaining content when L+1>C,
+                    // where C is the continuation column. If the first atom
+                    // already overflows, keep its singleton edge: joining later
+                    // content adds its width plus one to overflow, whereas a
+                    // continuation at C<=width adds at most the content width.
+                    break;
+                }
+
+                let removed_anchors = anchor_counts[end - 1] - anchor_counts[start];
+                let new_break = usize::from(!final_line && !preferred[end - 1]);
+                let displacement = if new_break == 0 {
+                    0
+                } else {
+                    displacements[end - 1]
+                };
+                let underflow = if final_line
+                    || length >= target
+                    || next_length.is_some_and(|next| next >= target)
+                {
+                    0
+                } else {
+                    target - length
+                };
+                let segment = LayoutCost {
+                    overflow,
+                    underflow,
+                    changed_breaks: removed_anchors + new_break,
+                    displacement,
+                    raggedness: if final_line {
+                        0
+                    } else {
+                        target.abs_diff(length)
+                    },
+                    lines: 1,
+                };
+                let candidate = base_cost.add(segment);
+                if costs[end].is_none_or(|cost| candidate < cost) {
+                    costs[end] = Some(candidate);
+                    previous[end] = Some(start);
+                }
+            }
+        }
+
+        // Count candidate edges in tests rather than assert wall-clock timing.
+        #[cfg(test)]
+        if continuation_col > self.line_width || widths.iter().all(|&width| width > self.line_width)
+        {
+            assert!(
+                edges <= n * 2,
+                "overflowing fills must consider at most two edges per atom: {edges} for {n}"
+            );
+        }
+        let mut breaks = vec![false; n - 1];
+        let mut cursor = n;
+        while let Some(prior) = previous[cursor] {
+            if prior > 0 {
+                breaks[prior - 1] = true;
+            }
+            cursor = prior;
+        }
+        breaks.into()
+    }
+
+    // Deliberately retain the scan-based implementation as a test-only
+    // exhaustive oracle for edge costs, tie order and dominance pruning.
+    #[cfg(test)]
+    fn stable_breaks_reference(
+        &self,
+        first_col: usize,
+        indent: usize,
+        prefix: Option<ActivePrefix<'_>>,
+        atoms: &[Ir],
+        preferred: &[bool],
+        target: usize,
+    ) -> Rc<[bool]> {
+        let n = atoms.len();
+        if n < 2 {
+            return Vec::new().into();
+        }
+        debug_assert_eq!(preferred.len(), n - 1);
+
+        let widths: Vec<usize> = atoms
+            .iter()
+            .map(|atom| {
+                self.flat_width(atom)
+                    .unwrap_or(self.line_width.saturating_add(1))
+            })
+            .collect();
+        let mut sums = Vec::with_capacity(n + 1);
+        sums.push(0usize);
+        for &width in &widths {
+            sums.push(sums.last().copied().unwrap_or(0).saturating_add(width));
+        }
+        // Source positions of the gaps in the normalized, space-joined run. They
+        // are used only to rank displacement from the nearest authored anchor.
+        let gap_positions: Vec<usize> = (0..n - 1)
+            .map(|gap| sums[gap + 1].saturating_add(gap + 1))
+            .collect();
+        let authored_positions: Vec<usize> = preferred
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &is_authored)| is_authored.then_some(gap_positions[i]))
+            .collect();
         let continuation_col = prefix.map_or(indent, |p| p.line.chars().count());
         let target = target.clamp(1, self.line_width.max(1));
 
@@ -664,7 +910,6 @@ impl Printer {
             } else {
                 continuation_col
             };
-            let mut saw_non_overflow = false;
             for end in start + 1..=n {
                 let content_width = sums[end]
                     .saturating_sub(sums[start])
@@ -674,12 +919,6 @@ impl Printer {
                     (end < n).then(|| length.saturating_add(1).saturating_add(widths[end]));
                 let final_line = end == n;
                 let overflow = length.saturating_sub(self.line_width);
-                if overflow == 0 {
-                    saw_non_overflow = true;
-                } else if saw_non_overflow {
-                    break;
-                }
-
                 let removed_anchors = if end > start + 1 {
                     preferred[start..end - 1]
                         .iter()
@@ -1126,30 +1365,18 @@ impl Printer {
     /// command keeps its already-decided mode. A seeding adapter over
     /// [`Self::line_fits`].
     fn rest_fits(&self, start_col: usize, rest: &[Cmd]) -> bool {
-        // Seed the work stack from the printer stack (`rest` is bottom→top; `pop`
-        // takes the top, i.e. the next thing to print). A `Cmd::Fill`'s parts are
-        // pushed reversed so they `pop` back in fill order.
+        // `rest` is bottom→top; read commands in reverse, and fill parts in
+        // forward order, matching the old reversed-push/pop traversal.
         // A stack command's `Flat` is a *verified* flat (the honest contract:
         // the printer only dispatches `Flat` after measuring the whole flat
         // rendering), so it is seeded verified and pins nested groups exactly
         // as the run loop will.
-        let mut work: Vec<(Mode, bool, &Ir)> = Vec::new();
-        for cmd in rest {
-            match cmd {
-                Cmd::Node { mode, node, .. } => work.push((*mode, *mode == Mode::Flat, node)),
-                Cmd::Fill { mode, parts, .. } => {
-                    for part in parts.iter().rev() {
-                        work.push((*mode, *mode == Mode::Flat, part));
-                    }
-                }
-                Cmd::PreferredFill {
-                    mode, atoms, index, ..
-                } => {
-                    work.push((*mode, *mode == Mode::Flat, &atoms[*index]));
-                }
-            }
-        }
-        self.line_fits(start_col, work, CommentFit::SharesLine)
+        self.line_fits_with_seeds(
+            start_col,
+            Vec::new(),
+            CommentFit::SharesLine,
+            RestSeeds::new(rest),
+        )
     }
 
     /// Does the *first line* of `node` fit starting at `start_col`? Unlike a
@@ -1197,11 +1424,21 @@ impl Printer {
     fn line_fits(
         &self,
         start_col: usize,
-        mut work: Vec<(Mode, bool, &Ir)>,
+        work: Vec<(Mode, bool, &Ir)>,
         comments: CommentFit,
     ) -> bool {
+        self.line_fits_with_seeds(start_col, work, comments, std::iter::empty())
+    }
+
+    fn line_fits_with_seeds<'a>(
+        &self,
+        start_col: usize,
+        mut work: Vec<(Mode, bool, &'a Ir)>,
+        comments: CommentFit,
+        mut seeds: impl Iterator<Item = (Mode, bool, &'a Ir)>,
+    ) -> bool {
         let mut col = start_col;
-        while let Some((mode, verified, node)) = work.pop() {
+        while let Some((mode, verified, node)) = work.pop().or_else(|| seeds.next()) {
             match node {
                 Ir::Nil | Ir::ZeroWidth(_) => {}
                 Ir::SoftLine => {
@@ -1342,6 +1579,391 @@ impl Printer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Preserve the original eager stack adapter independently of RestSeeds.
+    fn eager_rest_fits(printer: &Printer, start_col: usize, rest: &[Cmd]) -> bool {
+        let mut work = Vec::new();
+        for command in rest {
+            match command {
+                Cmd::Node { mode, node, .. } => {
+                    record_fit_seed_item();
+                    work.push((*mode, *mode == Mode::Flat, *node));
+                }
+                Cmd::Fill { mode, parts, .. } => {
+                    for part in parts.iter().rev() {
+                        record_fit_seed_item();
+                        work.push((*mode, *mode == Mode::Flat, part));
+                    }
+                }
+                Cmd::PreferredFill {
+                    mode, atoms, index, ..
+                } => {
+                    record_fit_seed_item();
+                    work.push((*mode, *mode == Mode::Flat, &atoms[*index]));
+                }
+            }
+        }
+        printer.line_fits(start_col, work, CommentFit::SharesLine)
+    }
+
+    #[test]
+    fn lazy_fit_seeds_match_eager_stack_order_and_modes() {
+        let pool = vec![
+            Ir::Nil,
+            Ir::ZeroWidth("hidden".into()),
+            Ir::text("abc"),
+            Ir::text("λ😀"),
+            Ir::HardLine,
+            Ir::EmptyLine,
+            Ir::Line,
+            Ir::TightLine,
+            Ir::SoftLine,
+            Ir::verbatim("one\ntwo"),
+            Ir::Verbatim {
+                text: "comment".into(),
+                force_break: true,
+            },
+            Ir::group(Ir::concat([Ir::text("ab"), Ir::Line, Ir::text("c")])),
+            Ir::group_hug(Ir::concat([Ir::text("ab"), Ir::HardLine, Ir::text("c")])),
+            Ir::Group {
+                inner: Rc::new(Ir::concat([Ir::text("ab"), Ir::Line, Ir::text("c")])),
+                expand: true,
+                hug: false,
+                forced_break: false,
+            },
+            Ir::IfBreak {
+                flat: Rc::new(Ir::text("flat")),
+                broken: Rc::new(Ir::HardLine),
+            },
+            Ir::ConditionalGroupAllLines(vec![Ir::text("abcdef"), Ir::HardLine].into()),
+            Ir::Fill(vec![Ir::text("a"), Ir::Line, Ir::text("b")].into()),
+            Ir::PreferredFill {
+                atoms: vec![Ir::text("a"), Ir::text("b")].into(),
+                preferred: vec![true].into(),
+                target: 3,
+            },
+        ];
+        let modes = [Mode::Flat, Mode::FlatPrefix, Mode::Break];
+        for first in 0..pool.len() {
+            for second in 0..pool.len() {
+                let parts = [pool[first].clone(), pool[second].clone()];
+                for left_mode in modes {
+                    for right_mode in modes {
+                        for kind in 0..3 {
+                            let left = match kind {
+                                0 => Cmd::Node {
+                                    indent: 7,
+                                    mode: left_mode,
+                                    node: &parts[0],
+                                    prefix: None,
+                                },
+                                1 => Cmd::Fill {
+                                    indent: 7,
+                                    mode: left_mode,
+                                    parts: &parts,
+                                    prefix: None,
+                                    sticky: true,
+                                    hug: true,
+                                    broken: true,
+                                },
+                                _ => Cmd::PreferredFill {
+                                    indent: 7,
+                                    mode: left_mode,
+                                    atoms: &parts,
+                                    breaks: vec![true].into(),
+                                    index: first % parts.len(),
+                                    prefix: None,
+                                },
+                            };
+                            let rest = [
+                                left,
+                                Cmd::Node {
+                                    indent: 3,
+                                    mode: right_mode,
+                                    node: &parts[1],
+                                    prefix: None,
+                                },
+                            ];
+                            for width in [0, 1, 3, 8] {
+                                let printer = Printer::new(FormatStyle {
+                                    line_width: width,
+                                    ..FormatStyle::default()
+                                });
+                                for column in [0, 2, 9] {
+                                    assert_eq!(
+                                        printer.rest_fits(column, &rest),
+                                        eager_rest_fits(&printer, column, &rest),
+                                        "nodes {first}/{second}, kind {kind}, width {width}, column {column}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let printer = Printer::new(FormatStyle {
+            line_width: 5,
+            ..FormatStyle::default()
+        });
+        assert_eq!(printer.rest_fits(6, &[]), eager_rest_fits(&printer, 6, &[]));
+    }
+
+    #[test]
+    fn lazy_fit_stops_at_overflow_and_keeps_same_line_suffixes() {
+        let printer = Printer::new(FormatStyle {
+            line_width: 5,
+            ..FormatStyle::default()
+        });
+        let long = Ir::text("too long");
+        let small = Ir::text("abc");
+        let break_line = Ir::HardLine;
+        let empty = [];
+        let rest = [
+            Cmd::Node {
+                indent: 0,
+                mode: Mode::Break,
+                node: &break_line,
+                prefix: None,
+            },
+            Cmd::Node {
+                indent: 0,
+                mode: Mode::Flat,
+                node: &long,
+                prefix: None,
+            },
+            Cmd::Fill {
+                indent: 0,
+                mode: Mode::Break,
+                parts: &empty,
+                prefix: None,
+                sticky: false,
+                hug: false,
+                broken: false,
+            },
+        ];
+        FIT_SEED_ITEMS.with(|count| count.set(0));
+        assert!(!printer.rest_fits(0, &rest));
+        assert_eq!(FIT_SEED_ITEMS.with(std::cell::Cell::get), 1);
+        let suffix = [Cmd::Node {
+            indent: 0,
+            mode: Mode::Flat,
+            node: &small,
+            prefix: None,
+        }];
+        assert!(
+            !printer.group_fits(0, &small, &suffix),
+            "genuine trailing overflow still breaks the group"
+        );
+        assert!(printer.group_fits(0, &small, &[]));
+    }
+
+    #[test]
+    fn rest_fit_does_not_seed_work_after_its_first_break() {
+        let printer = Printer::new(FormatStyle::default());
+        let future = (0..4096).map(|_| Ir::text("future")).collect::<Vec<_>>();
+        let hard_line = Ir::hard_line();
+        let rest = [
+            Cmd::Fill {
+                indent: 0,
+                mode: Mode::Break,
+                parts: &future,
+                prefix: None,
+                sticky: false,
+                hug: false,
+                broken: false,
+            },
+            Cmd::Node {
+                indent: 0,
+                mode: Mode::Break,
+                node: &hard_line,
+                prefix: None,
+            },
+        ];
+        FIT_SEED_ITEMS.with(|count| count.set(0));
+        assert!(
+            printer.rest_fits(0, &rest),
+            "the next physical break ends the query"
+        );
+        let seeded = FIT_SEED_ITEMS.with(std::cell::Cell::get);
+        assert_eq!(
+            seeded, 1,
+            "future commands and fill parts must stay untouched"
+        );
+        let parts = std::iter::once(hard_line).chain(future).collect::<Vec<_>>();
+        let inside_fill = [Cmd::Fill {
+            indent: 0,
+            mode: Mode::Break,
+            parts: &parts,
+            prefix: None,
+            sticky: false,
+            hug: false,
+            broken: false,
+        }];
+        FIT_SEED_ITEMS.with(|count| count.set(0));
+        assert!(printer.rest_fits(0, &inside_fill));
+        assert_eq!(
+            FIT_SEED_ITEMS.with(std::cell::Cell::get),
+            1,
+            "later parts of the same fill must stay untouched"
+        );
+        FIT_SEED_ITEMS.with(|count| count.set(0));
+        assert!(eager_rest_fits(&printer, 0, &inside_fill));
+        assert_eq!(FIT_SEED_ITEMS.with(std::cell::Cell::get), parts.len());
+    }
+
+    #[test]
+    fn real_paragraphs_keep_output_without_seeding_future_blocks() {
+        use crate::formatter::format_node;
+        use tex_ls_parser::parser::parse;
+        const COUNT: usize = 1024;
+        let source = "ordinary alpha beta.\n\n".repeat(COUNT);
+        let parsed = parse(&source);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.syntax().text().to_string(), source, "lossless input");
+        FIT_SEED_ITEMS.with(|count| count.set(0));
+        let formatted = format_node(&parsed.syntax(), FormatStyle::default()).unwrap();
+        let seeded = FIT_SEED_ITEMS.with(std::cell::Cell::get);
+        assert_eq!(
+            formatted,
+            format!("{}\n", source.trim_end()),
+            "exact canonical bytes"
+        );
+        let after = parse(&formatted);
+        assert!(after.errors.is_empty());
+        assert_eq!(
+            after.syntax().text().to_string(),
+            formatted,
+            "lossless output"
+        );
+        assert_eq!(
+            format_node(&after.syntax(), FormatStyle::default()).unwrap(),
+            formatted,
+            "idempotence"
+        );
+        assert!(
+            seeded >= COUNT - 1,
+            "actual paragraph groups must exercise the fit continuation"
+        );
+        assert!(
+            seeded <= COUNT * 8,
+            "fit continuation exceeds linear work: {seeded} seeds for {COUNT} paragraphs"
+        );
+    }
+
+    #[test]
+    fn long_overflowing_fills_have_linear_candidate_counts() {
+        let printer = Printer::new(FormatStyle {
+            line_width: 80,
+            ..FormatStyle::default()
+        });
+        let atoms: Vec<_> = (0..4096).map(|_| Ir::text("x".repeat(90))).collect();
+        let preferred: Vec<_> = (0..atoms.len() - 1).map(|gap| gap % 5 == 0).collect();
+        for margin in [0, 80, 81, 82] {
+            // stable_breaks asserts its candidate count under cfg(test).
+            let breaks = printer.stable_breaks(margin, margin, None, &atoms, &preferred, 72);
+            let expected = if margin <= 80 {
+                vec![true; preferred.len()]
+            } else if margin == 81 {
+                preferred.clone()
+            } else {
+                vec![false; preferred.len()]
+            };
+            assert_eq!(&*breaks, &expected);
+        }
+    }
+
+    #[test]
+    fn overflowing_margin_preserves_authored_suffix_gaps() {
+        let printer = Printer::new(FormatStyle {
+            line_width: 5,
+            ..FormatStyle::default()
+        });
+        let atoms = [
+            Ir::Text("".into()),
+            Ir::text("a"),
+            Ir::Text("".into()),
+            Ir::text("bb"),
+            Ir::text("c"),
+        ];
+        let preferred = [true, false, true, false];
+        for first in [0, 6, 20] {
+            assert_eq!(
+                printer.stable_breaks(first, 6, None, &atoms, &preferred, 4),
+                printer.stable_breaks_reference(first, 6, None, &atoms, &preferred, 4)
+            );
+        }
+        assert_eq!(
+            &*printer.stable_breaks(6, 6, None, &atoms, &preferred, 4),
+            &preferred
+        );
+    }
+
+    #[test]
+    fn preferred_fill_does_not_increase_overflow_to_reach_wide_indentation() {
+        let printer = Printer::new(FormatStyle {
+            line_width: 80,
+            ..FormatStyle::default()
+        });
+        let atoms = [Ir::text("a".repeat(40)), Ir::text("b".repeat(40))];
+        assert_eq!(
+            &*printer.stable_breaks(0, 100, None, &atoms, &[true], 72),
+            &[false]
+        );
+        // Even an indent that fits can make a very short fitting prefix a
+        // worse split point than retaining a small overflow on the first line.
+        let printer = Printer::new(FormatStyle {
+            line_width: 5,
+            ..FormatStyle::default()
+        });
+        let atoms = [Ir::text("a"), Ir::text("bbbbb")];
+        assert_eq!(
+            &*printer.stable_breaks(0, 5, None, &atoms, &[true], 5),
+            &[false]
+        );
+    }
+
+    #[test]
+    fn optimized_preferred_breaks_match_scan_reference() {
+        // Mixed empty, narrow and overflowing atoms; authored masks; prefixes
+        // and indent beyond the width all participate in exact tie decisions.
+        for width in [0, 1, 5, 12] {
+            let printer = Printer::new(FormatStyle {
+                line_width: width,
+                ..FormatStyle::default()
+            });
+            for seed in 0usize..256 {
+                let atoms: Vec<_> = (0..6)
+                    .map(|i| {
+                        let size = [0, 1, 4, 17][(seed >> (i % 4 * 2)) & 3];
+                        Ir::Text("x".repeat(size).into())
+                    })
+                    .collect();
+                let preferred: Vec<_> = (0..5).map(|i| seed & (1 << i) != 0).collect();
+                for (first, indent) in [(0, 0), (3, 1), (20, width), (0, width + 1)] {
+                    for target in [0, width / 2, width + 1] {
+                        for prefix in [
+                            None,
+                            Some(ActivePrefix {
+                                line: "%%% ",
+                                blank: None,
+                            }),
+                        ] {
+                            let actual = printer
+                                .stable_breaks(first, indent, prefix, &atoms, &preferred, target);
+                            let reference = printer.stable_breaks_reference(
+                                first, indent, prefix, &atoms, &preferred, target,
+                            );
+                            assert_eq!(
+                                actual, reference,
+                                "width={width} seed={seed} first={first} indent={indent} target={target}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn tight_line_renders_glued_but_keeps_the_line_fit_budget() {

@@ -47,44 +47,21 @@ use rowan::TextSize;
 
 use super::lint_directive_verb;
 use crate::formatter::ir::Ir;
+use crate::formatter::output::{Tail, finish_output, resolve_line_ending};
 use crate::formatter::printer::Printer;
-use crate::formatter::style::{FormatStyle, LineEnding, apply_line_ending, detect_line_ending};
+use crate::formatter::style::FormatStyle;
 use tex_ls_parser::bib::ast;
 use tex_ls_parser::bib::parse;
 use tex_ls_parser::bib::semantic::{BibFieldDb, FieldCategory, builtin};
 use tex_ls_parser::bib::syntax::{SyntaxKind, SyntaxNode};
 use tex_ls_parser::directives::Verb;
 
-/// Why a `.bib` document could not be formatted. Mirrors
-/// [`crate::formatter::core::FormatError`] but over the bib [`SyntaxKind`]; the
-/// formatter only operates on a clean parse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FormatError {
-    /// The input parsed with `count` syntax error(s); the formatter only supports
-    /// input the parser accepts without diagnostics.
-    ParseErrors { count: usize },
-    /// The CST contains an `ERROR` token the lowering does not handle.
-    UnsupportedConstruct { kind: SyntaxKind, snippet: String },
+define_format_error! {
+    /// Why a `.bib` document could not be formatted. Mirrors
+    /// [`crate::formatter::core::FormatError`] but over the bib [`SyntaxKind`]; the
+    /// formatter only operates on a clean parse.
+    SyntaxKind
 }
-
-impl std::fmt::Display for FormatError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ParseErrors { count } => write!(
-                f,
-                "input contains {count} parser diagnostic(s); formatter only supports parseable input"
-            ),
-            Self::UnsupportedConstruct { kind, snippet } => {
-                write!(
-                    f,
-                    "unsupported construct for formatter: {kind:?} near {snippet:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for FormatError {}
 
 /// Format `input` with the default [`FormatStyle`].
 pub fn format(input: &str) -> Result<String, FormatError> {
@@ -110,21 +87,12 @@ pub fn format_node(root: &SyntaxNode, style: FormatStyle) -> Result<String, Form
     validate_supported_tokens(root)?;
 
     let mut formatted = format_root(root, style);
-    // Normalize the document's trailing edge: drop trailing blank lines and
-    // per-line trailing whitespace at EOF, then guarantee exactly one final
-    // newline. Empty output stays empty. Copied verbatim from the LaTeX formatter
-    // (`crate::formatter::core::format_node`) for an identical EOF guarantee.
-    let trimmed_len = formatted.trim_end_matches([' ', '\t', '\n', '\r']).len();
-    formatted.truncate(trimmed_len);
-    if !formatted.is_empty() {
-        formatted.push('\n');
-    }
-    let ending = if style.line_ending == LineEnding::Auto {
-        style.line_ending.resolve(detect_line_ending(&root.text()))
-    } else {
-        style.line_ending.resolve(LineEnding::Lf)
-    };
-    apply_line_ending(&mut formatted, ending);
+    finish_output(
+        &mut formatted,
+        resolve_line_ending(root, style),
+        Tail::Trivia,
+        true,
+    );
     Ok(formatted)
 }
 
@@ -293,7 +261,7 @@ fn lower_entry(entry: &SyntaxNode, cx: Lower) -> Ir {
 /// Where each `%` comment in an entry goes. Both maps are keyed by a field's start
 /// offset rather than by index, because the caller emits fields in *canonical* order.
 /// See [`place_comments`].
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct CommentPlacement {
     /// Comment lines printed above a field's line, in source order.
     leading: HashMap<TextSize, Vec<String>>,
@@ -320,29 +288,48 @@ fn place_comments(entry: &SyntaxNode) -> CommentPlacement {
     let base = entry.text_range().start();
     let source = entry.to_string();
     let mut placement = CommentPlacement::default();
+    let mut next_field = 0;
+    let mut scanned_source = 0;
+    let mut last_break = None;
 
     for comment in entry
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMENT)
     {
         let start = comment.text_range().start();
-        // Trailing whitespace is dropped so a re-read yields the identical text.
-        let text = comment.to_string().trim_end().to_string();
-
-        let next = fields.iter().find(|field| field.text_range().end() > start);
-        // A comment *inside* a field (`title = % pick one` … ) has no preceding field
-        // on its line to ride, so it always hoists above that field's line.
-        let inside_next = next.is_some_and(|field| field.text_range().start() <= start);
-        let prev = fields
+        let local_start = usize::from(start - base);
+        while next_field < fields.len() && fields[next_field].text_range().end() <= start {
+            comment_placement_step();
+            next_field += 1;
+        }
+        let next = fields.get(next_field);
+        let prev = next_field
+            .checked_sub(1)
+            .and_then(|index| fields.get(index));
+        // Only the gap after the previous field can decide same-line ownership.
+        // Skip its value, and visit each remaining source byte at most once.
+        let scan_start = prev.map_or(scanned_source, |field| {
+            scanned_source.max(usize::from(field.text_range().end() - base))
+        });
+        for (offset, byte) in source.as_bytes()[scan_start..local_start]
             .iter()
-            .rev()
-            .find(|field| field.text_range().end() <= start);
-
+            .enumerate()
+        {
+            comment_placement_step();
+            if matches!(byte, b'\r' | b'\n') {
+                last_break = Some(scan_start + offset);
+            }
+        }
+        scanned_source = local_start;
+        // A comment within a field belongs above that field, even when a
+        // previous field ended on the same physical line.
+        let inside_next = next.is_some_and(|field| field.text_range().start() <= start);
         let same_line = prev.filter(|field| {
             !inside_next
-                && !source[usize::from(field.text_range().end() - base)..usize::from(start - base)]
-                    .contains('\n')
+                && last_break
+                    .is_none_or(|offset| offset < usize::from(field.text_range().end() - base))
         });
+        let text = comment.to_string();
         match (same_line, next) {
             (Some(field), _) => {
                 placement.same_line.insert(field.text_range().start(), text);
@@ -806,5 +793,115 @@ mod tests {
             split_top_level_and("Knuth, Donald E."),
             ["Knuth, Donald E."]
         );
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static COMMENT_PLACEMENT_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn comment_placement_step() {
+    #[cfg(test)]
+    COMMENT_PLACEMENT_STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+#[cfg(test)]
+mod comment_placement_review_tests {
+    use super::*;
+
+    #[test]
+    fn wide_comment_placement_visits_source_and_fields_once() {
+        let fields = 2048;
+        let source = format!(
+            "@misc{{k,\n{}}}",
+            (0..fields)
+                .map(|i| format!("f{i}={{x}}, % trailing{i}\n% leading{i}\n"))
+                .collect::<String>()
+        );
+        let parsed = parse(&source);
+        assert!(parsed.errors.is_empty());
+        let entry = parsed.syntax().children().next().unwrap();
+        COMMENT_PLACEMENT_STEPS.with(|steps| steps.set(0));
+        let placement = place_comments(&entry);
+        let work = COMMENT_PLACEMENT_STEPS.with(|steps| steps.get());
+        assert_eq!(placement.same_line.len(), fields);
+        assert_eq!(
+            placement.leading.values().map(Vec::len).sum::<usize>() + placement.trailing.len(),
+            fields
+        );
+        assert!(
+            work <= source.len() + fields,
+            "{work} visits for {} source bytes and {fields} fields",
+            source.len()
+        );
+    }
+}
+
+#[cfg(test)]
+// The original ownership traversal is retained; comment text is projected
+// without trimming, matching the exact-byte preservation contract.
+fn reference_place_comments(entry: &SyntaxNode) -> CommentPlacement {
+    let fields: Vec<SyntaxNode> = ast::fields(entry).collect();
+    let base = entry.text_range().start();
+    let source = entry.to_string();
+    let mut placement = CommentPlacement::default();
+
+    for comment in entry
+        .descendants()
+        .filter(|node| node.kind() == SyntaxKind::COMMENT)
+    {
+        let start = comment.text_range().start();
+        let text = comment.to_string();
+
+        let next = fields.iter().find(|field| field.text_range().end() > start);
+        // A comment *inside* a field (`title = % pick one` … ) has no preceding field
+        // on its line to ride, so it always hoists above that field's line.
+        let inside_next = next.is_some_and(|field| field.text_range().start() <= start);
+        let prev = fields
+            .iter()
+            .rev()
+            .find(|field| field.text_range().end() <= start);
+
+        let same_line = prev.filter(|field| {
+            !inside_next
+                && !source[usize::from(field.text_range().end() - base)..usize::from(start - base)]
+                    .contains('\n')
+        });
+        match (same_line, next) {
+            (Some(field), _) => {
+                placement.same_line.insert(field.text_range().start(), text);
+            }
+            (None, Some(field)) => placement
+                .leading
+                .entry(field.text_range().start())
+                .or_default()
+                .push(text),
+            (None, None) => placement.trailing.push(text),
+        }
+    }
+    placement
+}
+
+#[cfg(test)]
+mod comment_placement_reference_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_comment_ownership_matches_independent_original_traversal() {
+        for ending in ["\n", "\r\n"] {
+            for gap in ["", " ", "\n", "\n\n"] {
+                let source = format!("@misc{{k,% before\n title=% inside\n {{T}},% after\n% next\n author={{A}}{gap}% final\n}}").replace('\n', ending);
+                let parsed = parse(&source);
+                assert!(parsed.errors.is_empty());
+                let entry = parsed.syntax().children().next().unwrap();
+                assert_eq!(
+                    place_comments(&entry),
+                    reference_place_comments(&entry),
+                    "{source:?}"
+                );
+            }
+        }
     }
 }

@@ -246,7 +246,7 @@ pub(super) fn statement_leading_command_comment_prefix(
             SyntaxElement::Node(node)
                 if node.kind() == SyntaxKind::COMMAND
                     && !cx.suppressed(node.text_range())
-                    && !(cx.is_dtx && contains_indented_dtx_comment(node)) =>
+                    && !(cx.source.is_dtx && contains_indented_dtx_comment(node)) =>
             {
                 saw_command = true;
             }
@@ -274,7 +274,7 @@ pub(super) fn statement_leading_command_comment_prefix(
 pub(super) fn statement_leading_comment(node: &SyntaxNode, cx: LowerCtx<'_>) -> Option<SyntaxNode> {
     let construct = node.first_child()?;
     if cx.suppressed(construct.text_range())
-        || cx.is_dtx && contains_indented_dtx_comment(&construct)
+        || cx.source.is_dtx && contains_indented_dtx_comment(&construct)
     {
         return None;
     }

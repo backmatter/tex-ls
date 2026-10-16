@@ -18,11 +18,13 @@ use tex_ls_parser::syntax::{SyntaxKind, SyntaxNode};
 /// Source facts that invalidate a built-in file argument interpretation.
 /// Earlier calls retain their role; a local declaration makes later calls
 /// unproved, without assuming that its replacement preserves the built-in.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileRoleContext {
     protected: tex_ls_parser::semantic::context::TokenListContexts,
     operands: tex_ls_parser::semantic::context::PrimitiveOperandContexts,
     overrides: std::collections::BTreeMap<String, TextSize>,
     graphics: Vec<(TextSize, Vec<PathBuf>)>,
+    commands_by_end: Vec<rowan::TextRange>,
 }
 
 impl FileRoleContext {
@@ -63,12 +65,19 @@ impl FileRoleContext {
             operands: operands.clone(),
             overrides,
             graphics: Vec::new(),
+            commands_by_end: Vec::new(),
         };
         use tex_ls_parser::ast::{AstNode, Group, nth_group};
-        for command in root.descendants().filter(|node| {
-            node.kind() == SyntaxKind::COMMAND
-                && command_name(node).as_deref() == Some("graphicspath")
-        }) {
+        for command in root
+            .descendants()
+            .filter(|node| matches!(node.kind(), SyntaxKind::COMMAND | SyntaxKind::BEGIN))
+        {
+            result.commands_by_end.push(command.text_range());
+            if command.kind() != SyntaxKind::COMMAND
+                || command_name(&command).as_deref() != Some("graphicspath")
+            {
+                continue;
+            }
             if !result.allows(&command) {
                 continue;
             }
@@ -81,7 +90,18 @@ impl FileRoleContext {
                 .graphics
                 .push((command.text_range().start(), directories));
         }
+        // Stable ordering preserves source-preorder ties for nested commands.
+        result.commands_by_end.sort_by_key(|range| range.end());
         result
+    }
+
+    /// The last COMMAND/BEGIN ending strictly before a cursor, matching source
+    /// preorder for equal ends. Cached source facts bound same-line fallback work.
+    pub fn preceding_command_range(&self, at: TextSize) -> Option<rowan::TextRange> {
+        let next = self
+            .commands_by_end
+            .partition_point(|range| range.end() < at);
+        next.checked_sub(1).map(|index| self.commands_by_end[index])
     }
 
     pub(super) fn graphics_before(&self, start: TextSize) -> Option<&[PathBuf]> {
@@ -425,28 +445,10 @@ fn file_name_spans(raw: &str, range: TextRange, list: bool) -> Vec<(&str, TextRa
     }
 }
 
-/// Split a group's inner text into comma-separated names paired with their precise
-/// source ranges, dropping empties. The document-link analog of the semantic
-/// builder's `key_spans`: each name's range is sliced off `inner_range` by byte
-/// offset (exact because trimming removes only single-byte ASCII whitespace).
-///
-/// Shared with protocol hover presentation's package-name hover (`pub`), which picks the
-/// single segment covering the cursor.
+/// Split a group's inner text into nonempty comma-separated names and source ranges.
+/// Shared with protocol package-name hover, which selects the cursor's segment.
 pub fn comma_spans(inner: &str, inner_range: TextRange) -> Vec<(&str, TextRange)> {
-    let base = inner_range.start();
-    let mut out = Vec::new();
-    let mut seg_off = 0usize;
-    for segment in inner.split(',') {
-        let name = segment.trim();
-        if !name.is_empty() {
-            let lo = segment.len() - segment.trim_start().len();
-            let start = base + TextSize::from((seg_off + lo) as u32);
-            let end = start + TextSize::from(name.len() as u32);
-            out.push((name, TextRange::new(start, end)));
-        }
-        seg_off += segment.len() + 1;
-    }
-    out
+    crate::syntax::comma_separated_spans(inner, inner_range.start()).collect()
 }
 
 #[cfg(test)]

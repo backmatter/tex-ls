@@ -230,12 +230,12 @@ impl Parser<'_> {
                 PlanArg::Group(range) => {
                     debug_assert_eq!(self.pos, range.start);
                     self.group();
-                    // Depth recovery consumed the remaining stream; the scanned
-                    // argument spans no longer describe where parsing stopped.
-                    if self.nesting_exhausted {
+                    // Recovery or a nested documentary frame can change brace
+                    // ownership. The ordinary group parser owns that recovery;
+                    // its ending invalidates any remaining scanned arguments.
+                    if self.nesting_exhausted || self.pos != range.end {
                         return;
                     }
-                    debug_assert_eq!(self.pos, range.end);
                 }
                 PlanArg::Tokens(range) => {
                     debug_assert_eq!(self.pos, range.start);

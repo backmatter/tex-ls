@@ -1,6 +1,21 @@
 //! Standard file operations over captured, root-scoped file observations.
-use super::*;
-use tex_ls_analysis::{external::command_directories_with_roles, source::normalize_path};
+#[cfg(test)]
+use crate::convert::byte_range_to_lsp;
+use crate::convert::{lsp_range_with_cursor, path_to_uri, uri_to_fs_path};
+use lsp_types::{TextEdit, Uri, WorkspaceEdit};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+#[cfg(test)]
+use tex_ls_analysis::text::LineIndex;
+use tex_ls_analysis::{
+    external::command_directories_with_roles,
+    incremental::Analysis,
+    source::{file_kind_or_tex, normalize_path},
+    text::PositionEncoding,
+};
+use tex_ls_parser::syntax::SyntaxKind;
 
 type RangeKey = (u32, u32, u32, u32);
 

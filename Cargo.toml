@@ -123,3 +123,6 @@ similar-asserts = "2.0.0"
 [[example]]
 name = "session_profile"
 required-features = ["tex-ls-browser/allocation-metrics"]
+
+[target."cfg(unix)".dependencies]
+socket2 = "0.6.5"

@@ -579,9 +579,7 @@ fn collect_gaps(root: &SyntaxNode, margined: &[TextRange]) -> Vec<Gap> {
             (Some(p), Some(n)) => {
                 !is_excluded_neighbor(p.kind())
                     && !is_excluded_neighbor(n.kind())
-                    && !margined
-                        .iter()
-                        .any(|r| r.contains(start) || r.contains(end))
+                    && !touches_margined_line(margined, start, end)
             }
             _ => false,
         };
@@ -602,6 +600,43 @@ fn collect_gaps(root: &SyntaxNode, margined: &[TextRange]) -> Vec<Gap> {
         cursor = next;
     }
     gaps
+}
+
+fn touches_margined_line(
+    margined: &[TextRange],
+    start: rowan::TextSize,
+    end: rowan::TextSize,
+) -> bool {
+    #[cfg(test)]
+    MARGIN_LOOKUP_WORK.with(|work| {
+        let (queries, probes) = work.get();
+        work.set((queries + 1, probes));
+    });
+    // Physical margined lines are sorted and disjoint. The last line starting
+    // at or before an endpoint is the only line that can contain that point.
+    [start, end].into_iter().any(|point| {
+        let after = margined.partition_point(|range| {
+            #[cfg(test)]
+            MARGIN_LOOKUP_WORK.with(|work| {
+                let (queries, probes) = work.get();
+                work.set((queries, probes + 1));
+            });
+            range.start() <= point
+        });
+        after.checked_sub(1).is_some_and(|index| {
+            #[cfg(test)]
+            MARGIN_LOOKUP_WORK.with(|work| {
+                let (queries, probes) = work.get();
+                work.set((queries, probes + 1));
+            });
+            margined[index].contains(point)
+        })
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static MARGIN_LOOKUP_WORK: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
 /// Apply `gaps` (ascending, disjoint) to `input`, replacing each gap's whole
@@ -729,6 +764,108 @@ mod tests {
             8,
         );
         assert_eq!(p.eligible_gaps, 0);
+    }
+
+    #[test]
+    fn margin_endpoint_lookup_matches_linear_reference() {
+        let candidates = [(0, 0), (0, 3), (3, 6), (8, 12), (15, 18)];
+        for mask in 0..32 {
+            let ranges: Vec<_> = candidates
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| mask & (1 << index) != 0)
+                .map(|(_, &(start, end))| TextRange::new(start.into(), end.into()))
+                .collect();
+            for start in 0..=20u32 {
+                for end in 0..=20u32 {
+                    let expected = candidates
+                        .iter()
+                        .enumerate()
+                        .any(|(index, &(left, right))| {
+                            mask & (1 << index) != 0
+                                && ((left <= start && start < right)
+                                    || (left <= end && end < right))
+                        });
+                    assert_eq!(
+                        touches_margined_line(&ranges, start.into(), end.into()),
+                        expected
+                    );
+                }
+            }
+        }
+        let maximum = u32::MAX;
+        let ranges = [TextRange::new((maximum - 2).into(), maximum.into())];
+        assert!(touches_margined_line(
+            &ranges,
+            (maximum - 1).into(),
+            maximum.into()
+        ));
+        assert!(!touches_margined_line(
+            &ranges,
+            maximum.into(),
+            maximum.into()
+        ));
+        assert!(!touches_margined_line(&[], 0.into(), maximum.into()));
+    }
+
+    #[test]
+    fn dtx_trivia_generation_has_bounded_margin_lookup_work() {
+        const COUNT: usize = 1024;
+        let documentation: String = (0..COUNT)
+            .map(|index| format!("% documentation note {index}\n"))
+            .collect();
+        let source = format!("{documentation}{}", "alpha beta\n\n".repeat(COUNT));
+        let config = LexConfig {
+            flavor: LatexFlavor::Package,
+            dtx: true,
+        };
+        let parsed = parse_with_flavor(&source, config);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let root = parsed.syntax();
+        assert_eq!(root.to_string(), source);
+        let margins = margined_line_ranges(&root);
+        assert_eq!(margins.len(), COUNT);
+        assert_eq!(margins.first().unwrap().start(), 0.into());
+        assert_eq!(
+            usize::from(margins.last().unwrap().end()),
+            documentation.len()
+        );
+        MARGIN_LOOKUP_WORK.with(|work| work.set((0, 0)));
+        let variants = trivia_perturbations(&source, config, 8);
+        let (queries, probes) = MARGIN_LOOKUP_WORK.with(std::cell::Cell::get);
+        assert_eq!(variants.eligible_gaps, COUNT);
+        assert_eq!(variants.dropped_unsafe, 0);
+        assert_eq!(variants.variants.len(), 9);
+        let bulk = variants
+            .variants
+            .iter()
+            .find(|variant| variant.label == "all-spaces-to-newlines")
+            .unwrap();
+        assert_eq!(
+            bulk.text,
+            format!("{documentation}{}", "alpha\nbeta\n\n".repeat(COUNT))
+        );
+        let original_content = node_nontrivia_content(&root);
+        let original_skeleton = skeleton(&root);
+        for variant in &variants.variants {
+            assert!(
+                variant.text.starts_with(&documentation),
+                "documentary bytes remain protected"
+            );
+            let reparsed = parse_with_flavor(&variant.text, config);
+            assert!(reparsed.errors.is_empty());
+            let rewritten = reparsed.syntax();
+            assert_eq!(rewritten.to_string(), variant.text);
+            assert_eq!(node_nontrivia_content(&rewritten), original_content);
+            assert_eq!(skeleton(&rewritten), original_skeleton);
+        }
+        assert!(queries >= COUNT);
+        let bound = 2 * (COUNT.ilog2() as usize + 2);
+        assert!(
+            probes <= queries * bound,
+            "margin lookups exceed logarithmic work: {queries} queries, {probes} probes, bound {}",
+            queries * bound
+        );
     }
 
     #[test]

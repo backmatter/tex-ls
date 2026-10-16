@@ -1,0 +1,23 @@
+---
+source: tests/bib_rule_docs.rs
+expression: render_rule_doc(rule.as_ref())
+---
+## `undefined-entry`
+
+Report literal crossref keys missing from every complete document root loading this bibliography. Proven Biber scopes also check xref, xdata, related and entryset keys. String expressions and incomplete or unrooted scopes are excluded. No automatic fix is offered.
+
+This rule is **enabled by default**.
+
+A complete document loads this resource, without a parent entry:
+
+```bib
+@misc{child,title={Draft},crossref={missing}}
+```
+
+```text
+warning: undefined-entry
+ --> references.bib:1:37
+  |
+1 | @misc{child,title={Draft},crossref={missing}}
+  |                                     ^^^^^^^ bibliography entry `missing` is referenced but not defined in its complete document roots
+```

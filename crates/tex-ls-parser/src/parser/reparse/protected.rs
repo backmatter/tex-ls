@@ -6,7 +6,8 @@
 //! `VERB` (`\verb|…|`, `\url{…}`, `\lstinline|…|`) changes that leaf's text and
 //! nothing else, exactly as a prose keystroke does for the [token
 //! tier](super::token). The splice is the same one-leaf
-//! [`SyntaxToken::replace_with`], `O(depth)` in the tree.
+//! [`SyntaxToken::replace_with`], sharing off-spine subtrees and rebuilding
+//! ancestor child arrays.
 //!
 //! What differs is the *proof*. The token tier relexes its leaf **alone** and demands
 //! one token of the same kind back. That is unavailable here: a raw capture is a kind
@@ -89,7 +90,9 @@
 
 use rowan::{GreenToken, NodeOrToken, TextRange, TextSize};
 
-use crate::parser::lexer::{Token, dtx_has_expl_signal, lex_with, lex_with_implicit_expl};
+use crate::parser::lexer::{
+    Token, dtx_has_expl_signal, lex_with_implicit_expl_offset, lex_with_offset,
+};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
 use super::leaf::{context_admits, shifted_errors, text_reads_are_inert};
@@ -117,6 +120,120 @@ pub(super) fn reparse_protected(
     candidates(&root, range)
         .into_iter()
         .find_map(|leaf| try_capture(base, edit, new_text, &leaf, range))
+}
+
+/// A builtin `\verb` body remains opaque despite unrelated source settings.
+/// Keep the head, optional star and both delimiters outside the edit. Other raw
+/// profiles may inherit listing/Fancy settings that isolation cannot reproduce.
+pub(super) fn reparse_builtin_verb(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+) -> Option<Reparsed> {
+    let range = TextRange::new(
+        TextSize::try_from(edit.range.start).ok()?,
+        TextSize::try_from(edit.range.end).ok()?,
+    );
+    candidates(&base.syntax(), range)
+        .into_iter()
+        .find_map(|leaf| {
+            if leaf.kind() != SyntaxKind::VERB {
+                return None;
+            }
+            let body = leaf.text().strip_prefix("\\verb")?;
+            if base.config.dtx && dtx_has_expl_signal(new_text) != base.implicit_expl {
+                return None;
+            }
+            let body = body.strip_prefix('*').unwrap_or(body);
+            let delimiter = body.chars().next()?;
+            if delimiter.is_whitespace()
+                || body.len() <= delimiter.len_utf8()
+                || !body.ends_with(delimiter)
+            {
+                return None;
+            }
+            let start = usize::from(leaf.text_range().start());
+            let body_start = start + leaf.text().len() - body.len() + delimiter.len_utf8();
+            let body_end = usize::from(leaf.text_range().end()) - delimiter.len_utf8();
+            if edit.range.start < body_start || edit.range.end > body_end {
+                return None;
+            }
+            try_capture(base, edit, new_text, &leaf, range)
+        })
+}
+
+/// Settings-independent builtin captures use the existing faithful fragment proof.
+/// The closed profile set excludes inferred/generated raw readers and explicit
+/// project replacements that may introduce embedded escape islands.
+pub(super) fn reparse_pure_builtin_capture(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+) -> Option<Reparsed> {
+    if let Some(result) = reparse_builtin_verb(base, edit, new_text) {
+        return Some(result);
+    }
+    // This source-wide DTX fact also controls tokens after an otherwise opaque
+    // capture. A non-verb candidate reaches this check once; the builtin verb
+    // route checks it after identifying its own leaf, before relexing.
+    if base.config.dtx && dtx_has_expl_signal(new_text) != base.implicit_expl {
+        return None;
+    }
+    let range = TextRange::new(
+        TextSize::try_from(edit.range.start).ok()?,
+        TextSize::try_from(edit.range.end).ok()?,
+    );
+    candidates(&base.syntax(), range)
+        .into_iter()
+        .find_map(|leaf| {
+            let owner = leaf.parent()?;
+            match (leaf.kind(), owner.kind()) {
+                (SyntaxKind::VERB, SyntaxKind::COMMAND) => {
+                    let head = owner.first_token()?;
+                    if head.kind() != SyntaxKind::CONTROL_WORD
+                        || !base.ctx.pure_builtin_raw_command(
+                            head.text().strip_prefix('\\')?,
+                            usize::from(head.text_range().start()),
+                        )
+                    {
+                        return None;
+                    }
+                    let opener = leaf.text().chars().next()?;
+                    let closer = if opener == '{' { '}' } else { opener };
+                    if opener.is_whitespace()
+                        || leaf.text().len() <= opener.len_utf8()
+                        || !leaf.text().ends_with(closer)
+                    {
+                        return None;
+                    }
+                    let body_start = usize::from(leaf.text_range().start()) + opener.len_utf8();
+                    let body_end = usize::from(leaf.text_range().end()) - closer.len_utf8();
+                    if edit.range.start < body_start || edit.range.end > body_end {
+                        return None;
+                    }
+                }
+                (SyntaxKind::VERBATIM_BODY, SyntaxKind::ENVIRONMENT) => {
+                    let begin = owner
+                        .children()
+                        .find(|node| node.kind() == SyntaxKind::BEGIN)?;
+                    let name = begin
+                        .children()
+                        .find(|node| node.kind() == SyntaxKind::NAME_GROUP)?;
+                    // The lexer accepts only the compact literal builtin opener here.
+                    // Bound the text allocation by the two closed candidate spellings.
+                    if usize::from(name.text_range().len()) > "{verbatim*}".len() {
+                        return None;
+                    }
+                    let name = name.text().to_string();
+                    let name = name.strip_prefix('{')?.strip_suffix('}')?;
+                    if !base.ctx.pure_builtin_raw_environment(name) {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+            try_capture(base, edit, new_text, &leaf, range)
+        })
 }
 
 fn try_capture(
@@ -192,14 +309,21 @@ fn try_capture(
     // Leg 1: the unedited fragment must lex, in isolation, to exactly the tokens the
     // tree holds for it.
     let old_fragment = fragment.text();
-    if !relexes_to(base, &old_fragment, &tokens, None) {
+    let source_offset = usize::from(fragment.range().start());
+    if !relexes_to(base, &old_fragment, &tokens, None, source_offset) {
         return None;
     }
 
     // Leg 4: the edited fragment must lex to the same sequence with only this leaf's
     // text changed.
     let new_fragment = edited(&old_fragment, usize::from(fragment.range().start()), edit)?;
-    if !relexes_to(base, &new_fragment, &tokens, Some((at, &new_leaf))) {
+    if !relexes_to(
+        base,
+        &new_fragment,
+        &tokens,
+        Some((at, &new_leaf)),
+        source_offset,
+    ) {
         return None;
     }
 
@@ -207,9 +331,15 @@ fn try_capture(
         let mut probe = new_fragment.clone();
         probe.push(' ');
         let got = if base.config.dtx {
-            lex_with_implicit_expl(&probe, base.ctx, base.config, base.implicit_expl)
+            lex_with_implicit_expl_offset(
+                &probe,
+                base.ctx,
+                base.config,
+                base.implicit_expl,
+                source_offset,
+            )
         } else {
-            lex_with(&probe, base.ctx, base.config)
+            lex_with_offset(&probe, base.ctx, base.config, source_offset)
         };
         if got.len() != tokens.len() + 1
             || got
@@ -246,11 +376,18 @@ fn relexes_to(
     text: &str,
     expected: &[SyntaxToken],
     replaced: Option<(usize, &str)>,
+    source_offset: usize,
 ) -> bool {
     let got: Vec<Token> = if base.config.dtx {
-        lex_with_implicit_expl(text, base.ctx, base.config, base.implicit_expl)
+        lex_with_implicit_expl_offset(
+            text,
+            base.ctx,
+            base.config,
+            base.implicit_expl,
+            source_offset,
+        )
     } else {
-        lex_with(text, base.ctx, base.config)
+        lex_with_offset(text, base.ctx, base.config, source_offset)
     };
     if got.len() != expected.len() {
         return false;

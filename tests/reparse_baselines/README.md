@@ -25,6 +25,12 @@ Header rows identify corpus size. Driver `files` counts files with candidate edi
 sites; files without a site are skipped, not counted as refused edits. Seeds derive
 from corpus-relative paths, so checkout location does not affect the counts.
 
+Recognizing standalone `IncludeInRelease` descriptions adds protected edit sites.
+Their edits require a full-file reader proof and conservatively use full parsing.
+The LaTeX3 row includes 50 such attempts from four additional files, retaining all
+415 existing successful splices. When a ratio changes, compare per-file candidates
+to distinguish added fallback coverage from existing sites losing a fast path.
+
 | Driver | Edits |
 | --- | --- |
 | `word-typing` | Five keystrokes inside a word at three sites per file |
@@ -35,27 +41,31 @@ from corpus-relative paths, so checkout location does not affect the counts.
 | `hazard-single` | Sixteen random edits from the hazard alphabet |
 | `hazard-chain` | Five chains of two to four hazard edits |
 
-The sweep uses `.tex`, `.sty`, `.cls`, `.dtx`, and `.ins` files with their normal CLI
+The sweep uses `.tex`, `.sty`, `.cls`, `.dtx`, `.ins`, `.def`, and `.lco` files with their normal CLI
 parse modes. The math tier declines `.dtx` because its fragment lacks docstrip
 line/column context. Token and protected tiers require matching docstrip state.
 The drivers do not target the region tier's multi-token paragraph edits.
 
-## Definition-context baselines
+## Recording changes
 
-Recognizing command-copy definitions and `\newif` adds 15 full-parse fallbacks
-through the existing definition-context guards. Per-edit comparisons against the
-previous parser account for all four changed rows:
+Corpus repository revisions are pinned in `scripts/corpus_pins.sh`. The checker
+requires clean checkouts at those commits. Fetch them before checking or recording:
 
-- `latex3/word-deleting` loses five token splices inside a `\RenewCommandCopy`
-  command node in `texmf/tex/latex/base/latexrelease.sty`.
-- `pgf/hazard-single` loses four. One edits the word after `\newif` on the same
-  line in `pgfsys-common-pdf-via-dvi.def`. Three edit leading comments attached to
-  `\newif` command nodes in `pgflibraryluamath.code.tex`, `pgfmathutil.code.tex`,
-  and `pgfsys-tex4ht.def`.
-- `latexindent/hazard-single` loses five, and `hazard-chain` loses one. These edit
-  leading comments attached to `\newif` command nodes in
-  `test-cases/commands/testcls.cls` and `test-cases/ifelsefi/conditional.tex`.
+```sh
+bash scripts/fetch_gate_corpora.sh
+bash scripts/check_reparse_baselines.sh
+```
 
-These contexts now require a full parse because the leaf guards do not prove that
-definition operands and their surrounding trivia are inert. The equivalence
-assertions and splice-rate floors are unchanged.
+To review one corpus, pass its name, for example
+`bash scripts/check_reparse_baselines.sh latex3`. The checker compares exact counts
+in both directions. A lower splice rate reports `REGRESSION`, a higher rate reports
+`STALE`, and changed counts with the same rate report `CHANGED`. New or missing rows
+also fail. Full-parse fallbacks can be required when ownership or lexical state
+cannot be proved, but their effect on ordinary editing still needs review.
+
+Inspect the failing rows and their parser guards before recording a change. Retain
+the corpus pins, deterministic sampling and driver floors unless the workload
+itself needs a separate, reviewed change. Record accepted counts with
+`RECORD=1 bash scripts/check_reparse_baselines.sh`, optionally followed by corpus
+names. Recording succeeds only after the sweep's equivalence assertions and
+splice-rate floors pass.

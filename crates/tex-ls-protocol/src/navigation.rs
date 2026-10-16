@@ -1,5 +1,37 @@
 //! Navigation operations.
-use super::*;
+pub(crate) use crate::convert::locations_for_ranges;
+pub use crate::convert::{dedup_locations, location_for};
+pub(crate) use crate::workspace_edits::occurrence_edits;
+pub use crate::workspace_edits::{finalize_rename, is_valid_command_name, is_valid_key, push_edit};
+use crate::{
+    bib_strings,
+    convert::{
+        file_kind_for, lsp_range, lsp_range_with_cursor, lsp_ranges, path_to_uri, uri_to_fs_path,
+    },
+    glossary,
+    workspace_edits::edits_for_locations,
+};
+use lsp_types::{
+    DocumentHighlight, DocumentHighlightKind, Location, Position, Range, TextEdit, Uri,
+    WorkspaceEdit,
+};
+use rowan::{TextRange, TextSize};
+use smol_str::SmolStr;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+use tex_ls_analysis::{
+    incremental::Analysis,
+    name_refs::{self, NameKind, NameTarget},
+    project::{ResolvedCitations, ResolvedLabels},
+    source::FileKind,
+    text::{LineIndex, PositionEncoding},
+};
+use tex_ls_parser::{
+    semantic::SemanticModel,
+    syntax::{SyntaxKind, SyntaxNode},
+};
 
 /// Linked editing is restricted to two identical, literal delimiter names.
 pub fn compute_linked_editing(
@@ -65,6 +97,7 @@ pub fn compute_goto_definition(
     let origin = if file_kind_for(path) == FileKind::Bib {
         bib_strings::target(snapshot.bib_semantic_model(origin_file), offset)
             .map(|(_, range)| range)
+            .or_else(|| bib_entry_under_cursor(snapshot, path, offset).map(|(_, range)| range))
     } else {
         let model = snapshot.semantic_model(origin_file);
         let root = snapshot.parsed_tree(origin_file);
@@ -141,7 +174,7 @@ fn definition_links(
                 starts
                     .iter()
                     .map(|(_, at)| {
-                        root.token_at_offset(*at)
+                        tex_ls_parser::syntax::token_at_offset(&root, *at)
                             .right_biased()
                             .and_then(|token| {
                                 token.parent_ancestors().find(|node| {
@@ -310,14 +343,22 @@ fn definition_locations(
     let offset = idx.offset_at(position.line, position.character);
     if file_kind_for(path) == FileKind::Bib {
         let model = snapshot.bib_semantic_model(file);
+        if let Some((key, _)) = bib_entry_under_cursor(snapshot, path, offset) {
+            return definition_occurrence_locations(
+                snapshot,
+                snapshot.citation_occurrences(path, &[key]),
+                enc,
+            );
+        }
         return bib_strings::target(model, offset)
             .map(|(key, _)| {
                 definition_range_locations(
                     snapshot,
-                    bib_strings::occurrences(model, &key)
-                        .into_iter()
-                        .filter(|(_, definition)| *definition)
-                        .map(|(range, _)| (path, range)),
+                    snapshot
+                        .bibliography_string_occurrences(path, &key)
+                        .iter()
+                        .filter(|site| site.definition)
+                        .map(|site| (site.path.as_path(), site.key_range)),
                     enc,
                 )
             })
@@ -388,7 +429,7 @@ fn definition_locations(
 
 /// The go-to-definition file target under `offset`: the document link whose argument
 /// span covers the cursor, mapped to a whole-file [`Location`]. Reuses
-/// [`document_link::document_links`] (disk-aware and TEXMF-aware), so every command it
+/// [`document_link::document_links`](crate::document_link::document_links) (disk-aware and TEXMF-aware), so every command it
 /// resolves—`\input`, `\usepackage`, `\includegraphics`, …—becomes navigable. Empty
 /// when the cursor is not on a resolvable file argument.
 pub fn file_target_under_cursor(
@@ -454,13 +495,13 @@ pub fn compute_references(
     if file_kind_for(path) == FileKind::Bib
         && let Some((key, _)) = bib_strings::target(snapshot.bib_semantic_model(file), offset)
     {
-        let sites = bib_strings::occurrences(snapshot.bib_semantic_model(file), &key);
+        let sites = snapshot.bibliography_string_occurrences(path, &key);
         return locations_for_ranges(
             snapshot,
             sites
-                .into_iter()
-                .filter(|(_, definition)| include_declaration || !definition)
-                .map(|(range, _)| (path, range)),
+                .iter()
+                .filter(|site| include_declaration || !site.definition)
+                .map(|site| (site.path.as_path(), site.key_range)),
             enc,
         )
         .into_iter()
@@ -679,7 +720,7 @@ pub fn rename_target_under_cursor(model: &SemanticModel, offset: usize) -> Optio
 /// A stray `\end` (no `ENVIRONMENT` parent) self-highlights.
 pub fn environment_pair_ranges(root: &SyntaxNode, offset: usize) -> Vec<TextRange> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
+    let (left, right) = match tex_ls_parser::syntax::token_at_offset(root, at) {
         rowan::TokenAtOffset::None => return Vec::new(),
         rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
@@ -727,8 +768,7 @@ pub(crate) fn matching_environment_delimiter(
     offset: usize,
 ) -> Option<MatchingEnvironmentDelimiter> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let delimiter = root
-        .token_at_offset(at)
+    let delimiter = tex_ls_parser::syntax::token_at_offset(root, at)
         .filter(|token| {
             !token
                 .parent_ancestors()
@@ -773,14 +813,9 @@ pub fn proved_environment_pair(
     use tex_ls_parser::ast::AstNode;
 
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
-    let env = [left, right]
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
+    let env = tokens
         .into_iter()
-        .flatten()
         .filter(|token| {
             !token
                 .parent_ancestors()
@@ -887,7 +922,27 @@ pub fn compute_document_highlight(
     }
 
     if file_kind_for(path) == FileKind::Bib {
-        return Vec::new();
+        let Some((key, _)) = bib_entry_under_cursor(snapshot, path, offset) else {
+            return Vec::new();
+        };
+        return document_highlights(
+            &idx,
+            snapshot
+                .citation_occurrences(path, &[key])
+                .into_iter()
+                .filter(|site| site.path == path)
+                .map(|site| {
+                    (
+                        site.key_range,
+                        if site.definition {
+                            DocumentHighlightKind::Write
+                        } else {
+                            DocumentHighlightKind::Read
+                        },
+                    )
+                })
+                .collect(),
+        );
     }
     let highlight = |range: TextRange, kind: DocumentHighlightKind| (range, kind);
     let collect =
@@ -997,6 +1052,9 @@ fn key_rename_allowed(
             snapshot.resolve_labels().is_closed(path),
         ),
         CursorTarget::Citations(names) => {
+            if !snapshot.citation_dependencies_editable(path) {
+                return false;
+            }
             let citations = snapshot.resolve_citations();
             // A source-origin rename edits only that source's namespace. A
             // bibliography declaration shared with another root cannot be changed
@@ -1033,7 +1091,7 @@ fn key_rename_allowed(
                         == 1
             });
             let collision = replacement.is_some_and(|new| {
-                !names.iter().any(|old| old.eq_ignore_ascii_case(new))
+                !names.iter().any(|old| citations.keys_equal(path, old, new))
                     && (scopes.iter().any(|scope| {
                         !snapshot
                             .citation_occurrences(scope, &[new.into()])
@@ -1049,7 +1107,16 @@ fn key_rename_allowed(
             )
         }
     };
-    closed && !collision && occurrences.iter().filter(|site| site.definition).count() == 1
+    closed
+        && !collision
+        && occurrences.iter().filter(|site| site.definition).count() == 1
+        && replacement.is_none_or(|new| {
+            occurrences.iter().all(|site| {
+                snapshot
+                    .key_replacement(&site.path, site.key_range, new)
+                    .is_some()
+            })
+        })
 }
 
 pub fn compute_prepare_rename(
@@ -1067,15 +1134,20 @@ pub fn compute_prepare_rename(
     if file_kind_for(path) == FileKind::Bib
         && let Some((key, range)) = bib_strings::target(snapshot.bib_semantic_model(file), offset)
     {
-        return bib_strings::rename_allowed(snapshot.bib_semantic_model(file), &key)
+        return snapshot
+            .bibliography_string_rename_allowed(path, &key)
             .then(|| (lsp_range(&idx, range), key));
     }
 
     if file_kind_for(path) != FileKind::Bib
         && let Some((key, range)) = glossary::target(snapshot.semantic_model(file), offset)
     {
-        return glossary::rename_allowed(snapshot, path, &key)
-            .then(|| (lsp_range(&idx, range), key.to_string()));
+        return glossary::rename_allowed(snapshot, path, &key).then(|| {
+            (
+                lsp_range(&idx, range),
+                snapshot.file_text(file)[range].to_string(),
+            )
+        });
     }
 
     // `.bib` origin: the `@entry` key under the cursor.
@@ -1096,8 +1168,12 @@ pub fn compute_prepare_rename(
         rename_target_under_cursor(snapshot.semantic_model(file), offset),
     );
     if let Some(target) = target {
-        return key_rename_allowed(snapshot, path, &target.target, None)
-            .then(|| (lsp_range(&idx, target.span), target.placeholder.to_string()));
+        return key_rename_allowed(snapshot, path, &target.target, None).then(|| {
+            (
+                lsp_range(&idx, target.span),
+                snapshot.file_text(file)[target.span].to_string(),
+            )
+        });
     }
     // Not a key: a command or environment name, gated to user-defined names
     // (a project definition site must exist — renaming `\textbf` or
@@ -1110,11 +1186,10 @@ pub fn compute_prepare_rename(
     Some((lsp_range(&idx, target.span), target.name.to_string()))
 }
 
-/// The user-defined rename gate: `target` is renameable when a matching
-/// definition site exists in `origin`'s macro namespace. The source's own sites
-/// are checked first to avoid an unnecessary namespace query. This is
-/// deliberately the *user tier* only: built-in and CWL names never pass, so
-/// `\alpha` and `verbatim` decline. References stay ungated.
+/// The user-defined rename gate requires an editable definition in a unique,
+/// closed macro namespace. Built-in and CWL names alone do not qualify; the
+/// definition lookup also retains generated-name and shared-range ambiguity
+/// checks.
 pub fn name_rename_allowed(
     snapshot: &Analysis,
     origin: &Path,
@@ -1163,9 +1238,10 @@ pub fn compute_rename(
     }
 
     if file_kind_for(path) != FileKind::Bib
-        && let Some((key, _)) = glossary::target(snapshot.semantic_model(file), offset)
+        && let Some((key, range)) = glossary::target(snapshot.semantic_model(file), offset)
     {
-        return glossary::rename(snapshot, path, &key, new_name, enc);
+        let canonical = snapshot.canonical_key_at(path, range, new_name)?;
+        return glossary::rename(snapshot, path, &key, &canonical, enc);
     }
 
     let changes = (|| {
@@ -1211,6 +1287,10 @@ pub fn compute_rename(
             snapshot.file_path(file).to_path_buf(),
         );
         if let Some(target) = target {
+            let Some(canonical) = snapshot.canonical_key_at(path, target.span, new_name) else {
+                return HashMap::new();
+            };
+            let new_name = canonical.as_str();
             if !is_valid_key(new_name)
                 || !key_rename_allowed(snapshot, path, &target.target, Some(new_name))
             {
@@ -1322,6 +1402,21 @@ pub fn bib_entry_under_cursor(
         .iter()
         .find(|entry| entry.key_range.contains_inclusive(at))
         .map(|entry| (entry.key.clone(), entry.key_range))
+        .or_else(|| {
+            snapshot
+                .bib_semantic_model(file)
+                .entries()
+                .iter()
+                .flat_map(|entry| &entry.dependencies)
+                .find(|dependency| {
+                    dependency.field != "ids"
+                        && snapshot
+                            .resolve_citations()
+                            .supports_dependency(path, &dependency.field)
+                        && dependency.range.contains_inclusive(at)
+                })
+                .and_then(|dependency| dependency.key.clone().map(|key| (key, dependency.range)))
+        })
 }
 
 /// Every `\ref`-family use of `names` across `origin`'s label namespace, plus the
@@ -1415,26 +1510,6 @@ pub fn resolve_citation_locations(
             .filter(|item| item.definition),
         enc,
     )
-}
-
-/// Build an LSP [`Location`] from a definer file's path and a byte range in its
-/// text. A path that cannot form a `file://` URI yields `None` (skipped).
-pub fn location_for(path: &Path, idx: &LineIndex, range: TextRange) -> Option<Location> {
-    Some(Location {
-        uri: path_to_uri(path)?,
-        range: byte_range_to_lsp(idx, usize::from(range.start()), usize::from(range.end())),
-    })
-}
-
-/// Drop duplicate locations (same URI + range), which can arise when several keys
-/// in a list command resolve to the same site.
-pub fn dedup_locations(locations: Vec<Option<Location>>) -> Vec<Location> {
-    let mut seen = HashSet::new();
-    locations
-        .into_iter()
-        .flatten()
-        .filter(|loc| seen.insert((loc.uri.as_str().to_owned(), loc.range.start, loc.range.end)))
-        .collect()
 }
 
 /// Every `\ref`-family use of `names` across `origin`'s label namespace, plus every
@@ -1547,64 +1622,6 @@ pub fn rename_environment_edits(
     )
 }
 
-/// Convert a semantics-preserving byte edit to the requested position encoding.
-pub fn push_edit(
-    changes: &mut HashMap<Uri, Vec<TextEdit>>,
-    uri: &Uri,
-    idx: &LineIndex,
-    range: TextRange,
-    new_name: &str,
-) {
-    changes.entry(uri.clone()).or_default().push(TextEdit {
-        range: lsp_range(idx, range),
-        new_text: new_name.to_owned(),
-    });
-}
-
-/// Sort and dedup each file's edits, drop empty files, and wrap the rest in a
-/// [`WorkspaceEdit`]. `None` when nothing is left to rewrite (so the handler replies
-/// `null`).
-pub fn finalize_rename(mut changes: HashMap<Uri, Vec<TextEdit>>) -> Option<WorkspaceEdit> {
-    changes.retain(|_, edits| {
-        edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
-        edits.dedup();
-        !edits.is_empty()
-    });
-    (!changes.is_empty()).then(|| WorkspaceEdit {
-        changes: Some(changes),
-        ..Default::default()
-    })
-}
-
-/// Whether `new_name` is a safe replacement key: non-empty after trimming and free of
-/// characters that would break the surface syntax or the comma key-list split (so an
-/// applied rename can never introduce a parse/format error). Conservative — a few
-/// exotic-but-legal key characters are rejected rather than risk a corrupt edit.
-pub fn is_valid_key(new_name: &str) -> bool {
-    !new_name.trim().is_empty()
-        && !new_name.chars().any(|c| {
-            matches!(
-                c,
-                '{' | '}' | '%' | '\\' | ',' | '#' | '~' | '$' | '^' | '&' | '\n' | '\r'
-            )
-        })
-}
-
-/// Whether `new_name` is a safe replacement *command* name (leading `\` already
-/// stripped): non-empty ASCII letters, plus `@`/`_`/`:` only when `old_name`
-/// already used that character. The old token lexing as one `CONTROL_WORD` proves
-/// every occurrence site is inside the right letter-mode region (`\makeatletter`
-/// for `@`, expl3 for `_`/`:`), so the new name re-lexes identically there — while
-/// a plain name never gains `@`, which would mis-lex in ordinary text. Letters-only
-/// also preserves the token boundary at every occurrence (a control word ends at
-/// the first non-letter, exactly where the old one did).
-pub fn is_valid_command_name(new_name: &str, old_name: &str) -> bool {
-    !new_name.is_empty()
-        && new_name.chars().all(|c| {
-            c.is_ascii_alphabetic() || (matches!(c, '@' | '_' | ':') && old_name.contains(c))
-        })
-}
-
 fn occurrence_locations(
     snapshot: &Analysis,
     occurrences: impl IntoIterator<Item = tex_ls_analysis::navigation::KeyOccurrence>,
@@ -1619,80 +1636,6 @@ fn occurrence_locations(
         encoding,
     ))
 }
-fn occurrence_edits(
-    snapshot: &Analysis,
-    occurrences: Vec<tex_ls_analysis::navigation::KeyOccurrence>,
-    new_name: &str,
-    encoding: PositionEncoding,
-) -> HashMap<Uri, Vec<TextEdit>> {
-    edits_for_locations(
-        locations_for_ranges(
-            snapshot,
-            occurrences
-                .iter()
-                .map(|item| (item.path.as_path(), item.key_range)),
-            encoding,
-        )
-        .into_iter()
-        .flatten(),
-        new_name,
-    )
-}
-
-/// Group conversion by requested path, preserving alias URIs and response order.
-pub(crate) fn locations_for_ranges<'a>(
-    snapshot: &Analysis,
-    ranges: impl IntoIterator<Item = (&'a Path, TextRange)>,
-    encoding: PositionEncoding,
-) -> Vec<Option<Location>> {
-    let mut files: HashMap<&Path, Vec<(usize, TextRange)>> = HashMap::new();
-    let mut locations = Vec::new();
-    for (path, range) in ranges {
-        files
-            .entry(path)
-            .or_default()
-            .push((locations.len(), range));
-        locations.push(None);
-    }
-    for (path, mut ranges) in files {
-        let Some(file) = snapshot.lookup_file(path) else {
-            continue;
-        };
-        let Some(uri) = path_to_uri(path) else {
-            continue;
-        };
-        let index = snapshot.file_line_index(file, encoding);
-        let mut cursor = index.position_cursor();
-        if !ranges
-            .windows(2)
-            .all(|pair| pair[0].1.start() <= pair[1].1.start())
-        {
-            ranges.sort_unstable_by_key(|(_, range)| range.start());
-        }
-        for (slot, range) in ranges {
-            locations[slot] = Some(Location {
-                uri: uri.clone(),
-                range: lsp_range_with_cursor(&mut cursor, range),
-            });
-        }
-    }
-    locations
-}
-
-pub(crate) fn edits_for_locations(
-    locations: impl IntoIterator<Item = Location>,
-    new_name: &str,
-) -> HashMap<Uri, Vec<TextEdit>> {
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for location in locations {
-        changes.entry(location.uri).or_default().push(TextEdit {
-            range: location.range,
-            new_text: new_name.to_owned(),
-        });
-    }
-    changes
-}
-
 #[cfg(test)]
 mod batch_definition_tests {
     use super::*;
@@ -1890,6 +1833,79 @@ mod batch_definition_tests {
                 definition_links(&snapshot, locations, origin, encoding),
                 expected
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod indexed_bibliography_cursor_tests {
+    use super::*;
+    use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn wide_bibliography_definition_batches_preserve_container_ranges_and_order() {
+        for newline in ["\n", "\r\n"] {
+            let mut source = String::new();
+            let mut entries = Vec::new();
+            for item in 0..1024 {
+                let key = format!("key{item}");
+                let entry = format!("@article{{{key},title={{é😀 Research}}}}");
+                let start = source.len();
+                let key_start = start + "@article{".len();
+                entries.push((start..start + entry.len(), key_start..key_start + key.len()));
+                source.push_str(&entry);
+                source.push_str(newline);
+            }
+            let path = PathBuf::from(fixture_path!("/indexed/batch.bib"));
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(&path, source.as_str(), None);
+            let snapshot = db.snapshot();
+            let file = snapshot.lookup_file(&path).unwrap();
+            assert!(
+                snapshot
+                    .parsed_bib_tree(file)
+                    .children_with_tokens()
+                    .count()
+                    >= 1024
+            );
+            for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+                let index = snapshot.file_line_index(file, encoding);
+                let uri = path_to_uri(&path).unwrap();
+                let range = |bytes: &std::ops::Range<usize>| {
+                    TextRange::new(
+                        TextSize::from(bytes.start as u32),
+                        TextSize::from(bytes.end as u32),
+                    )
+                };
+                let order = (960..1024)
+                    .rev()
+                    .chain([0, 1023, 17, 1023])
+                    .collect::<Vec<_>>();
+                let locations = order
+                    .iter()
+                    .map(|&item| {
+                        let (_, key) = &entries[item];
+                        let key = range(key);
+                        (
+                            Location {
+                                uri: uri.clone(),
+                                range: lsp_range(&index, key),
+                            },
+                            Some(key),
+                        )
+                    })
+                    .collect();
+                let origin = Some(Range::new(Position::new(0, 1), Position::new(0, 2)));
+                let links = definition_links(&snapshot, locations, origin, encoding);
+                assert_eq!(links.len(), order.len());
+                for (link, item) in links.iter().zip(order) {
+                    let (entry, key) = &entries[item];
+                    assert_eq!(link.target_uri, uri);
+                    assert_eq!(link.origin_selection_range, origin);
+                    assert_eq!(link.target_selection_range, lsp_range(&index, range(key)));
+                    assert_eq!(link.target_range, lsp_range(&index, range(entry)));
+                }
+            }
         }
     }
 }

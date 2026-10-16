@@ -399,7 +399,7 @@ fn snapshot_shares_storage() {
     assert_eq!(clone.file_text(file), "\\emph{hi}\n");
 }
 
-// --- declarations (`tex-ls.toml`; AGENTS.md decision #12) -------------------
+// --- declarations (`tex-ls.toml`) -------------------
 
 /// A resolved declaration block, written in the TOML the user actually types.
 fn declared(toml_src: &str) -> ResolvedDeclarations {
@@ -1129,14 +1129,14 @@ fn the_reparse_base_carries_the_declarations_it_was_parsed_under() {
     );
     db.parsed_tree(file);
     let before = db.reparse_prev(file).expect("a base");
-    assert_eq!(before.declared, ResolvedDeclarations::default());
+    assert_eq!(before.declared.as_ref(), &ResolvedDeclarations::default());
 
     db.set_declarations(declared(MYCODE_VERBATIM));
     db.parsed_tree(file);
     let after = db.reparse_prev(file).expect("a base");
     assert_ne!(
-        after.declared,
-        ResolvedDeclarations::default(),
+        after.declared.as_ref(),
+        &ResolvedDeclarations::default(),
         "the refreshed base must record the declarations in force"
     );
 }

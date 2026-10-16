@@ -1,4 +1,29 @@
-use super::*;
+use crate::{
+    lsp::{
+        forward_search::{ForwardSearchOutcome, ForwardSearchParams},
+        messages::WorkerJob,
+        state::GlobalState,
+    },
+    text::TextBuffer,
+};
+use crossbeam_channel::Sender;
+use lsp_server::{Connection, ErrorCode, Message, Request, RequestId, Response};
+use lsp_types::{
+    CodeActionParams, CodeActionRequest, CompletionItem, CompletionParams, CompletionRequest,
+    CompletionResolveRequest, DefinitionParams, DefinitionRequest, DiagnosticRefreshRequest,
+    DocumentDiagnosticParams, DocumentDiagnosticReport, DocumentDiagnosticReportProgress,
+    DocumentDiagnosticRequest, DocumentFormattingParams, DocumentFormattingRequest,
+    DocumentHighlightParams, DocumentHighlightRequest, DocumentLinkParams, DocumentLinkRequest,
+    DocumentOnTypeFormattingParams, DocumentOnTypeFormattingRequest, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolRequest, ExecuteCommandParams, ExecuteCommandRequest,
+    FoldingRangeParams, FoldingRangeRequest, HoverParams, HoverRequest, PrepareRenameRequest,
+    Range, ReferenceParams, ReferencesRequest, RelatedFullDocumentDiagnosticReport, RenameParams,
+    RenameRequest, Request as _, SelectionRangeParams, SelectionRangeRequest, SignatureHelpParams,
+    SignatureHelpRequest, TextDocumentPositionParams, Uri, WorkspaceSymbolParams,
+    WorkspaceSymbolRequest,
+};
+use std::{path::PathBuf, sync::Arc};
+use tex_ls_protocol::convert::{file_kind_for, uri_to_fs_path, uri_to_path};
 
 /// `textDocument/formatting`: build a format job for the worker, or reply `null`
 /// when the document is unknown.
@@ -33,16 +58,9 @@ pub(super) fn on_formatting(
         return;
     }
     let resolved = state.resolve_settings(&uri);
-    let mut style = resolved.style;
-    // Only an explicit file indent-width overrides the request tab size.
-    if !resolved.indent_width_configured && params.options.tab_size > 0 {
-        style.indent_width = params.options.tab_size as usize;
-    }
+    let style = resolved.format_style(params.options.tab_size);
     let path = uri_to_path(&uri);
     let kind = file_kind_for(&path);
-    // `wrap` is decided per request: a configured `wrap` wins, else the default
-    // (`reflow`, the same for every file kind).
-    style.wrap = resolved.wrap_override.unwrap_or_default();
     let _ = job_tx.send(WorkerJob::Format {
         id,
         path,
@@ -100,13 +118,9 @@ pub(super) fn on_range_formatting(
         return;
     }
     let resolved = state.resolve_settings(&uri);
-    let mut style = resolved.style;
-    if !resolved.indent_width_configured && params.options.tab_size > 0 {
-        style.indent_width = params.options.tab_size as usize;
-    }
+    let style = resolved.format_style(params.options.tab_size);
     let path = uri_to_path(&uri);
     let kind = file_kind_for(&path);
-    style.wrap = resolved.wrap_override.unwrap_or_default();
     let _ = job_tx.send(WorkerJob::RangeFormat {
         id,
         path,
@@ -154,13 +168,9 @@ pub(super) fn on_type_formatting(
         return;
     }
     let resolved = state.resolve_settings(&uri);
-    let mut style = resolved.style;
-    if !resolved.indent_width_configured && params.options.tab_size > 0 {
-        style.indent_width = params.options.tab_size as usize;
-    }
+    let style = resolved.format_style(params.options.tab_size);
     let path = uri_to_path(&uri);
     let kind = file_kind_for(&path);
-    style.wrap = resolved.wrap_override.unwrap_or_default();
     let _ = job_tx.send(WorkerJob::OnTypeFormat {
         id,
         path,
@@ -682,6 +692,7 @@ pub(super) fn on_code_action(
     let path = uri_to_path(&uri);
     let kind = file_kind_for(&path);
     let rules = state.resolve_settings(&uri).rule_selection();
+    let texmf = state.client_settings(&uri).texmf.clone();
     let _ = job_tx.send(WorkerJob::CodeAction {
         id,
         uri,
@@ -690,6 +701,7 @@ pub(super) fn on_code_action(
         range,
         only,
         rules,
+        texmf,
     });
 }
 
@@ -1109,6 +1121,15 @@ pub(super) fn on_semantic_tokens(
     let parsed = (|| {
         let uri: Uri =
             serde_json::from_value(req.params.pointer("/textDocument/uri")?.clone()).ok()?;
+        if req.method.ends_with("/delta")
+            && req
+                .params
+                .get("previousResultId")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+        {
+            return None;
+        }
         let range = if req.method.ends_with("/range") {
             Some(serde_json::from_value(req.params.get("range")?.clone()).ok()?)
         } else {

@@ -34,7 +34,7 @@
 //!
 //! Only the curated built-in tier is consulted — CWL arities are bulk-converted
 //! and the linter doesn't know which packages are loaded, so trusting them here
-//! would trade false positives for coverage (AGENTS.md conservatism).
+//! would trade false positives for coverage.
 //!
 //! Whole-file rather than node-shape: the redefined-name gate needs the
 //! definition scanner's per-file pass, run once, not once per visited node.
@@ -296,28 +296,17 @@ fn parent_of(el: &SyntaxElement) -> Option<SyntaxNode> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        let mut visitor = MissingRequiredArgument.stream().expect("streaming rule");
-        for el in root.descendants_with_tokens() {
-            visitor.visit(&el, &ctx, &mut out);
-        }
-        visitor.finish(&ctx, &mut out);
-        out
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            let mut visitor = MissingRequiredArgument.stream().expect("streaming rule");
+            for el in root.descendants_with_tokens() {
+                visitor.visit(&el, ctx, &mut out);
+            }
+            visitor.finish(ctx, &mut out);
+            out
+        })
     }
 
     #[test]

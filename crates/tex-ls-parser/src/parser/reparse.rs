@@ -22,7 +22,7 @@
 //! - the token tier relexes one leaf in isolation, proves the relex is a
 //!   single token of the same kind that joins to its neighbours the same way, and
 //!   splices with rowan's [`rowan::SyntaxToken::replace_with`], sharing every green node
-//!   off the leaf-to-root path — `O(depth)`, not `O(file)`;
+//!   off the leaf-to-root path, while rebuilding the ancestor child arrays;
 //! - the protected-body tier splices the same way, but proves it differently: a raw
 //!   capture cannot be relexed alone, so it relexes the leaf's whole enclosing node
 //!   with its delimiters and requires that to reproduce the tree's own tokens;
@@ -42,7 +42,7 @@ mod protected;
 mod region;
 mod token;
 
-use rowan::GreenNode;
+use rowan::{GreenNode, TextSize};
 
 use crate::declarations::ResolvedDeclarations;
 use crate::parser::core::{Parse, SyntaxError, parse_with_declarations_resolved};
@@ -78,12 +78,24 @@ pub struct Reparsed {
     pub green: GreenNode,
     pub errors: Vec<SyntaxError>,
     pub tier: ReparseTier,
+    /// Updated source-position facts, or `None` when the coherent base context
+    /// remains valid. Callers retaining this result must also retain this context.
+    pub ctx: Option<ParseCtx>,
+}
+
+impl Reparsed {
+    /// Context paired with this result. Unchanged facts are borrowed from the
+    /// coherent base supplied by the caller.
+    pub fn context<'a>(&'a self, base: &'a ParseCtx) -> &'a ParseCtx {
+        self.ctx.as_ref().unwrap_or(base)
+    }
 }
 
 /// The previous parse a reparse splices against.
 ///
 /// `ctx` is the context the tree was parsed under, from
-/// [`parse_with_declarations_resolved`] — a tier that relexes a fragment must use
+/// [`parse_with_declarations_resolved`] or a preceding [`Reparsed::context`] —
+/// a tier that relexes a fragment must use
 /// the same one, or a `\newcommand` the definition scan found makes the fragment's
 /// tokens disagree with the tree's. `config` and `declared` are the parse's other
 /// two inputs, needed to reproduce it exactly.
@@ -104,6 +116,9 @@ pub struct ReparseBase<'a> {
 }
 
 impl<'a> ReparseBase<'a> {
+    /// Pair the source with the tree, errors, context, flavor and declarations
+    /// returned by the same parse. The caller must keep these parts coherent;
+    /// checking arbitrary tree contents would require a full-file traversal.
     pub fn from_parts(
         text: &'a str,
         green: &'a GreenNode,
@@ -136,11 +151,13 @@ fn implicit_expl_for(text: &str, config: LexConfig) -> bool {
 /// Attempt an incremental reparse of `base` under `edit`, which transforms
 /// `base.text` into `new_text`. [`None`] means no tier applied and the caller must
 /// do a full parse.
+///
+/// The caller must supply exactly that text transform, just as it must supply
+/// coherent parse parts to [`ReparseBase::from_parts`]. Use [`reparse_edits`] when
+/// the transform has not already been established; that entry point validates
+/// the entire result text before attempting a splice.
 pub fn reparse(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Reparsed> {
-    // The edit is untrusted: a chain staged against a buffer that has since moved
-    // slices out of bounds, and a panic here takes down an analysis query where a
-    // bail would have cost one parse.
-    if !edit.fits(base.text) {
+    if !spans_its_text(base.green, base.text) || !edit.fits(base.text) {
         return None;
     }
     reparse_one(base, edit, new_text)
@@ -153,7 +170,7 @@ pub fn reparse(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Re
 /// spans everything between them, which a cost guard declines outright, while the
 /// chain splices each edit on its own.
 pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> Option<Reparsed> {
-    if edits.is_empty() {
+    if edits.is_empty() || !spans_its_text(base.green, base.text) {
         return None;
     }
 
@@ -192,6 +209,7 @@ pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> 
     let mut green = base.green.clone();
     let mut errors = base.errors.to_vec();
     let mut tier: Option<ReparseTier> = None;
+    let mut ctx: Option<ParseCtx> = None;
 
     for edit in edits {
         if !edit.fits(&text) {
@@ -203,12 +221,15 @@ pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> 
                 &text,
                 &green,
                 &errors,
-                base.ctx,
+                ctx.as_ref().unwrap_or(base.ctx),
                 base.config,
                 base.declared,
             );
             reparse_one(&step_base, edit, &next)?
         };
+        if let Some(updated) = step.ctx {
+            ctx = Some(updated);
+        }
         text = next;
         green = step.green;
         errors = step.errors;
@@ -226,7 +247,126 @@ pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> 
         green,
         errors,
         tier: tier?,
+        ctx,
     })
+}
+
+/// Source-cached restrictions include inactive text. A tree-equivalent edit
+/// must also leave their occurrences unchanged before reusing that context.
+fn cached_guard_signals_unchanged(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> bool {
+    use super::embedded::{FULL_REPARSE_SIGNALS, LOCAL_REPARSE_SIGNALS};
+
+    const fn longest(signals: &[&str]) -> usize {
+        let mut longest = 0;
+        let mut index = 0;
+        while index < signals.len() {
+            let length = signals[index].len();
+            if length > longest {
+                longest = length;
+            }
+            index += 1;
+        }
+        longest
+    }
+    const RADIUS: usize = {
+        let full = longest(FULL_REPARSE_SIGNALS);
+        let local = longest(LOCAL_REPARSE_SIGNALS);
+        if full > local { full } else { local }
+    };
+    let radius = RADIUS;
+    let mut start = edit.range.start.saturating_sub(radius);
+    while !base.text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = edit.range.end.saturating_add(radius).min(base.text.len());
+    while !base.text.is_char_boundary(end) {
+        end += 1;
+    }
+    let Some(old) = base.text.get(start..end) else {
+        return false;
+    };
+    let Some(new_end) = new_text.len().checked_sub(base.text.len() - end) else {
+        return false;
+    };
+    let Some(new) = new_text.get(start..new_end) else {
+        return false;
+    };
+    const fn byte_mask(text: &str) -> [u64; 4] {
+        let mut mask = [0; 4];
+        let bytes = text.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index] as usize;
+            mask[byte / 64] |= 1 << (byte % 64);
+            index += 1;
+        }
+        mask
+    }
+    const SIGNALS: [(&str, [u64; 4]); FULL_REPARSE_SIGNALS.len() + LOCAL_REPARSE_SIGNALS.len()] = {
+        let mut signals = [("", [0; 4]); FULL_REPARSE_SIGNALS.len() + LOCAL_REPARSE_SIGNALS.len()];
+        let mut index = 0;
+        while index < signals.len() {
+            let signal = if index < FULL_REPARSE_SIGNALS.len() {
+                FULL_REPARSE_SIGNALS[index]
+            } else {
+                LOCAL_REPARSE_SIGNALS[index - FULL_REPARSE_SIGNALS.len()]
+            };
+            signals[index] = (signal, byte_mask(signal));
+            index += 1;
+        }
+        signals
+    };
+    // Every byte of a literal must occur in the window. A missing byte proves
+    // zero occurrences in both versions; all other signals keep exact counts.
+    let mut present = [0u64; 4];
+    for byte in old.bytes().chain(new.bytes()) {
+        let byte = usize::from(byte);
+        present[byte / 64] |= 1 << (byte % 64);
+    }
+    if SIGNALS
+        .iter()
+        .filter(|(_, required)| {
+            required
+                .iter()
+                .zip(present)
+                .all(|(required, present)| required & present == *required)
+        })
+        .any(|(signal, _)| old.match_indices(signal).count() != new.match_indices(signal).count())
+    {
+        return false;
+    }
+
+    // A raw capture may contain an inactive shortverb declaration whose operand
+    // affects the conservative source cache. Do not claim operand invariance
+    // from a body edit; ordinary ASCII WORD proofs already reject
+    // potentially active letter-shortverb sources.
+    // Every such declaration is also a full-parse signal. Its absence from the
+    // coherent base source rules out an inactive operand without a tree lookup.
+    if !base.ctx.reparse_guard.full {
+        return true;
+    }
+    let root = base.syntax();
+    let offset = TextSize::try_from(edit.range.start).ok();
+    let Some(offset) = offset else { return false };
+    if let Some(leaf) = crate::syntax::token_at_offset(&root, offset).right_biased()
+        && matches!(
+            leaf.kind(),
+            crate::syntax::SyntaxKind::VERB
+                | crate::syntax::SyntaxKind::VERBATIM_BODY
+                | crate::syntax::SyntaxKind::COMMENT
+        )
+        && [
+            "\\DefineShortVerb",
+            "\\MakeShortVerb",
+            "\\DeleteShortVerb",
+            "\\UndefineShortVerb",
+        ]
+        .iter()
+        .any(|signal| leaf.text().contains(signal))
+    {
+        return false;
+    }
+    true
 }
 
 /// The tier ladder for one already-validated edit, cheapest first.
@@ -234,7 +374,17 @@ pub fn reparse_edits(base: &ReparseBase<'_>, edits: &[Edit], new_text: &str) -> 
 /// Each tier lands here as an `.or_else` and returns through [`finish`], so none
 /// can skip the length check or the oracle.
 fn reparse_one(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Reparsed> {
-    if base.ctx.reparse_guard.full || base.ctx.reader_overrides_after_or_at(edit.range.start) {
+    // Width-changing edits before qualified definitions move their cached ends.
+    // Same-width ordinary WORD edits can retain those positions, but must not
+    // alter any definition body or source-sensitive cached signal.
+    let before_qualified_profile = [
+        base.ctx.verbatim_comment_start,
+        base.ctx.release_header_start,
+    ]
+    .into_iter()
+    .flatten()
+    .any(|start| edit.range.start < start);
+    if before_qualified_profile && edit.insert.len() != edit.range.len() {
         return None;
     }
     // Recovery consumed the rest of the file; any edit may change that boundary.
@@ -244,6 +394,51 @@ fn reparse_one(base: &ReparseBase<'_>, edit: &Edit, new_text: &str) -> Option<Re
         .any(|error| error.message == crate::NESTING_LIMIT_ERROR)
     {
         return None;
+    }
+    if !cached_guard_signals_unchanged(base, edit, new_text) {
+        return None;
+    }
+    if before_qualified_profile {
+        return token::reparse_ordinary_word(base, edit, new_text);
+    }
+    if base.ctx.reader_overrides_after_or_at(edit.range.start)
+        || base.ctx.verbatim_comment_start.is_some()
+        || base.ctx.release_header_start.is_some()
+    {
+        // Only these leaf proofs establish unchanged source definitions and
+        // incoming lexer state. Rebase later reader positions after proving the
+        // splice; other fragment/state proofs still decline here.
+        let token = if base.ctx.reparse_guard.full {
+            token::reparse_ordinary_word(base, edit, new_text)
+        } else {
+            token::reparse_letters(base, edit, new_text)
+        };
+        let mut result =
+            token.or_else(|| protected::reparse_pure_builtin_capture(base, edit, new_text))?;
+        if edit.insert.len() != edit.range.len()
+            && base.ctx.reader_overrides_after_or_at(edit.range.start)
+        {
+            result.ctx = Some(base.ctx.after_leaf_edit(
+                edit.range.start,
+                edit.range.end,
+                edit.insert.len(),
+            )?);
+            #[cfg(debug_assertions)]
+            {
+                let (_, full_ctx) =
+                    parse_with_declarations_resolved(new_text, base.config, base.declared);
+                debug_assert_eq!(
+                    result.context(base.ctx),
+                    &full_ctx,
+                    "rebased context diverged from full parse"
+                );
+            }
+        }
+        return Some(result);
+    }
+    if base.ctx.reparse_guard.full {
+        return token::reparse_ordinary_word(base, edit, new_text)
+            .or_else(|| protected::reparse_pure_builtin_capture(base, edit, new_text));
     }
     if base.ctx.reparse_guard.local_modes {
         // Alphabetic WORD edits cannot toggle lexical state. The token tier
@@ -295,6 +490,7 @@ fn finish(
         green,
         errors,
         tier,
+        ctx: None,
     };
     assert_matches_full_parse(&out, base, new_text);
     Some(out)

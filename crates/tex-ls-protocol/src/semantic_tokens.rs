@@ -1,12 +1,24 @@
 //! Theme-controlled syntax purposes, enriched with source declarations.
-use super::*;
+#[cfg(test)]
+use crate::convert::byte_range_to_lsp;
+use crate::convert::file_kind_for;
+use lsp_types::{Position, Range};
 use rowan::{TextRange, TextSize};
 use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashSet};
-use tex_ls_parser::ast::{command_name, environment_name, nth_group_inner};
-use tex_ls_parser::semantic::context::TokenListContexts;
-use tex_ls_parser::semantic::mode::Mode;
-use tex_ls_parser::semantic::{DefSiteKind, Signatures};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{
+    collections::{BTreeSet, HashSet},
+    path::Path,
+};
+#[cfg(test)]
+use tex_ls_analysis::text::TextBuffer;
+use tex_ls_analysis::{incremental::Analysis, source::FileKind, text::PositionEncoding};
+use tex_ls_parser::{
+    ast::{command_name, environment_name, nth_group_inner},
+    semantic::{DefSiteKind, Signatures, context::TokenListContexts, mode::Mode},
+    syntax::SyntaxKind,
+};
 
 pub const TYPES: &[&str] = &[
     "macro",

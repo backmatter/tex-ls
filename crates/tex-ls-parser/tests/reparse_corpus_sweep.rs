@@ -82,9 +82,9 @@ const CORPORA: &[&str] = &["latex3", "latex2e", "pgf", "latexindent"];
 /// the ordinary movement.
 ///
 /// They are per corpus rather than over the union because the corpora are not the
-/// same workload: a rate is dominated by which file kinds a corpus holds, and `.dtx`
-/// splices nothing at all on either leaf tier (`implicit_expl` is derived from a
-/// whole-file scan, so a fragment can be lexed under a regime the file never had).
+/// same workload: a rate is dominated by which file kinds a corpus holds. Docstrip
+/// fragments require the file's implicit-expl regime and additional layer proofs;
+/// leaf tiers retain their own lexical and boundary checks in `.dtx` files.
 /// latex3 is half `.dtx` by file and more by bytes; pgf has none. Aggregated, a
 /// collapse confined to `.tex` could hide behind pgf's volume.
 const DRIVERS: &[(&str, usize)] = &[
@@ -275,8 +275,9 @@ fn math_shape_driver(cell: &mut Cell, rel: &str, text: &str, config: LexConfig, 
 /// of truth and lives in a crate this one cannot depend on. It is three lines and
 /// two facts (`.sty`/`.cls`/`*.code.tex` start under an implicit `\makeatletter`;
 /// a `.dtx` runs the docstrip mode), and getting it wrong would be visible: the
-/// leaf tiers refuse `.dtx` outright, so a sweep that read `.dtx` as a plain
-/// document would record splice rates no caller can ever obtain.
+/// docstrip-sensitive fragment tiers decline `.dtx`, while leaf tiers retain
+/// their lexical and boundary proofs. Reading `.dtx` as a plain document would
+/// measure a different workload from the host.
 fn lex_config(rel: &str) -> LexConfig {
     let lower = rel.to_ascii_lowercase();
     let package =

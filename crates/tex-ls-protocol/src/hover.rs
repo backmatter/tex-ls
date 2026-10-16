@@ -23,19 +23,33 @@
 //!   Degrades to the numberless preview when the project was never compiled.
 //!
 
-use std::fmt::Write as _;
+use crate::{
+    convert::{byte_range_to_lsp, file_kind_for, lsp_range, path_to_uri},
+    navigation::{CursorTarget, rename_target_under_cursor},
+};
+use lsp_types::{Contents, Hover, MarkupContent, MarkupKind, Position};
+use rowan::{TextRange, TextSize};
+use smol_str::SmolStr;
+use std::{fmt::Write as _, path::Path};
+use tex_ls_analysis::{
+    bib::ast as bib_ast,
+    hover::{TargetKind, signature_target_at},
+    incremental::Analysis,
+    project::{ResolvedCitations, ResolvedLabels},
+    source::FileKind,
+    text::{LineIndex, PositionEncoding},
+};
+use tex_ls_parser::{
+    ast::nth_group,
+    semantic::{
+        LabelContext, SemanticModel, SignatureDb,
+        completion::{PackageMeta, package_metadata},
+        pkgmeta::{NeedsFormatDecl, OptionDecl, ProvidesDecl, provides_kind},
+    },
+    syntax::{SyntaxKind, SyntaxNode},
+};
 
-use super::*;
-use lsp_types::{Contents, Hover, MarkupContent, MarkupKind};
-use tex_ls_analysis::bib::ast as bib_ast;
 pub use tex_ls_analysis::hover::{Provenance, lookup_command, lookup_environment};
-use tex_ls_analysis::hover::{TargetKind, signature_target_at};
-use tex_ls_parser::ast::nth_group;
-use tex_ls_parser::semantic::LabelContext;
-use tex_ls_parser::semantic::completion::{PackageMeta, package_metadata};
-use tex_ls_parser::semantic::pkgmeta::{NeedsFormatDecl, OptionDecl, ProvidesDecl, provides_kind};
-use tex_ls_parser::semantic::signature::{ArgKind, CommandSig, EnvironmentSig, OutlineKind};
-use tex_ls_parser::syntax::SyntaxKind;
 
 /// Describe a construct using the source and semantic scope in one snapshot.
 pub fn compute_hover(
@@ -52,8 +66,9 @@ pub fn compute_hover(
         let (range, value) = if let Some((key, range)) =
             crate::bib_strings::target(snapshot.bib_semantic_model(file), offset)
         {
-            let value =
-                tex_ls_analysis::bib::render::text(&crate::bib_strings::expanded(&root, &key));
+            let value = tex_ls_analysis::bib::render::text(
+                &snapshot.bibliography_string_expansion(path, &key),
+            );
             (
                 range,
                 format!(
@@ -221,24 +236,9 @@ fn markup_hover(value: String, range: TextRange, idx: &LineIndex) -> Hover {
 
 // --- Command / environment signature ------------------------------------------
 
-/// The provenance fact line: `command` / `user-defined command` /
-/// ``command defined by package `mypkg` `` (same for `environment`).
-pub fn provenance_label(provenance: &Provenance, word: &str) -> String {
-    match provenance {
-        Provenance::Base => word.to_string(),
-        Provenance::Document => format!("user-defined {word}"),
-        Provenance::Package(pkg) => format!("{word} defined by package `{pkg}`"),
-    }
-}
-
-/// A command signature, scope-first then built-in then CWL, with the scope hit's
-/// provenance (document vs loaded package) preserved for the rendered label.
-pub fn arg_slot(kind: ArgKind) -> &'static str {
-    match kind {
-        ArgKind::Brace => "{}",
-        ArgKind::Bracket => "[]",
-    }
-}
+pub use crate::presentation::signatures::{
+    arg_slot, arg_summary, provenance_label, render_command, render_environment,
+};
 
 // --- Package / class name (CTAN metadata) -------------------------------------
 
@@ -263,13 +263,9 @@ fn package_target_at(
     use tex_ls_parser::semantic::roles::FileRoleKind;
     let file_roles = std::cell::LazyCell::new(roles);
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
 
-    for token in [left, right].into_iter().flatten() {
+    for token in tokens {
         let Some(group) = token
             .parent_ancestors()
             .find(|n| n.kind() == SyntaxKind::GROUP)
@@ -372,12 +368,8 @@ fn declaration_hover(
 /// caller decides whether it is a package-authoring declaration).
 fn declaration_command_at(root: &SyntaxNode, offset: usize) -> Option<(String, TextRange)> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
-    for token in [left, right].into_iter().flatten() {
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
+    for token in tokens {
         if token.kind() == SyntaxKind::CONTROL_WORD
             && let Some(parent) = token.parent()
             && parent.kind() == SyntaxKind::COMMAND
@@ -445,95 +437,6 @@ fn render_option(decl: &OptionDecl) -> String {
         Some(name) => format!("**Declares option** `{name}`"),
         None => "**Default option handler** (`\\DeclareOption*`)".to_string(),
     }
-}
-
-/// A human summary of an argument list: e.g. `2 required, 1 optional`. Empty when the
-/// construct takes no arguments.
-pub fn arg_summary(args: &[tex_ls_parser::semantic::signature::ArgSpec]) -> Option<String> {
-    let req = args.iter().filter(|a| a.required).count();
-    let opt = args.len() - req;
-    let mut parts = Vec::new();
-    if req > 0 {
-        parts.push(format!("{req} required"));
-    }
-    if opt > 0 {
-        parts.push(format!("{opt} optional"));
-    }
-    (!parts.is_empty()).then(|| format!("{} argument{}", parts.join(", "), plural(args.len())))
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
-/// `\name{}{}` prototype + a `·`-joined facts line.
-pub fn render_command(name: &str, sig: &CommandSig, provenance: &Provenance) -> String {
-    let mut out = String::new();
-    let _ = write!(out, "```latex\n\\{name}");
-    for arg in sig.args.iter() {
-        out.push_str(arg_slot(arg.kind));
-    }
-    out.push_str("\n```\n");
-
-    if matches!(provenance, Provenance::Base)
-        && let Some(glyph) = tex_ls_parser::semantic::math::command_glyph(name)
-    {
-        let _ = write!(out, "\nSymbol: {glyph}\n\n");
-    }
-    let mut facts = vec![provenance_label(provenance, "command")];
-    if let Some(level) = sig.sectioning {
-        facts.push(format!("sectioning level {level}"));
-    }
-    if sig.verbatim {
-        facts.push("verbatim argument".to_string());
-    }
-    if let Some(summary) = arg_summary(&sig.args) {
-        facts.push(summary);
-    }
-    out.push_str(&facts.join(" · "));
-    if matches!(provenance, Provenance::Base) {
-        for (index, doc) in crate::source_cards::argument_docs(name).iter().enumerate() {
-            let _ = write!(out, "\n\nArgument {}: {doc}", index + 1);
-        }
-    }
-    out
-}
-
-/// `\begin{name} … \end{name}` prototype + a `·`-joined facts line.
-pub fn render_environment(name: &str, sig: &EnvironmentSig, provenance: &Provenance) -> String {
-    let mut out = String::new();
-    let _ = write!(out, "```latex\n\\begin{{{name}}}");
-    for arg in sig.args.iter() {
-        out.push_str(arg_slot(arg.kind));
-    }
-    let _ = write!(out, " … \\end{{{name}}}\n```\n");
-
-    let mut facts = vec![provenance_label(provenance, "environment")];
-    match sig.outline {
-        Some(OutlineKind::Float) => facts.push("float".to_string()),
-        Some(OutlineKind::Theorem) => facts.push("theorem-like".to_string()),
-        Some(OutlineKind::Frame) => facts.push("Beamer frame".to_string()),
-        None => {}
-    }
-    if sig.math {
-        facts.push("math".to_string());
-    }
-    if sig.align {
-        facts.push("alignment".to_string());
-    }
-    if sig.list {
-        facts.push("list".to_string());
-    }
-    if sig.verbatim_body {
-        facts.push("verbatim body".to_string());
-    } else if sig.code {
-        facts.push("code body".to_string());
-    }
-    if let Some(summary) = arg_summary(&sig.args) {
-        facts.push(summary);
-    }
-    out.push_str(&facts.join(" · "));
-    out
 }
 
 // --- Citation → bib entry -----------------------------------------------------
@@ -766,6 +669,7 @@ mod tests {
                         messages: Vec::new(),
                         recorder: None,
                         parsed: tex_ls_analysis::project::aux::parse_aux(&text),
+                        resolved_aux_inputs: None,
                     }),
                 ))
             })

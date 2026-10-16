@@ -17,7 +17,7 @@
 //! a `WORD` carrying the `@` is if `@` was not a letter there -- i.e. we were
 //! outside a region. Inside a region the whole name lexes as a single
 //! `CONTROL_WORD` (`\foo@bar`), which this rule never sees split and so never flags.
-//! Region membership is deliberately absent from the CST (AGENTS.md); the token
+//! Region membership is deliberately absent from the CST; the token
 //! split *is* the durable signal, so no region lookup is needed. Two split shapes:
 //!
 //! - **Embedded/trailing `@`** (`\foo@bar`, `\p@`): `CONTROL_WORD "\foo"` followed
@@ -188,28 +188,17 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if MakeatMacro.interests().contains(&el.kind()) {
-                MakeatMacro.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if MakeatMacro.interests().contains(&el.kind()) {
+                    MakeatMacro.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

@@ -22,7 +22,7 @@ use rowan::TextRange;
 use crate::parser::core::SyntaxError;
 use crate::parser::grammar::is_def_prefix_command;
 use crate::parser::grammar::{BEGIN_CMD, END_CMD, reads_definition_body};
-use crate::parser::lexer::reads_following_text;
+use crate::parser::reader_facts::reads_following_text;
 use crate::semantic::define::is_definition_command;
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -438,7 +438,11 @@ mod tests {
             ),
         ),
         (
-            r#"&& token.text.get(1..) == Some("detokenize")"#,
+            "&& token.text.get(1..).is_some_and(token_list_reader)",
+            ControlSequence,
+        ),
+        (
+            "&& !self.ctx.is_suppressed(&self.text()[1..])",
             ControlSequence,
         ),
         (

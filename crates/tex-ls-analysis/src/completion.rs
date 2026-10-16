@@ -26,7 +26,7 @@ use crate::semantic::completion::{
     arg_enum_values, class_names, color_models, color_names, package_names, pgf_libraries,
     tikz_libraries,
 };
-use crate::semantic::roles::{ArgumentRole, key_argument_role};
+use crate::semantic::roles::ArgumentRole;
 use crate::semantic::signature::{SignatureDb, builtin, cwl};
 use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -250,14 +250,16 @@ pub fn classify_context_with_declarations(
 }
 
 /// Keep command-name classification local; other arguments reuse source facts.
-pub fn classify_context_with_roles(
+pub fn classify_context_with_roles<
+    R: std::borrow::Borrow<crate::external::links::FileRoleContext>,
+>(
     root: &SyntaxNode,
     offset: usize,
     declared: &ResolvedDeclarations,
-    roles: impl FnOnce() -> crate::external::links::FileRoleContext,
+    roles: impl FnOnce() -> R,
 ) -> CompletionContext {
     let offset = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(offset) {
+    let (left, right) = match tex_ls_parser::syntax::token_at_offset(root, offset) {
         TokenAtOffset::None => return CompletionContext::None,
         TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
@@ -277,15 +279,16 @@ pub fn classify_context_with_roles(
         return ctx;
     }
 
-    let file_roles = roles();
+    let roles = roles();
+    let file_roles = roles.borrow();
 
-    for command in root.descendants().filter(|node| {
+    let ancestors = cursor_ancestors(root, usize::from(offset));
+    for command in ancestors.iter().filter(|node| {
         node.kind() == SyntaxKind::COMMAND
             && node.text_range().contains_inclusive(offset)
             && file_roles.allows(node)
     }) {
-        for (kind, range, name) in
-            tex_ls_parser::semantic::roles::biblatex_style_arguments(&command)
+        for (kind, range, name) in tex_ls_parser::semantic::roles::biblatex_style_arguments(command)
         {
             if range.contains_inclusive(offset) {
                 if usize::from(range.len()) != name.len() {
@@ -300,18 +303,73 @@ pub fn classify_context_with_roles(
         }
     }
 
-    if let Some(context) = options::classify(root, usize::from(offset), declared, &file_roles) {
+    if let Some(context) = options::classify_with_ancestors(
+        root,
+        usize::from(offset),
+        declared,
+        file_roles,
+        &ancestors,
+    ) {
         return context;
     }
 
     // Inside a brace group: either adjacent token's parent is the group.
     for tok in [left.as_ref(), right.as_ref()].into_iter().flatten() {
-        if let Some(ctx) = group_context(tok, offset, declared, &file_roles) {
+        if let Some(ctx) = group_context(tok, offset, declared, file_roles) {
             return ctx;
         }
     }
 
     CompletionContext::None
+}
+
+/// Cursor ancestors in source preorder, including both boundary candidates.
+/// Indexed token lookup avoids visiting unrelated siblings. Keeping outer nodes
+/// first preserves ownership precedence for nested option and style arguments.
+pub fn cursor_ancestors(root: &SyntaxNode, offset: usize) -> Vec<SyntaxNode> {
+    let mut nodes = Vec::new();
+    let tokens = tex_ls_parser::syntax::token_at_offset(root, TextSize::from(offset as u32));
+    let (left, right) = match tokens {
+        TokenAtOffset::None => return nodes,
+        TokenAtOffset::Single(token) => (Some(token), None),
+        TokenAtOffset::Between(left, right) => (Some(left), Some(right)),
+    };
+    for token in [left, right].into_iter().flatten() {
+        let chain: Vec<_> = token.parent_ancestors().collect();
+        for node in chain.into_iter().rev() {
+            record_classification_work(1, 0);
+            if !nodes.contains(&node) {
+                nodes.push(node);
+            }
+        }
+    }
+    nodes
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ClassificationWork {
+    nodes: usize,
+    copied_bytes: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLASSIFICATION_WORK: std::cell::Cell<ClassificationWork> = const {
+        std::cell::Cell::new(ClassificationWork { nodes: 0, copied_bytes: 0 })
+    };
+}
+
+fn record_classification_work(nodes: usize, copied_bytes: usize) {
+    #[cfg(test)]
+    CLASSIFICATION_WORK.with(|work| {
+        let mut value = work.get();
+        value.nodes += nodes;
+        value.copied_bytes += copied_bytes;
+        work.set(value);
+    });
+    #[cfg(not(test))]
+    let _ = (nodes, copied_bytes);
 }
 
 /// A command-name context when `token` is a control word (or a lone `\`) the
@@ -387,46 +445,38 @@ fn command_arg_context(
     declared: &ResolvedDeclarations,
     builtin_file_role: bool,
 ) -> Option<CompletionContext> {
-    let semantic_name = declared.command_like(name).unwrap_or(name);
-    if matches!(
-        key_argument_role(semantic_name, index),
-        Some(ArgumentRole::Label)
-    ) {
+    let key_role = declared.command_key_role(name, index);
+    let key_prefix = declared.command_key_prefix(name);
+    if key_role.is_some() && !key_prefix.is_empty() && group.children().next().is_some() {
+        return None;
+    }
+    if matches!(key_role, Some(ArgumentRole::Label)) {
         return Some(CompletionContext::LabelDefinition {
-            prefix: group_prefix(group, offset).trim_start().to_string(),
+            prefix: format!("{key_prefix}{}", group_prefix(group, offset).trim_start()),
         });
     }
-    if matches!(
-        key_argument_role(semantic_name, index),
-        Some(ArgumentRole::Reference(_))
-    ) {
+    if matches!(key_role, Some(ArgumentRole::Reference(_))) {
         // A `\cref{a,b|}` completes the key after the last comma.
         let inner = group_prefix(group, offset);
         let prefix = inner.rsplit(',').next().unwrap_or(&inner).trim_start();
         return Some(CompletionContext::LabelRef {
-            prefix: prefix.to_string(),
+            prefix: format!("{key_prefix}{prefix}"),
         });
     }
-    if matches!(
-        key_argument_role(semantic_name, index),
-        Some(ArgumentRole::Citation(_))
-    ) {
+    if matches!(key_role, Some(ArgumentRole::Citation(_))) {
         // A `\cite{a,b|}` completes the key after the last comma, like `\cref`.
         let inner = group_prefix(group, offset);
         let prefix = inner.rsplit(',').next().unwrap_or(&inner).trim_start();
         return Some(CompletionContext::CitationKey {
-            prefix: prefix.to_string(),
+            prefix: format!("{key_prefix}{prefix}"),
         });
     }
-    if matches!(
-        key_argument_role(semantic_name, index),
-        Some(ArgumentRole::GlossaryUse)
-    ) {
+    if matches!(key_role, Some(ArgumentRole::GlossaryUse)) {
         // A `\gls{key}` group holds exactly one key (never a comma list), so the
         // prefix is the whole typed inner. Later groups (`\glslink{key}{text}`)
         // never classify.
         return Some(CompletionContext::GlossaryKey {
-            prefix: group_prefix(group, offset).trim_start().to_string(),
+            prefix: format!("{key_prefix}{}", group_prefix(group, offset).trim_start()),
         });
     }
     if let Some(kind) = package_arg(name)
@@ -623,7 +673,39 @@ fn group_prefix(group: &SyntaxNode, offset: TextSize) -> String {
             text.push_str(token.text().get(..rel).unwrap_or(token.text()));
         }
     }
+    record_classification_work(0, text.len());
     text
+}
+
+/// The implicit namespace at a literal key cursor. The source span contains
+/// only the suffix, while semantic identities and completion queries include it.
+pub fn key_prefix_at_offset<'a>(
+    root: &SyntaxNode,
+    offset: usize,
+    declared: &'a ResolvedDeclarations,
+) -> Option<&'a str> {
+    let at = TextSize::from(u32::try_from(offset).ok()?);
+    cursor_ancestors(root, offset)
+        .into_iter()
+        .filter(|node| node.kind() == SyntaxKind::GROUP && node.text_range().contains_inclusive(at))
+        .filter_map(|group| {
+            let command = group
+                .parent()
+                .filter(|node| node.kind() == SyntaxKind::COMMAND)?;
+            let name = command_name(&command)?;
+            let index = command
+                .children()
+                .filter(|node| node.kind() == SyntaxKind::GROUP)
+                .position(|node| node == group)?;
+            declared.command_key_role(&name, index)?;
+            let prefix = declared.command_key_prefix(&name);
+            if !prefix.is_empty() && group.children().next().is_some() {
+                return None;
+            }
+            Some((group.text_range().len(), prefix))
+        })
+        .min_by_key(|(len, _)| *len)
+        .map(|(_, prefix)| prefix)
 }
 
 /// Build candidates for a name/ref `context`. File paths are handled by the LSP
@@ -898,6 +980,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_active_option_label_does_not_inherit_outer_wrapper_prefix() {
+        let declarations: tex_ls_parser::declarations::Declarations =
+            serde_json::from_str(r#"{"commands":{"wrapper":{"like":"ref","prefix":"outer:"}}}"#)
+                .unwrap();
+        let declared = declarations.resolve().unwrap();
+        let source = r"\wrapper{\begin{frame}[label=local]\end{frame}}";
+        let root = crate::parser::parse(source).syntax();
+        let model =
+            tex_ls_parser::semantic::SemanticModel::build_with_declarations(&root, &declared);
+        let label = &model.labels()[0];
+        assert_eq!(label.name, "local");
+        assert_eq!(
+            key_prefix_at_offset(&root, usize::from(label.key_range.start()), &declared),
+            None
+        );
+        let nested_source = r"\wrapper{\label{local}}";
+        let nested_root = crate::parser::parse(nested_source).syntax();
+        let at = nested_source.find("local").unwrap() + 2;
+        let context = classify_context_with_roles(&nested_root, at, &declared, || {
+            crate::external::links::FileRoleContext::new(&nested_root)
+        });
+        assert!(matches!(context, CompletionContext::LabelDefinition { prefix } if prefix == "lo"));
+    }
+
+    #[test]
+    fn prefixed_dynamic_group_declines_outer_key_classification() {
+        let declarations: tex_ls_parser::declarations::Declarations =
+            serde_json::from_str(r#"{"commands":{"wrapper":{"like":"ref","prefix":"ns:"}}}"#)
+                .unwrap();
+        let declared = declarations.resolve().unwrap();
+        for source in [
+            r"\wrapper{\dynamic}",
+            r"\wrapper{prefix\dynamic}",
+            r"\wrapper{{nested}}",
+        ] {
+            let root = crate::parser::parse(source).syntax();
+            let offset = source.find('{').unwrap() + 1;
+            let context = classify_context_with_roles(&root, offset, &declared, || {
+                crate::external::links::FileRoleContext::new(&root)
+            });
+            assert_eq!(context, CompletionContext::None, "{source}");
+        }
+    }
+
+    #[test]
     fn command_name_completion_does_not_construct_file_roles() {
         let source = r"\sect";
         let root = crate::parser::parse(source).syntax();
@@ -905,7 +1032,9 @@ mod tests {
             &root,
             source.len(),
             &ResolvedDeclarations::default(),
-            || panic!("command-name classification must not build source role indexes"),
+            || -> crate::external::links::FileRoleContext {
+                panic!("command-name classification must not build source role indexes")
+            },
         );
         assert_eq!(
             context,

@@ -26,6 +26,7 @@ use crate::parser::conditional;
 use crate::parser::core::SyntaxError;
 use crate::parser::events::Event;
 use crate::parser::lexer::{ParseCtx, PrimitiveOperandScan, Token};
+use crate::parser::reader_facts::token_list_reader;
 use crate::semantic::signature::{
     ArgKind, ArgSpec, ArgumentDomain, builtin, match_arg_slot, match_verbatim_arg_slot,
 };
@@ -91,6 +92,19 @@ enum Block {
 /// Parse a token stream into parser events and a list of syntax errors.
 pub(crate) fn parse(tokens: &[Token], ctx: &ParseCtx) -> (Vec<Event>, Vec<SyntaxError>) {
     let mut p = Parser::new(tokens, ctx);
+    p.document();
+    debug_assert_balanced(&p.events);
+    (p.events, p.errors)
+}
+
+/// Fragment tokens keep local CST/error offsets, while reader admission uses
+/// their absolute position in the original source.
+pub(crate) fn parse_with_offset(
+    tokens: &[Token],
+    ctx: &ParseCtx,
+    source_offset: usize,
+) -> (Vec<Event>, Vec<SyntaxError>) {
+    let mut p = Parser::new_with_offset(tokens, ctx, source_offset);
     p.document();
     debug_assert_balanced(&p.events);
     (p.events, p.errors)
@@ -628,7 +642,7 @@ struct Parser<'t> {
     ///
     /// Openers inside an expl3 region are excluded outright: in-region layout is
     /// the formatter's, owned through `semantic::expl3`'s statement segmentation
-    /// (`AGENTS.md`, expl3 code formatting), and a `CONDITIONAL` node there would
+    /// and a `CONDITIONAL` node there would
     /// contend with it. The exclusion also keeps the `\else:`/`\or:`/`\fi:`
     /// spellings out of scope. Recognition itself is shared with the linter's
     /// `ConditionalIndex` ([`conditional::OpenerScan`]) so the two cannot drift.
@@ -641,10 +655,10 @@ struct Parser<'t> {
     /// Replacement groups after a primitive definition's name and parameters.
     /// Their tokens are stored code even when the name is an unbraced control word.
     def_body_groups: std::collections::HashSet<usize>,
-    /// Opening braces owned by source-proved primitive detokenize heads. Kept
+    /// Opening braces owned by source-proved inert argument readers. Kept
     /// independently of argument attachment, which may decline a blank line.
     token_list_groups: std::collections::HashSet<usize>,
-    primitive_detokenize_heads: std::collections::HashSet<usize>,
+    primitive_token_list_heads: std::collections::HashSet<usize>,
     /// Copied or inspected command names do not delimit environments. The
     /// ordered index keeps this check bounded for every grammar gate.
     primitive_operand_heads: Vec<usize>,
@@ -792,11 +806,15 @@ struct Parser<'t> {
 
 impl<'t> Parser<'t> {
     fn new(tokens: &'t [Token], ctx: &'t ParseCtx) -> Self {
+        Self::new_with_offset(tokens, ctx, 0)
+    }
+
+    fn new_with_offset(tokens: &'t [Token], ctx: &'t ParseCtx, source_offset: usize) -> Self {
         let pre = PreScan::run(tokens, ctx);
         let mut operands = PrimitiveOperandScan::default();
-        let mut primitive_detokenize_heads = std::collections::HashSet::new();
+        let mut primitive_token_list_heads = std::collections::HashSet::new();
         let mut primitive_operand_heads = Vec::new();
-        let mut operand_offset = 0;
+        let mut operand_offset = source_offset;
         for (index, token) in tokens.iter().enumerate() {
             let operand = operands.observe_at(token.kind, &token.text, ctx, operand_offset);
             operand_offset += token.text.len();
@@ -805,9 +823,9 @@ impl<'t> Parser<'t> {
             }
             if !operand
                 && token.kind == SyntaxKind::CONTROL_WORD
-                && token.text.get(1..) == Some("detokenize")
+                && token.text.get(1..).is_some_and(token_list_reader)
             {
-                primitive_detokenize_heads.insert(index);
+                primitive_token_list_heads.insert(index);
             }
         }
         Self {
@@ -837,7 +855,7 @@ impl<'t> Parser<'t> {
             def_parameter_dollars: pre.def_parameter_dollars,
             def_body_groups: pre.def_body_groups,
             token_list_groups: std::collections::HashSet::new(),
-            primitive_detokenize_heads,
+            primitive_token_list_heads,
             primitive_operand_heads,
             last_alias_closer: pre
                 .alias_closers
@@ -962,8 +980,7 @@ impl<'t> Parser<'t> {
     /// True when token `idx` sits in *macro code*: inside a definition body
     /// (issues #45/#55) or inside an expl3 region (issue #60; `.dtx` doc-margin
     /// lines exempt, see [`Self::expl_toggles`]). There `\begin`/`\end` are
-    /// plain commands that need not pair, and an orphan `\]`/`\)` is data
-    /// (`AGENTS.md` decision #1).
+    /// plain commands that need not pair, and an orphan `\]`/`\)` is data.
     fn in_macro_code(&self, idx: usize) -> bool {
         self.in_def_body || (self.in_expl_region(idx) && !self.on_doc_margin_line(idx))
     }
@@ -1274,9 +1291,8 @@ impl<'t> Parser<'t> {
     /// ([`Self::extend_back`] — the construct self-opens, so its kind is only
     /// known afterwards).
     ///
-    /// The bound run becomes a named node rather than bare leaves — the
-    /// named-trivia enrichment `AGENTS.md` #9 reserved — so downstream
-    /// (LSP/formatter) sees the doc comment as one unit.
+    /// The bound run becomes a named node rather than bare leaves, so
+    /// downstream LSP and formatter consumers see the doc comment as one unit.
     ///
     /// Shared by [`Self::parse_block`] and [`Self::conditional`], which differ
     /// only in what they check *before* calling (a conditional divider is not
@@ -1678,8 +1694,8 @@ impl<'t> Parser<'t> {
     /// `\foo` followed by its greedily-attached argument groups.
     ///
     /// Arity is unknown without the semantic layer, so we attach every trailing
-    /// `{…}` / `[…]` group (see `AGENTS.md`, Core decision #8, and
-    /// [`Self::attach_arguments`] for the `[…]` shape gates). The one curated
+    /// `{…}` / `[…]` group (see [`Self::attach_arguments`] for the `[…]`
+    /// shape gates). The one curated
     /// exception: a delimiter-size command (`\Big`, `\bigl`, …) never takes a
     /// `[…]` argument — its `[` is the delimiter it sizes (`\Big[ x \Big]`),
     /// mirroring the `\left`/`\right` special case.
@@ -1688,8 +1704,8 @@ impl<'t> Parser<'t> {
             self.operand_command(ArgumentDomain::Unknown);
             return;
         }
-        if self.primitive_detokenize_heads.contains(&self.pos)
-            && !self.ctx.is_suppressed("detokenize")
+        if self.primitive_token_list_heads.contains(&self.pos)
+            && !self.ctx.is_suppressed(&self.text()[1..])
         {
             let scan = self.scan_trivia(self.pos + 1, CommentMode::Skip);
             if scan.next_kind == Some(SyntaxKind::L_BRACE) {
@@ -1722,8 +1738,8 @@ impl<'t> Parser<'t> {
         self.in_def_body = saved || is_definition_body_command(self.text());
         let consumes_control_symbol_name =
             is_def_prefix_command(self.text()) || is_command_definition_command(self.text());
-        // Arity-directed expl3 attachment (decision #8's sanctioned
-        // deviation): resolve the head's argspec and scan the whole unit
+        // Arity-directed expl3 attachment: resolve the head's argspec and scan
+        // the whole unit
         // *before* any event is emitted; the replay below consumes exactly
         // the plan, so the scan mirrors the walk by construction. A
         // colon-carrying head is never a def-prefix or definition-body name
@@ -1826,8 +1842,8 @@ impl<'t> Parser<'t> {
 
     /// Greedily attach trailing `{…}` / `[…]` argument groups to the currently
     /// open node, allowing intervening trivia but ordinarily stopping at a
-    /// paragraph break. Shared by `\foo` commands and `\begin{env}` (see
-    /// `AGENTS.md`, Core decision #8). Arity is unknown without the semantic
+    /// paragraph break. Shared by `\foo` commands and `\begin{env}`.
+    /// Arity is unknown without the semantic
     /// layer.
     ///
     /// `[…]` attachment is additionally shape-gated (issue #43) — `[`/`]` are
@@ -1852,7 +1868,7 @@ impl<'t> Parser<'t> {
     ///   detached `[` is content: `\begin{align}` + newline + `[a]_1`) demands
     ///   a directly-abutting `[` even outside math; `Forbid` (the
     ///   delimiter-size commands, [`Self::command`]) never attaches one.
-    ///   `Greedy` — everything else — keeps decision #8's trivia-crossing
+    ///   `Greedy` — everything else — keeps the trivia-crossing
     ///   attachment, which the semantic layer legitimizes downstream (the
     ///   xparse-signature glue relies on a next-line `[Warning]` still
     ///   attaching to `\begin{note}`).
@@ -1945,7 +1961,7 @@ impl<'t> Parser<'t> {
                 // A verbatim-argument command's body (`\url{…}`, `\lstinline|…|`,
                 // the final arg of `\mintinline{lang}{code}`) is lexed as a single
                 // `VERB` token immediately following the command, so attach it as a
-                // child like any other argument (decision #8) instead of leaving it
+                // child like any other argument instead of leaving it
                 // a sibling. A *standalone* `\verb…`/`\verb*…` token (its text starts
                 // with `\`) is self-contained and belongs to no command — never
                 // capture it. `lex_verbatim_command` emits its non-`\` `VERB`
@@ -1984,7 +2000,7 @@ impl<'t> Parser<'t> {
     /// an argument opener (`[`/`{`). LaTeX's `\@ifstar` commands carry the star
     /// before their arguments (`\section*{…}`, mathpartir's `\inferrule*[…]`,
     /// the `\\*[2pt]` line break), so folding it lets those arguments attach
-    /// (decision #8) instead of the `*` breaking the run. Gating on a *following
+    /// instead of the `*` breaking the run. Gating on a *following
     /// argument* keeps a math operator (`\pi*r`, `\Gamma * x`) — a `*` with no
     /// argument after it — from being mistaken for a marker. The `*` must be a
     /// lone token tight to the command: a spaced `\foo *` is not a marker, and
@@ -2318,7 +2334,7 @@ impl<'t> Parser<'t> {
     /// No arguments are attached to either delimiter: the alias head consumes none
     /// (that is an admission rule of the scan, `semantic::define`), and attaching
     /// them from the *target's* signature would be arity-directed grouping from
-    /// scanned data, which `AGENTS.md` decision #8 holds the line on.
+    /// scanned data rather than source syntax.
     fn alias_environment(&mut self, target: &str, closer: usize) {
         self.open(SyntaxKind::ENVIRONMENT);
         self.open(SyntaxKind::BEGIN);
@@ -2424,8 +2440,8 @@ impl<'t> Parser<'t> {
     /// Inside a `CONDITIONAL` an `\else`/`\or`/`\fi` is a structural delimiter,
     /// parsed like `\end`, so a following group is the next branch's first
     /// element rather than the divider's argument. Greedy attachment is the
-    /// text-pure default precisely because the text carries no arity protocol
-    /// (`AGENTS.md` decision #8); here position in the construct *is* that
+    /// text-pure default precisely because the text carries no arity protocol;
+    /// here position in the construct *is* that
     /// protocol, and it is a static fact, so this is a sanctioned deviation on
     /// the same footing as the starred-variant fold.
     fn flow_command(&mut self) {
@@ -2547,7 +2563,7 @@ impl<'t> Parser<'t> {
     /// a line-oriented docstrip fact. TeX places no balance requirements on the
     /// chunk — a definition regularly opens a brace in one chunk and closes it
     /// several chunks later, and kernel code uses the `\end` primitive — so,
-    /// like the definition bodies of decision #1 (issues #45/#55):
+    /// like definition bodies (issues #45/#55):
     /// - `\begin`/`\end` inside parse as plain commands ([`Self::in_def_body`]),
     /// - chunk-unmatched braces are plain tokens with no diagnostics
     ///   ([`Self::plain_braces`]; matched pairs still parse as `GROUP`s),

@@ -18,7 +18,7 @@ pub fn in_token_list(token: &SyntaxToken) -> bool {
 
 /// Source ranges whose inert ownership the parser recorded. Local overrides
 /// decline primitive interpretation before the marker is emitted.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct TokenListContexts {
     ranges: Vec<TextRange>,
 }
@@ -65,60 +65,55 @@ pub struct PrimitiveOperandContexts {
 
 impl PrimitiveOperandContexts {
     pub fn from_definition_sites(root: &SyntaxNode, sites: &[super::DefSite]) -> Self {
-        use crate::parser::lexer::{ParseCtx, PrimitiveOperandScan, primitive_operand_reader};
-        use std::collections::HashSet;
+        use crate::parser::lexer::{ParseCtx, PrimitiveOperandScan};
+        use std::collections::{HashMap, HashSet};
         let mut overrides: Vec<_> = sites
             .iter()
-            .filter(|site| {
-                site.kind == super::DefSiteKind::Command
-                    && (primitive_operand_reader(&site.name)
-                        || super::define::listing_command_override(site))
-            })
+            .filter(|site| site.kind == super::DefSiteKind::Command)
             .map(|site| {
-                let factory = root
-                    .token_at_offset(site.range.start())
-                    .right_biased()
-                    .map(|token| token.text().trim_start_matches('\\').to_owned())
-                    .filter(|name| super::define::listing_declaration_factory(name));
                 (
                     site.name_range.start(),
                     site.range.start(),
                     site.name.clone(),
-                    factory,
                 )
             })
             .collect();
-        overrides.sort_unstable_by_key(|(start, _, _, _)| *start);
+        overrides.sort_unstable_by_key(|(start, _, _)| *start);
+        let owner_starts: HashSet<_> = overrides.iter().map(|(_, owner, _)| *owner).collect();
+        let mut owner_names = HashMap::new();
         let protected = TokenListContexts::new(root);
         let mut next_override = 0;
         let mut context = ParseCtx::default();
         let mut operands = PrimitiveOperandScan::default();
         let mut heads = Vec::new();
-        let mut listing_overrides = HashSet::new();
+        let mut declaration_overrides = HashSet::new();
         for token in root
             .descendants_with_tokens()
             .filter_map(|element| element.into_token())
         {
-            while let Some((_, owner, name, factory)) = overrides
+            // Collect owner spellings in this existing linear token walk. Looking
+            // each site up from the root can repeatedly scan long child lists.
+            if owner_starts.contains(&token.text_range().start())
+                && let Some(name) = token.text().strip_prefix('\\')
+            {
+                owner_names.insert(token.text_range().start(), name.to_owned());
+            }
+            while let Some((_, owner, name)) = overrides
                 .get(next_override)
-                .filter(|(start, _, _, _)| *start <= token.text_range().start())
+                .filter(|(start, _, _)| *start <= token.text_range().start())
             {
                 if heads
                     .binary_search_by_key(owner, |head: &TextRange| head.start())
                     .is_err()
-                    && factory
-                        .as_ref()
-                        .is_none_or(|factory| !listing_overrides.contains(factory))
+                    && owner_names
+                        .get(owner)
+                        .is_none_or(|owner| !declaration_overrides.contains(owner))
                 {
                     // Raw sites include generated declarations whose factory may
                     // have been replaced earlier. Prove their owner before using
-                    // them to suppress another primitive reader.
-                    if crate::parser::embedded::observes_settings_command(name) {
-                        listing_overrides.insert(name.to_string());
-                    }
-                    if primitive_operand_reader(name) {
-                        context.suppress(name.clone());
-                    }
+                    // them to suppress another source reader.
+                    declaration_overrides.insert(name.to_string());
+                    context.suppress(name.clone());
                 }
                 next_override += 1;
             }

@@ -75,7 +75,7 @@ impl ResponsePolicy {
             if !types.is_empty() {
                 capabilities.semantic_tokens_provider = Some(serde_json::from_value(json!({
                     "legend":{"tokenTypes":types,"tokenModifiers":self.semantic_modifiers()},
-                    "full": self.capabilities.pointer("/textDocument/semanticTokens/requests/full").is_some_and(|v| v == true || v.is_object()),
+                    "full": if self.supports("/textDocument/semanticTokens/requests/full/delta") { json!({"delta":true}) } else { json!(self.capabilities.pointer("/textDocument/semanticTokens/requests/full").is_some_and(|v| v == true || v.is_object())) },
                     "range": self.capabilities.pointer("/textDocument/semanticTokens/requests/range").is_some_and(|value| value == true || value.is_object())
                 })).expect("semantic token options"));
             }
@@ -143,7 +143,9 @@ impl ResponsePolicy {
             return;
         }
         match method {
-            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
+            "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/full/delta"
+            | "textDocument/semanticTokens/range" => {
                 let types = self.semantic_types();
                 let modifiers = self.semantic_modifiers();
                 if let Some(data) = result.get_mut("data").and_then(Value::as_array_mut) {
@@ -865,7 +867,7 @@ mod tests {
         policy.response("textDocument/diagnostic", None, &mut diagnostic);
         assert_eq!(diagnostic, json!({"items":[{"message":"Bad","range":{}}]}));
         let init = policy.initialize_result(crate::server_capabilities(
-            crate::PositionEncoding::Utf16,
+            tex_ls_analysis::text::PositionEncoding::Utf16,
             false,
         ));
         assert!(init["capabilities"].get("codeActionProvider").is_none());

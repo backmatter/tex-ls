@@ -68,6 +68,59 @@ fn roundtrip_units() {
     }
 }
 
+#[test]
+fn alltt_spaced_closers_preserve_bytes_and_restore_outer_modes() {
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for gap in [" ", "\t", " \t "] {
+        let source = format!(
+            "\\begin{{alltt}}\nbody % literal $literal$\n\\begin{{alltt}}$inner$\\end{gap}{{alltt}}\n$still_literal$\n\\end{gap}{{alltt}}\noutside % outer comment\n$x$\n"
+        );
+        for source in [source.clone(), source.replace('\n', "\r\n")] {
+            for config in [
+                LexConfig::from(LatexFlavor::Document),
+                LexConfig::from(LatexFlavor::Package),
+                LexConfig {
+                    flavor: LatexFlavor::Document,
+                    dtx: true,
+                },
+            ] {
+                let parsed = parse_with_flavor(&source, config);
+                assert_eq!(parsed.syntax().to_string(), source, "{config:?}");
+                assert!(parsed.errors.is_empty(), "{config:?}: {:?}", parsed.errors);
+                let syntax = parsed.syntax();
+                let tokens: Vec<_> = syntax
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .collect();
+                assert_eq!(
+                    tokens
+                        .iter()
+                        .filter(|token| token.kind() == SyntaxKind::DOLLAR)
+                        .count(),
+                    2,
+                    "only the outer math may regain dollar semantics"
+                );
+                let comments: Vec<_> = tokens
+                    .iter()
+                    .filter(|token| token.kind() == SyntaxKind::COMMENT)
+                    .map(|token| token.text())
+                    .collect();
+                assert_eq!(comments, ["% outer comment"]);
+                let closers: Vec<_> = tokens
+                    .windows(2)
+                    .filter(|pair| pair[0].text() == "\\end")
+                    .collect();
+                assert_eq!(closers.len(), 2);
+                for closer in closers {
+                    assert_eq!(closer[1].kind(), SyntaxKind::WHITESPACE);
+                    assert_eq!(closer[1].text(), gap);
+                }
+            }
+        }
+    }
+}
+
 /// Reduced by the property harness: the expl3 unit scanner sees a group span
 /// whose replay encounters a different structural boundary after the unmatched
 /// inner group. Recovery must demote or stop without panicking in every flavor.

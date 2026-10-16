@@ -5,7 +5,7 @@
   "definitions": {
     "BuildConfig": {
       "additionalProperties": false,
-      "description": "The `[build]` section: where the TeX compiler leaves its artifacts, and which\nfile it was run on. Read by the language server only (label-number hover and\ndocument symbols pull resolved numbers from the `.aux`; forward search locates\nthe compiled PDF); never by the formatter or linter, which stay hermetic (see\n`AGENTS.md`).",
+      "description": "The `[build]` section: where the TeX compiler leaves its artifacts, and which\nfile it was run on. Read by the language server only (label-number hover and\ndocument symbols pull resolved numbers from the `.aux`; forward search locates\nthe compiled PDF); never by the formatter or linter, which stay hermetic.",
       "properties": {
         "aux-dir": {
           "default": null,
@@ -52,15 +52,30 @@
     },
     "CommandDecl": {
       "additionalProperties": false,
-      "description": "One `[commands.<name>]` entry: the built-in reference or citation command\nwhose semantic behavior the project command copies.",
+      "description": "One `[commands.<name>]` entry: the built-in label, reference, citation, or glossary command\nwhose semantic behavior the project command copies.",
       "properties": {
+        "argument-index": {
+          "default": null,
+          "description": "Zero-based index of the required brace group holding the key. Omitted\ndeclarations retain all key argument positions of the target command.",
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "like": {
           "default": null,
-          "description": "The built-in reference or citation command whose key behavior is copied.",
+          "description": "The built-in label, reference, citation, or glossary command whose key behavior is copied.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "prefix": {
+          "default": "",
+          "description": "Literal namespace text implicitly prepended by the wrapper to each key.",
+          "type": "string"
         }
       },
       "type": "object"

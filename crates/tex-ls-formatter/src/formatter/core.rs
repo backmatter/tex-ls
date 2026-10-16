@@ -7,7 +7,13 @@
 //! `lower_node` contains the LaTeX-specific lowering. The surrounding format
 //! entry points and the Wadler-style `Ir` printer are language-independent.
 
+mod ranges;
+mod source;
 mod trivia;
+pub use ranges::document_body_contains;
+use ranges::{range_elements, range_tail_kind, sorted_ranges_contain, sorted_ranges_overlap};
+use source::PreparedSource;
+pub use source::expl3_regions;
 use trivia::*;
 mod math;
 use math::*;
@@ -26,8 +32,6 @@ mod expl;
 use expl::*;
 mod prose;
 use prose::*;
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::iter::Peekable;
 
 use rowan::{TextRange, TextSize};
@@ -35,16 +39,12 @@ use rowan::{TextRange, TextSize};
 use super::colspec::{self, ColAlign};
 use tex_ls_parser::ast::{AstNode, Environment, Group, command_name};
 use tex_ls_parser::declarations::ResolvedDeclarations;
-use tex_ls_parser::directives;
-use tex_ls_parser::parser::is_def_prefix_command;
-use tex_ls_parser::parser::lexer::{ExplToggle, expl_toggle};
 use tex_ls_parser::parser::{LatexFlavor, parse_with_declarations, parse_with_flavor};
 use tex_ls_parser::semantic::expl3::{StatementMap, segment_expl_statements};
 use tex_ls_parser::semantic::tikz::statement_glue;
 use tex_ls_parser::semantic::{
     ArgKind, ArgSpec, ArgumentDomain, CitationPlacement, ContentKind, DelimiterRole, MathClass,
     SignatureDb, Signatures, expl3, match_arg_slot, match_verbatim_arg_slot, math_atoms,
-    scan_definitions,
 };
 use tex_ls_parser::syntax::{
     SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, is_collapsible_trivia, is_param_digit,
@@ -53,42 +53,17 @@ use tex_ls_parser::syntax::{
 
 use super::context::FormatContext;
 use super::ir::Ir;
+use super::output::{Tail, finish_output, resolve_line_ending};
 use super::printer::Printer;
 use super::sentence::{ResolvedProfile, SentenceOptions, is_sentence_boundary_text};
-use super::style::{
-    FormatStyle, ItemIndent, LineEnding, MathWrap, WrapMode, apply_line_ending, detect_line_ending,
-};
+use super::style::{FormatStyle, ItemIndent, MathWrap, WrapMode};
 
-/// Why a document could not be formatted. The formatter only operates on a clean
-/// parse: anything the parser flagged, or any `ERROR` token, is refused rather
-/// than silently reshaped.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FormatError {
-    /// The input parsed with `count` syntax error(s); the formatter only
-    /// supports input the parser accepts without diagnostics.
-    ParseErrors { count: usize },
-    /// The CST contains an `ERROR` token the lowering does not handle.
-    UnsupportedConstruct { kind: SyntaxKind, snippet: String },
+define_format_error! {
+    /// Why a document could not be formatted. The formatter only operates on a clean
+    /// parse: anything the parser flagged, or any `ERROR` token, is refused rather
+    /// than silently reshaped.
+    SyntaxKind
 }
-
-impl std::fmt::Display for FormatError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ParseErrors { count } => write!(
-                f,
-                "input contains {count} parser diagnostic(s); formatter only supports parseable input"
-            ),
-            Self::UnsupportedConstruct { kind, snippet } => {
-                write!(
-                    f,
-                    "unsupported construct for formatter: {kind:?} near {snippet:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for FormatError {}
 
 /// Format `input` with the default [`FormatStyle`].
 pub fn format(input: &str) -> Result<String, FormatError> {
@@ -213,7 +188,7 @@ pub fn format_with_style_flavored_with_signatures(
 /// reparse-free entry: the language server hands it the salsa-cached tree
 /// (`db.parsed_tree`) instead of re-running the parser. The caller owns the
 /// `ParseErrors` guard — this entry assumes the parse was clean and only
-/// enforces the `ERROR`-token invariant (`validate_supported_tokens`).
+/// refuses recovery tokens and preserves source with uncertain lexical ownership.
 /// [`format_with_style`] is the parse-then-format convenience wrapper.
 pub fn format_node(root: &SyntaxNode, style: FormatStyle) -> Result<String, FormatError> {
     format_node_with_signatures(root, style, &SignatureDb::default())
@@ -240,20 +215,22 @@ pub fn format_node_with_signatures_sentence(
     external: &SignatureDb,
     sentence: SentenceOptions<'_>,
 ) -> Result<String, FormatError> {
-    validate_supported_tokens(root)?;
-
+    let validation = validate_supported_tokens(root)?;
+    let uncertain = validation.uncertain.is_some();
     let ctx = FormatContext::with_sentence(style, sentence);
-    let mut formatted = format_root(root, ctx, external, None);
-    // Normalize the document's trailing edge: drop any trailing blank lines and
-    // per-line trailing whitespace at EOF, then guarantee exactly one final
-    // newline. Empty output stays empty. Only ASCII whitespace/newlines are
-    // trimmed, so trailing Unicode content (e.g. a non-breaking space) survives.
-    let trimmed_len = formatted.trim_end_matches([' ', '\t', '\n', '\r']).len();
-    formatted.truncate(trimmed_len);
-    if !formatted.is_empty() {
-        formatted.push('\n');
-    }
-    apply_line_ending(&mut formatted, resolve_line_ending(root, style));
+    let mut formatted = format_root(root, ctx, external, None, uncertain);
+    // A final uncertain token and its adjacent EOF trivia are protected bytes.
+    // Otherwise keep the ordinary canonical trailing edge.
+    let protected_tail = uncertain && validation.last_kind == Some(SyntaxKind::UNCERTAIN);
+    let comment_tail = validation.last_kind == Some(SyntaxKind::COMMENT);
+    let tail = if protected_tail {
+        Tail::Protected
+    } else if comment_tail {
+        Tail::Comment
+    } else {
+        Tail::Trivia
+    };
+    finish_output(&mut formatted, resolve_line_ending(root, style), tail, true);
     Ok(formatted)
 }
 
@@ -297,32 +274,42 @@ pub fn format_node_range_with_signatures_sentence(
     range: TextRange,
     sentence: SentenceOptions<'_>,
 ) -> Result<String, FormatError> {
-    validate_supported_tokens(root)?;
+    if let Some(token) = validate_supported_tokens(root)?.uncertain {
+        return Err(FormatError::UnsupportedConstruct {
+            kind: token.kind(),
+            snippet: token.text().to_string(),
+        });
+    }
 
     let ctx = FormatContext::with_sentence(style, sentence);
-    let mut formatted = format_root(root, ctx, external, Some(range));
-    let trimmed_len = formatted.trim_end_matches([' ', '\t', '\n', '\r']).len();
-    formatted.truncate(trimmed_len);
-    // Detected from the whole document, not the fragment: the replacement has to
-    // match the endings of the text it splices into, and a block that happens to
-    // hold no line break of its own would otherwise answer `Lf`.
-    apply_line_ending(&mut formatted, resolve_line_ending(root, style));
+    let mut formatted = format_root(root, ctx, external, Some(range), false);
+    let comment_tail = range_tail_kind(root, range) == Some(SyntaxKind::COMMENT);
+    let tail = if comment_tail {
+        Tail::Comment
+    } else {
+        Tail::Trivia
+    };
+    // Resolve against the whole document so fragments keep its line endings.
+    finish_output(
+        &mut formatted,
+        resolve_line_ending(root, style),
+        tail,
+        false,
+    );
     Ok(formatted)
 }
 
-/// The concrete ending `style` calls for on this document ([`LineEnding::Auto`]
-/// resolved against what the source used).
-fn resolve_line_ending(root: &SyntaxNode, style: FormatStyle) -> LineEnding {
-    if style.line_ending == LineEnding::Auto {
-        style.line_ending.resolve(detect_line_ending(&root.text()))
-    } else {
-        style.line_ending.resolve(LineEnding::Lf)
-    }
+/// Refuse recovery and detect uncertain lexical ownership. An uncertain percent or
+/// dollar may own the rest of its physical line, so moving following source onto
+/// that line could absorb it even when the original parse has no diagnostics.
+struct TokenValidation {
+    uncertain: Option<SyntaxToken>,
+    last_kind: Option<SyntaxKind>,
 }
 
-/// Refuse any `ERROR` token. A clean parse should contain none, but the parser
-/// can emit them on recovery; the formatter never reshapes around them.
-fn validate_supported_tokens(root: &SyntaxNode) -> Result<(), FormatError> {
+fn validate_supported_tokens(root: &SyntaxNode) -> Result<TokenValidation, FormatError> {
+    let mut uncertain = None;
+    let mut last_kind = None;
     for element in root.descendants_with_tokens() {
         let Some(token) = element.into_token() else {
             continue;
@@ -333,8 +320,17 @@ fn validate_supported_tokens(root: &SyntaxNode) -> Result<(), FormatError> {
                 snippet: token.text().to_string(),
             });
         }
+        if !is_collapsible_trivia(token.kind()) {
+            last_kind = Some(token.kind());
+        }
+        if uncertain.is_none() && token.kind() == SyntaxKind::UNCERTAIN {
+            uncertain = Some(token);
+        }
     }
-    Ok(())
+    Ok(TokenValidation {
+        uncertain,
+        last_kind,
+    })
 }
 
 fn format_root(
@@ -342,35 +338,10 @@ fn format_root(
     ctx: FormatContext,
     external: &SignatureDb,
     range: Option<TextRange>,
+    has_uncertain: bool,
 ) -> String {
-    // Scan the document's own `\newcommand`/`\newenvironment`/xparse definitions
-    // once, so the lowering resolves a locally-defined construct's arity (not just
-    // the built-in DB's). They are overlaid on top of `external` — the merged
-    // signatures of any loaded local packages — so a document redefinition wins
-    // over a package. `external` is empty for the contextless entry points, in
-    // which case this is exactly the old document-only scan. Held by value for the
-    // whole lowering.
-    let mut user = external.clone();
-    user.merge_from(&scan_definitions(root), None);
-    // The expl3 source regions, recomputed read-only from the same toggle set the
-    // lexer uses ([`expl_toggle`]). Inside them source whitespace is catcode-9
-    // (ignored) and `~` is catcode-10 (a literal space), so the formatter fully owns
-    // layout. Held by value for the whole lowering, like `user`.
-    let regions = expl3_regions(root);
-    // The spans the author turned layout off over, resolved from this file's own
-    // comment directives (see [`tex_ls_parser::directives`]). A pure function of the
-    // tree, held by value for the whole lowering like `regions`. Empty for the
-    // overwhelming majority of documents, in which case every query is free.
-    let suppressed = directives::Suppressions::build(root);
-    let token_lists = tex_ls_parser::semantic::context::TokenListContexts::new(root);
-    // The sentence-boundary profile for the `sentence`/`semantic` wrap modes,
-    // resolved from the run's [`SentenceOptions`]. `Copy`, borrowing the merged
-    // no-break slice `ctx` still owns for the whole call, so it rides `LowerCtx`
-    // like the bare `wrap` mode. Never consulted under `reflow`/`preserve`.
+    let source = PreparedSource::new(root, external, has_uncertain);
     let profile = ctx.sentence().resolved();
-    // The `.dtx` doc-paragraph reflow-safety memo (see [`DtxReflowCache`]),
-    // owned here for the whole lowering like `user` and `regions`.
-    let dtx_reflow_cache = DtxReflowCache::default();
     let cx = LowerCtx {
         wrap: ctx.style().wrap,
         item_indent: ctx.style().item_indent,
@@ -379,23 +350,16 @@ fn format_root(
         // derivation from `wrap` for free.
         math_wrap: ctx.style().math_wrap.resolve(ctx.style().wrap),
         stable_target: ctx.style().stable_wrap_target(),
-        signatures: Signatures::new(&user),
-        expl3_regions: &regions,
-        suppressed: suppressed.format_ranges(),
-        token_lists: &token_lists,
+        source: &source,
+        signatures: Signatures::new(&source.signatures),
         profile,
         range,
-        dtx_reflow_cache: &dtx_reflow_cache,
         dtx_margin_probe: false,
         preserve_dtx_nested_layout: false,
         in_dtx_doc_region: false,
         in_alignment_cell: false,
         absorbed_control_newline: None,
         omitted_leading_comment: None,
-        is_dtx: root
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .any(|t| matches!(t.kind(), SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD)),
     };
     // Saturate `Group::expand` at the lowering->printer seam: after this, the
     // flag is the single representation of "forced open" the printer trusts.
@@ -404,356 +368,6 @@ fn format_root(
     // group for the printer in one bottom-up walk.
     let ir = lower_node(root, cx).propagate_breaks();
     Printer::new(ctx.style()).print(&ir)
-}
-
-/// Whether two byte ranges overlap (share at least one byte). Half-open, so ranges
-/// that merely touch at a boundary (`a.end == b.start`) do not overlap — used by
-/// the range-formatting emission filter to keep a top-level block's leading/trailing
-/// trivia (which abuts but does not overlap the block-aligned range) out of the
-/// fragment.
-fn ranges_overlap(a: TextRange, b: TextRange) -> bool {
-    a.start() < b.end() && b.start() < a.end()
-}
-
-/// Whether `range` lies wholly inside the body of the canonical `document`
-/// environment. Its body is the formatter's canonical no-indent case, so exposing
-/// direct body blocks does not discard any ancestor indentation context.
-fn document_body_contains(node: &SyntaxNode, range: TextRange) -> bool {
-    let Some(environment) = Environment::cast(node.clone()) else {
-        return false;
-    };
-    if environment.name().as_deref() != Some("document") {
-        return false;
-    }
-    let (Some(begin), Some(end)) = (environment.begin(), environment.end()) else {
-        return false;
-    };
-    range.start() >= begin.syntax().text_range().end()
-        && range.end() <= end.syntax().text_range().start()
-}
-
-/// The nearest preceding sibling *element* of `node`, skipping `WHITESPACE`/`NEWLINE`
-/// trivia. Used by the definee gate to find the command a toggle would be the
-/// definee of.
-fn prev_nontrivia_element(node: &SyntaxNode) -> Option<SyntaxElement> {
-    let mut prev = node.prev_sibling_or_token();
-    while let Some(el) = prev {
-        if let SyntaxElement::Token(t) = &el
-            && is_collapsible_trivia(t.kind())
-        {
-            prev = el.prev_sibling_or_token();
-            continue;
-        }
-        return Some(el);
-    }
-    None
-}
-
-/// Whether an expl3 toggle `CONTROL_WORD` sits at *top-level statement* position, so
-/// TeX actually executes it and switches catcodes at load. Two shapes are rejected
-/// (issue #69), both false positives of the name-only model:
-///
-/// - **Definee position:** the toggle command's immediately-preceding non-trivia
-///   sibling is a `\def`/`\let`-family primitive, so the toggle is the control
-///   sequence being defined (`\protected\def\ProvidesExplPackage{…}`), never run.
-/// - **Nested in a group / definition body:** an ancestor of the toggle's command is
-///   a `GROUP` or `OPTIONAL`, so the toggle is tokenized into a replacement text and
-///   executed — if ever — only when that macro runs, not at load.
-///
-/// The lexer's letter mode keeps the naive name-only model: mis-lexing a name only
-/// splits CST tokens (lossless, cosmetic); only mis-*owning* layout rewrites tex-ls.
-fn toggle_is_top_level(token: &SyntaxToken) -> bool {
-    let Some(command) = token.parent() else {
-        return true;
-    };
-    if command.kind() != SyntaxKind::COMMAND {
-        // Not the head of a command node — leave the naive model in charge.
-        return true;
-    }
-    // Rule 1: nested inside an attached group or definition body.
-    for ancestor in command.ancestors().skip(1) {
-        match ancestor.kind() {
-            SyntaxKind::GROUP | SyntaxKind::OPTIONAL => return false,
-            SyntaxKind::ROOT => break,
-            _ => {}
-        }
-    }
-    // Rule 2: definee of a `\def`/`\let`-family command. `command_name` strips the
-    // leading `\`, so reconstruct it for the shared curated set.
-    if let Some(SyntaxElement::Node(prev)) = prev_nontrivia_element(&command)
-        && prev.kind() == SyntaxKind::COMMAND
-        && let Some(name) = command_name(&prev)
-        && (is_def_prefix_command(&format!("\\{name}"))
-            || matches!(name.as_str(), "let" | "futurelet"))
-    {
-        return false;
-    }
-    true
-}
-
-/// The byte ranges of the document's expl3 regions, in document order. A region runs
-/// from an opener (`\ExplSyntaxOn`, or a `\ProvidesExpl*` declaration, which opens
-/// expl3 for the rest of the file) through the matching `\ExplSyntaxOff` (inclusive
-/// of both toggle commands), or to end of input when unclosed. The toggle *name set*
-/// is read from [`expl_toggle`] — the same fixed set the lexer flips its `expl_syntax`
-/// flag on — but the formatter additionally applies a *positional* gate
-/// (`toggle_is_top_level`): only a top-level toggle opens a formatter-owned region.
-/// The name set stays shared so the two never drift; positional layout ownership
-/// remains formatter-specific.
-///
-/// Matches only [`SyntaxKind::CONTROL_WORD`] tokens, so a `\ExplSyntaxOn` written
-/// inside `\verb`/a comment (a `VERB`/`COMMENT` token, never a `CONTROL_WORD`) is
-/// not a toggle, exactly as in the lexer. The CST is untouched.
-///
-/// `pub` so the linter (in the `tex-ls` crate) shares the *same* region
-/// computation (the `unclosed-math-delimiter` rule suppresses inside expl3
-/// code), keeping the formatter and linter from drifting on what counts as an
-/// expl3 region.
-pub fn expl3_regions(root: &SyntaxNode) -> Vec<TextRange> {
-    let mut regions: Vec<TextRange> = Vec::new();
-    let mut open: Option<TextSize> = None;
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| t.kind() == SyntaxKind::CONTROL_WORD)
-    {
-        // Positional gate: a gated-out toggle is skipped entirely (`On` and `Off`
-        // alike), so a stored or definee toggle neither opens nor closes a region.
-        let toggle = match expl_toggle(token.text()) {
-            Some(t) if toggle_is_top_level(&token) => t,
-            _ => continue,
-        };
-        match toggle {
-            // A redundant inner `\ExplSyntaxOn` does not restart the region (the
-            // lexer's flag is an idempotent set-true).
-            ExplToggle::On if open.is_none() => open = Some(token.text_range().start()),
-            ExplToggle::On => {}
-            ExplToggle::Off => {
-                if let Some(start) = open.take() {
-                    regions.push(TextRange::new(start, token.text_range().end()));
-                }
-                // A stray `\ExplSyntaxOff` with no open region is ignored (toggling
-                // an already-false flag is a no-op), matching the lexer.
-            }
-        }
-    }
-    if let Some(start) = open.take() {
-        // An unclosed region runs to end of input (the lexer's flag simply stays
-        // true to EOF).
-        regions.push(TextRange::new(start, root.text_range().end()));
-    }
-    let regions = intersect_macrocode_bodies(root, regions);
-    let regions = subtract_doc_margin_lines(root, regions);
-    subtract_guarded_line_runs(root, regions)
-}
-
-/// In a `.dtx` (any `DOC_MARGIN` token present), restrict the expl3 regions to
-/// `macrocode`/`macrocode*` chunk *bodies* — the only lines docstrip extracts as
-/// code. The margin subtraction below removes doc lines that carry their `%` in
-/// column 0, but the doc part is not obliged to margin every line (a stray
-/// `␣%` comment, issue #58): any non-chunk line is documentation regardless of
-/// its first column, so relayout must never own it. A no-op for non-`.dtx`
-/// documents, where an unmargined `\begin{macrocode}` is just an ordinary
-/// user environment.
-fn intersect_macrocode_bodies(root: &SyntaxNode, regions: Vec<TextRange>) -> Vec<TextRange> {
-    if regions.is_empty()
-        || !root
-            .descendants_with_tokens()
-            .filter_map(|e| e.into_token())
-            .any(|t| t.kind() == SyntaxKind::DOC_MARGIN)
-    {
-        return regions;
-    }
-    // `macrocode` never nests, so the bodies are disjoint and in document order.
-    // A body runs from the end of the `\begin` frame to the start of the `\end`
-    // frame's `\end` (or the chunk end when the frame is missing at EOF); the
-    // frame line's own margin/whitespace inside that span is removed by the
-    // margin subtraction pass.
-    let bodies: Vec<TextRange> = root
-        .descendants()
-        .filter(|n| n.kind() == SyntaxKind::ENVIRONMENT)
-        .filter_map(Environment::cast)
-        .filter(|e| matches!(e.name().as_deref(), Some("macrocode" | "macrocode*")))
-        .filter_map(|e| {
-            let start = e.begin()?.syntax().text_range().end();
-            let end = e
-                .end()
-                .map(|end| end.syntax().text_range().start())
-                .unwrap_or_else(|| e.syntax().text_range().end());
-            (start < end).then_some(TextRange::new(start, end))
-        })
-        .collect();
-    let mut out = Vec::with_capacity(regions.len());
-    let mut b = bodies.iter().peekable();
-    for region in regions {
-        while let Some(&&body) = b.peek() {
-            if body.end() <= region.start() {
-                b.next();
-                continue;
-            }
-            if body.start() >= region.end() {
-                break;
-            }
-            let start = region.start().max(body.start());
-            let end = region.end().min(body.end());
-            if start < end {
-                out.push(TextRange::new(start, end));
-            }
-            if body.end() >= region.end() {
-                break;
-            }
-            b.next();
-        }
-    }
-    out
-}
-
-/// Remove every `.dtx` documentation line from the expl3 regions. In a `.dtx`,
-/// an `\ExplSyntaxOn` in one `macrocode` chunk is regularly matched by the
-/// `\ExplSyntaxOff` several chunks later, so the lexical region spans the
-/// documentation in between — margined doc lines and the `%    \end{macrocode}`
-/// frame lines themselves. Those lines are *not* expl3 code (at package-load
-/// time they are `%` comments; the margin must stay in column 0), so relayout
-/// must never own them: subtract each doc-margined line (its `DOC_MARGIN` opens
-/// the line by construction — the lexer emits margins at line start only)
-/// through its terminating newline. Code lines inside chunk bodies carry no
-/// margin and stay in-region. A no-op for non-`.dtx` documents (no `DOC_MARGIN`
-/// tokens, and the common all-code case short-circuits on the first hole scan).
-fn subtract_doc_margin_lines(root: &SyntaxNode, regions: Vec<TextRange>) -> Vec<TextRange> {
-    if regions.is_empty() {
-        return regions;
-    }
-    // One pass over the leaves: a DOC_MARGIN opens a hole, the next NEWLINE
-    // (inclusive) closes it.
-    let mut holes: Vec<TextRange> = Vec::new();
-    let mut hole_start: Option<TextSize> = None;
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
-        match token.kind() {
-            SyntaxKind::DOC_MARGIN => {
-                hole_start.get_or_insert(token.text_range().start());
-            }
-            SyntaxKind::NEWLINE => {
-                if let Some(start) = hole_start.take() {
-                    holes.push(TextRange::new(start, token.text_range().end()));
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(start) = hole_start.take() {
-        holes.push(TextRange::new(start, root.text_range().end()));
-    }
-    subtract_holes(regions, &holes)
-}
-
-/// Remove every maximal run of two-or-more consecutive docstrip-guarded lines
-/// (`%<…>…`) from the expl3 regions. A fully-guarded chunk (a docstrip release
-/// block, `%<latexrelease>…%<latexrelease>\EndIncludeInRelease`, or any run of
-/// `%<*name>`/`%<name>` lines) pins **every** line to column 0 by its guard, so
-/// the expl3 block layout cannot own it: reflowing indents a delimiter or wraps a
-/// long line off its guard, stranding code onto an *unguarded* line — a docstrip
-/// semantics change (the code leaves its guard's scope) that also re-parses
-/// differently, so the layout never reaches a fixed point (issue #72, latex2e
-/// `ltcmdhooks.dtx`). Handing such a run to the generic (non-expl3) lowering
-/// preserves it verbatim, which is idempotent and semantics-preserving.
-///
-/// The two-line threshold keeps an *isolated* guarded line (a lone `%<trace> …`
-/// statement amid unguarded code, or a lone `%<*name>` block marker) in-region,
-/// where it lays out on its own line as before — such a line's content stays on
-/// its line and never strands. A no-op for non-`.dtx` documents (no `GUARD`
-/// tokens).
-fn subtract_guarded_line_runs(root: &SyntaxNode, regions: Vec<TextRange>) -> Vec<TextRange> {
-    if regions.is_empty() {
-        return regions;
-    }
-    // One pass over the leaves grouping guard-led source lines into runs: a line
-    // is guard-led when its first token is a `GUARD`. A run of two or more
-    // adjacent guard-led lines becomes one hole spanning them (each line reaches
-    // through its terminating newline).
-    let mut holes: Vec<TextRange> = Vec::new();
-    let mut at_line_start = true;
-    let mut line_is_guard = false;
-    let mut cur_line_start = TextSize::new(0);
-    // The run of consecutive guard-led lines in progress: (start, end, line count).
-    let mut run: Option<(TextSize, TextSize, usize)> = None;
-    fn flush(run: &mut Option<(TextSize, TextSize, usize)>, holes: &mut Vec<TextRange>) {
-        if let Some((start, end, count)) = run.take()
-            && count >= 2
-        {
-            holes.push(TextRange::new(start, end));
-        }
-    }
-    for token in root
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-    {
-        if at_line_start {
-            cur_line_start = token.text_range().start();
-            line_is_guard = token.kind() == SyntaxKind::GUARD;
-            at_line_start = false;
-        }
-        if token.kind() == SyntaxKind::NEWLINE {
-            let line_end = token.text_range().end();
-            if line_is_guard {
-                match run {
-                    // Adjacent to the run in progress (its end abuts this line's
-                    // start): extend it.
-                    Some((start, end, count)) if end == cur_line_start => {
-                        run = Some((start, line_end, count + 1));
-                    }
-                    // A gap (a non-guarded line intervened) or the first guarded
-                    // line: close any prior run and open a fresh one.
-                    _ => {
-                        flush(&mut run, &mut holes);
-                        run = Some((cur_line_start, line_end, 1));
-                    }
-                }
-            } else {
-                flush(&mut run, &mut holes);
-            }
-            at_line_start = true;
-        }
-    }
-    flush(&mut run, &mut holes);
-    subtract_holes(regions, &holes)
-}
-
-/// Interval subtraction of `holes` from `regions`. Both lists must be sorted and
-/// pairwise disjoint; the output is too (the region binary-search lookups rely on
-/// that). Shared by the two region-subtraction passes above.
-fn subtract_holes(regions: Vec<TextRange>, holes: &[TextRange]) -> Vec<TextRange> {
-    if holes.is_empty() {
-        return regions;
-    }
-    let mut out = Vec::with_capacity(regions.len());
-    let mut h = holes.iter().peekable();
-    for region in regions {
-        let mut cursor = region.start();
-        while let Some(&&hole) = h.peek() {
-            if hole.end() <= cursor {
-                h.next();
-                continue;
-            }
-            if hole.start() >= region.end() {
-                break;
-            }
-            if hole.start() > cursor {
-                out.push(TextRange::new(cursor, hole.start()));
-            }
-            cursor = cursor.max(hole.end());
-            if cursor >= region.end() {
-                break;
-            }
-            h.next();
-        }
-        if cursor < region.end() {
-            out.push(TextRange::new(cursor, region.end()));
-        }
-    }
-    out
 }
 
 /// The state threaded through every lowering call: the active [`WrapMode`] plus the
@@ -774,19 +388,8 @@ struct LowerCtx<'a> {
     /// clamped against the hard width by [`FormatStyle::stable_wrap_target`].
     stable_target: usize,
     signatures: Signatures<'a>,
-    token_lists: &'a tex_ls_parser::semantic::context::TokenListContexts,
-    /// Sorted, non-overlapping byte ranges of the document's expl3 regions (see
-    /// [`expl3_regions`]). Inside these, source whitespace is catcode-9 (ignored)
-    /// and `~` is catcode-10 (a literal space), so the formatter lays out the code
-    /// itself — regardless of [`WrapMode`]. Borrowed from a `Vec` owned by
-    /// [`format_root`], exactly like `signatures`.
-    expl3_regions: &'a [TextRange],
-    /// Sorted, non-overlapping byte ranges the author turned layout off over
-    /// (`% tex-ls-format off`/`skip`/`skip-file` and the combined `% tex-ls`
-    /// family — see [`tex_ls_parser::directives`]). Content overlapping one of these is
-    /// reproduced byte-for-byte instead of laid out. Borrowed from a `Vec` owned
-    /// by [`format_root`], exactly like `expl3_regions`.
-    suppressed: &'a [TextRange],
+    /// Facts prepared from one source tree, shared by every recursive lowering call.
+    source: &'a PreparedSource,
     /// The sentence-boundary profile (built-in language plus user no-break
     /// abbreviations) for the [`WrapMode::Sentence`]/[`WrapMode::Semantic`] modes.
     /// `Copy`, borrowing the merged slice owned by [`format_root`]. Never consulted
@@ -801,13 +404,6 @@ struct LowerCtx<'a> {
     /// lowers in full, at its real indent-0 context, so the formatter stays the sole
     /// authority on layout.
     range: Option<TextRange>,
-    /// Memo for [`dtx_doc_paragraph_reflows_safely`]. The answer is needed twice
-    /// per `.dtx` doc paragraph — once by the paragraph's own lowering, once by
-    /// [`margin_floats_into_paragraph`] deciding whether the floated leading `%`
-    /// may be dropped — and computing it means lowering the paragraph, so without
-    /// the memo a nested document pays for it repeatedly. Borrowed from
-    /// [`format_root`] like `expl3_regions`.
-    dtx_reflow_cache: &'a DtxReflowCache,
     /// Set while *probing* whether a `.dtx` doc paragraph reflows safely. The probe
     /// lowers the paragraph, and that lowering must not consult
     /// [`margin_floats_into_paragraph`] again — the two would recurse into each
@@ -836,16 +432,7 @@ struct LowerCtx<'a> {
     /// the statement's hanging indent. Descending lowerers omit exactly this
     /// node while retaining their ordinary command or conditional layout.
     omitted_leading_comment: Option<TextRange>,
-    /// Whether the document carries any `.dtx` documentation margin at all — the
-    /// cheap short-circuit for the no-`.dtx` majority, so gates that would
-    /// otherwise walk back to the start of a physical line
-    /// ([`doc_margin_opens_line`]) cost nothing in an ordinary `.tex` file.
-    /// Computed once in [`format_root`].
-    is_dtx: bool,
 }
-
-/// Memoized [`dtx_doc_paragraph_reflows_safely`] answers, keyed by paragraph node.
-type DtxReflowCache = RefCell<HashMap<SyntaxNode, bool>>;
 
 impl<'a> LowerCtx<'a> {
     /// Whether the active wrap mode lays out prose paragraphs at all (as opposed to
@@ -879,13 +466,14 @@ impl<'a> LowerCtx<'a> {
     /// Whether the document has any expl3 region at all — the cheap short-circuit
     /// for the no-expl3 majority (the slice is empty, so every query is free).
     fn any_expl3(self) -> bool {
-        !self.expl3_regions.is_empty()
+        !self.source.expl3_regions.is_empty()
     }
 
     /// Whether byte offset `at` falls inside some expl3 region. O(log n) over the
     /// sorted, disjoint range list.
     fn in_expl3_region(self, at: TextSize) -> bool {
-        self.expl3_regions
+        self.source
+            .expl3_regions
             .binary_search_by(|r| {
                 use std::cmp::Ordering;
                 if at < r.start() {
@@ -899,12 +487,10 @@ impl<'a> LowerCtx<'a> {
             .is_ok()
     }
 
-    /// Whether `range` intersects some expl3 region (used to route a paragraph that
+    /// Whether `range` intersects some expl3 region in O(log n) (routes a paragraph that
     /// is wholly or partly in-region).
     fn overlaps_expl3(self, range: TextRange) -> bool {
-        self.expl3_regions
-            .iter()
-            .any(|r| r.start() < range.end() && range.start() < r.end())
+        sorted_ranges_overlap(&self.source.expl3_regions, range)
     }
 
     /// Whether `range` lies wholly inside a directive-suppressed span, so
@@ -926,7 +512,8 @@ impl<'a> LowerCtx<'a> {
     /// ruff's statement level, and it stays sound in the direction that matters:
     /// every byte the author enclosed is preserved.
     fn suppressed(self, range: TextRange) -> bool {
-        self.suppressed.iter().any(|r| r.contains_range(range))
+        sorted_ranges_contain(self.source.suppressions.format_ranges(), range)
+            || self.source.uncertain.protects(range)
     }
 }
 
@@ -969,7 +556,7 @@ fn lower_node(node: &SyntaxNode, cx: LowerCtx<'_>) -> Ir {
     }
     // These regions retain active syntax for analysis, but their authored
     // whitespace is literal output. Preserve it before any layout routing.
-    if cx.token_lists.contains(node.text_range())
+    if cx.source.token_lists.contains(node.text_range())
         || node.kind() == SyntaxKind::ENVIRONMENT
             && cx
                 .signatures
@@ -996,12 +583,36 @@ fn lower_node(node: &SyntaxNode, cx: LowerCtx<'_>) -> Ir {
     if node.kind() != SyntaxKind::ROOT && cx.suppressed(node.text_range()) {
         return Ir::verbatim(node.text().to_string());
     }
+    if cx.source.uncertain.contains_token(node.text_range()) {
+        // The frame lowerer owns the body-leading and closing breaks. Ordinary
+        // expl3 paragraphs trim their leading break on that premise even when
+        // a later paragraph has unknown ownership. Keep that frame route while
+        // protected tokens and their seams still use the generic body stream.
+        if node.kind() == SyntaxKind::ENVIRONMENT
+            && !cx.in_dtx_doc_region
+            && !has_verbatim_body(node)
+            && is_margin_framed(node)
+            && !is_math_env(node, cx)
+        {
+            return lower_margin_framed_environment(node, cx);
+        }
+        // Unknown tokens and their exact boundary trivia are protected. Other
+        // consumed prose gaps can still normalize. Physical documentary framing
+        // keeps its existing byte-faithful stream and never gains bare newlines.
+        let normalize = !cx.source.uncertain.has_physical_framing(node.text_range());
+        let stream = lower_element_stream_policy(node.children_with_tokens(), cx, normalize);
+        return if normalize {
+            Ir::group(Ir::concat(stream))
+        } else {
+            Ir::concat(stream)
+        };
+    }
     if node.kind() == SyntaxKind::DOC_COMMENT
         && cx.omitted_leading_comment == Some(node.text_range())
     {
         return Ir::Nil;
     }
-    if cx.is_dtx
+    if cx.source.is_dtx
         && node.kind() != SyntaxKind::ROOT
         && !inside_macrocode(node)
         && contains_indented_dtx_comment(node)
@@ -1019,7 +630,7 @@ fn lower_node(node: &SyntaxNode, cx: LowerCtx<'_>) -> Ir {
         };
         return Ir::doc_margin(lower_node(node, virtual_doc));
     }
-    if cx.is_dtx
+    if cx.source.is_dtx
         && node.kind() == SyntaxKind::ENVIRONMENT
         && doc_margin_opens_line(node, cx)
         && (environment_begin_has_newline(node) || !is_margin_framed(node))
@@ -1098,24 +709,10 @@ fn lower_node(node: &SyntaxNode, cx: LowerCtx<'_>) -> Ir {
     if let Some(range) = cx.range
         && node.kind() == SyntaxKind::ROOT
     {
-        let mut filtered = Vec::new();
-        for element in node
-            .children_with_tokens()
-            .filter(|el| ranges_overlap(range, el.text_range()))
-        {
-            if let SyntaxElement::Node(child) = &element
-                && document_body_contains(child, range)
-            {
-                filtered.extend(
-                    child
-                        .children_with_tokens()
-                        .filter(|el| ranges_overlap(range, el.text_range())),
-                );
-            } else {
-                filtered.push(element);
-            }
-        }
-        return Ir::concat(lower_element_stream(filtered.into_iter(), cx));
+        return Ir::concat(lower_element_stream(
+            range_elements(node, range).into_iter(),
+            cx,
+        ));
     }
     // expl3 code layout (catcode-9 whitespace / catcode-10 `~`) applies regardless
     // of `WrapMode`, so it is checked before the wrap-gated arms below. A paragraph
@@ -1848,6 +1445,14 @@ fn lower_element_stream(
     elements: impl Iterator<Item = SyntaxElement>,
     cx: LowerCtx<'_>,
 ) -> Vec<Ir> {
+    lower_element_stream_policy(elements, cx, false)
+}
+
+fn lower_element_stream_policy(
+    elements: impl Iterator<Item = SyntaxElement>,
+    cx: LowerCtx<'_>,
+    normalize: bool,
+) -> Vec<Ir> {
     let mut out = Vec::new();
     let mut iter = elements.peekable();
     while let Some(element) = iter.next() {
@@ -1891,11 +1496,46 @@ fn lower_element_stream(
                 out.push(Ir::verbatim(token.text().to_string()));
             }
             SyntaxElement::Token(token) if is_collapsible_trivia(token.kind()) => {
-                out.push(classify_trivia(
-                    consume_gap_widened(&token, &mut iter),
-                    cx.in_alignment_cell,
-                ));
+                let protected_neighbor = |token: &SyntaxToken| {
+                    matches!(
+                        token.kind(),
+                        SyntaxKind::COMMENT
+                            | SyntaxKind::DOC_MARGIN
+                            | SyntaxKind::GUARD
+                            | SyntaxKind::VERB
+                            | SyntaxKind::VERBATIM_BODY
+                    )
+                };
+                let left_protected = token
+                    .prev_token()
+                    .is_some_and(|token| protected_neighbor(&token));
+                let gap = consume_gap_widened(&token, &mut iter);
+                let right_protected = iter
+                    .peek()
+                    .and_then(SyntaxElement::as_token)
+                    .is_some_and(protected_neighbor);
+                out.push(if normalize && !left_protected && !right_protected {
+                    if cx.wrap == WrapMode::Preserve {
+                        // Preserve owns line structure, but ordinary inter-word
+                        // spacing still normalizes just as in lower_prose_stream.
+                        if gap.newlines == 0 {
+                            Ir::verbatim(" ")
+                        } else {
+                            classify_trivia(gap, false)
+                        }
+                    } else {
+                        match gap.narrow() {
+                            Gap::Blank => Ir::empty_line(),
+                            Gap::Glued => Ir::Nil,
+                            Gap::Space { .. } => Ir::line(),
+                            Gap::Comment => Ir::hard_line(),
+                        }
+                    }
+                } else {
+                    classify_trivia(gap, cx.in_alignment_cell)
+                });
             }
+
             SyntaxElement::Token(token)
                 if cx.wraps_prose()
                     && !cx.dtx_margin_probe

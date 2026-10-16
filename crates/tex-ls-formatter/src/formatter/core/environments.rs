@@ -657,18 +657,32 @@ pub(super) fn lower_margin_framed_environment(node: &SyntaxNode, cx: LowerCtx<'_
         .map(|f| Ir::concat(lower_element_stream(f.into_iter(), cx)))
         .filter(|ir| !matches!(ir, Ir::Nil));
 
+    let protected_lead = protected_frame_boundary(&body, cx, true);
+    let protected_tail = protected_frame_boundary(&body, cx, false);
     let body_cx = cx.absorbing_trailing_control_newline(&body);
     let body = lower_env_body(body, tail_len, lifted.is_some(), None, body_cx);
-    let (lead_blank, body) = peel_leading_break(body);
-    let (trail_blank, body) = peel_trailing_break(body);
-    let lead = if lead_blank {
+    let (lead_blank, body) = if protected_lead {
+        (false, body)
+    } else {
+        peel_leading_break(body)
+    };
+    let (trail_blank, body) = if protected_tail {
+        (false, body)
+    } else {
+        peel_trailing_break(body)
+    };
+    let lead = if protected_lead {
+        Ir::Nil
+    } else if lead_blank {
         Ir::empty_line()
     } else {
         Ir::hard_line()
     };
     // The break that separates the body (or `\begin`, for an empty body) from the
     // `\end` frame line.
-    let close_break = if trail_blank {
+    let close_break = if protected_tail {
+        Ir::Nil
+    } else if trail_blank {
         Ir::empty_line()
     } else {
         Ir::hard_line()
@@ -685,6 +699,47 @@ pub(super) fn lower_margin_framed_environment(node: &SyntaxNode, cx: LowerCtx<'_
         (false, None) => Ir::concat([begin, lead, body, close_break, end]),
     };
     Ir::concat([leading, env])
+}
+
+/// Exact unknown-owned boundary trivia already supplies the frame's break.
+/// Inspect only source-adjacent trivia, never the rendered IR or a whole body.
+fn protected_frame_boundary(body: &[SyntaxElement], cx: LowerCtx<'_>, leading: bool) -> bool {
+    let boundary_token = |element: &SyntaxElement, first: bool| match element {
+        SyntaxElement::Token(token) => Some(token.clone()),
+        SyntaxElement::Node(node) if first => node.first_token(),
+        SyntaxElement::Node(node) => node.last_token(),
+    };
+    let Some(first) = body
+        .first()
+        .and_then(|element| boundary_token(element, true))
+    else {
+        return false;
+    };
+    let Some(last) = body
+        .last()
+        .and_then(|element| boundary_token(element, false))
+    else {
+        return false;
+    };
+    let bounds = TextRange::new(first.text_range().start(), last.text_range().end());
+    let mut token = Some(if leading { first } else { last });
+    while let Some(current) = token {
+        if !bounds.contains_range(current.text_range())
+            || !is_collapsible_trivia(current.kind())
+            || !cx.source.uncertain.protects(current.text_range())
+        {
+            return false;
+        }
+        if current.kind() == SyntaxKind::NEWLINE {
+            return true;
+        }
+        token = if leading {
+            current.next_token()
+        } else {
+            current.prev_token()
+        };
+    }
+    false
 }
 
 /// The `%` comment that trails the `\begin{…}` header on the *same* source line —

@@ -1,9 +1,8 @@
 //! Color-picker results and exact edits over proven literal declarations.
-use crate::{
-    Analysis, Path, PositionEncoding,
-    convert::{lsp_range, lsp_range_with_cursor},
-};
+use crate::convert::{lsp_range, lsp_range_with_cursor};
 use lsp_types::{Color, ColorInformation, ColorPresentation, Range, TextEdit};
+use std::path::Path;
+use tex_ls_analysis::{incremental::Analysis, text::PositionEncoding};
 
 pub fn document_colors(
     snapshot: &Analysis,

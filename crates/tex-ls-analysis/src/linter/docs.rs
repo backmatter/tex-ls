@@ -120,6 +120,7 @@ pub fn demo_diagnostics_with(
         }
     }
     let cite_facts = [CiteFileFacts {
+        case_sensitive: crate::project::citations::citation_case_sensitive(&root),
         path: path.clone(),
         bib_targets,
         manual_keys: Vec::new(),

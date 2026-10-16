@@ -15,7 +15,7 @@
 //! an *empty* verbatim body, which has no such token) whose name is a curated
 //! built-in verbatim environment. Only the curated tier is consulted for the name
 //! fallback — the CWL tier carries no `verbatim_body` flag, and a wrong route here
-//! would invent findings on non-verbatim environments (AGENTS.md conservatism).
+//! would invent findings on non-verbatim environments.
 //!
 //! A trailing `%` comment is *not* flagged: a comment is understood to be dropped
 //! regardless, so it is treated as trivia (as is whitespace). Only genuine text
@@ -144,28 +144,17 @@ fn next_of(el: &SyntaxElement) -> Option<SyntaxElement> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if VerbatimTrailingText.interests().contains(&el.kind()) {
-                VerbatimTrailingText.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if VerbatimTrailingText.interests().contains(&el.kind()) {
+                    VerbatimTrailingText.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

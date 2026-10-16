@@ -3,12 +3,23 @@
 //! The lexer recognizes only bounded modes whose delimiters are visible in the
 //! source, including verbatim regions and explicit catcode toggles.
 
-use std::collections::{HashMap, HashSet};
+mod context;
+mod operands;
+use crate::parser::reader_facts::Pending;
+use crate::parser::reader_facts::declaration_header;
+use crate::parser::reader_facts::next_pending;
+use crate::parser::reader_facts::primitive_replacement_reader;
+use crate::parser::reader_facts::short_verb_observer;
+use crate::parser::reader_facts::token_list_reader;
+pub use context::{ParseCtx, VerbCtx};
+pub(crate) use operands::PrimitiveOperandScan;
+
+use std::collections::HashSet;
 use std::rc::Rc;
 
 use smol_str::SmolStr;
 
-use crate::semantic::signature::{ArgKind, ArgSpec, EnvironmentSig, builtin};
+use crate::semantic::signature::{ArgKind, ArgSpec, builtin};
 use crate::syntax::SyntaxKind;
 
 /// A single lexed token: its kind plus the exact source slice it covers.
@@ -45,7 +56,7 @@ impl LatexFlavor {
 /// bounded line-oriented docstrip mode for a `.dtx` file — line-leading `%`
 /// margins become [`DOC_MARGIN`](SyntaxKind::DOC_MARGIN) trivia, line-leading
 /// `%<…>` guards become [`GUARD`](SyntaxKind::GUARD) trivia, and `macrocode`
-/// bodies lex as ordinary code (`AGENTS.md` decision #1). The two axes are
+/// bodies lex as ordinary code. The two axes are
 /// independent because a `.dtx`'s catcode regime varies *by layer* (its
 /// documentation is `Document`-flavored, its `macrocode` `Package`-flavored), so
 /// `dtx` cannot be folded into a [`LatexFlavor`] variant.
@@ -63,417 +74,6 @@ impl From<LatexFlavor> for LexConfig {
     fn from(flavor: LatexFlavor) -> Self {
         Self { flavor, dtx: false }
     }
-}
-
-/// Per-parse facts discovered from definitions or project declarations.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ParseCtx {
-    pub(crate) reparse_guard: super::embedded::ReparseGuard,
-    commands: HashMap<SmolStr, Vec<ArgSpec>>,
-    environments: HashMap<SmolStr, Vec<ArgSpec>>,
-    suppressed: HashSet<SmolStr>,
-    reader_overrides: HashMap<SmolStr, usize>,
-    non_verbatim_environments: HashSet<SmolStr>,
-    begin_aliases: HashMap<SmolStr, SmolStr>,
-    end_aliases: HashMap<SmolStr, SmolStr>,
-    declared_environments: HashMap<SmolStr, EnvironmentSig>,
-}
-
-/// Backward-compatible alias for [`ParseCtx`].
-pub type VerbCtx = ParseCtx;
-
-impl ParseCtx {
-    /// Returns whether the context contains no discovered or declared facts.
-    pub fn is_empty(&self) -> bool {
-        self.commands.is_empty()
-            && self.environments.is_empty()
-            && self.suppressed.is_empty()
-            && self.reader_overrides.is_empty()
-            && self.non_verbatim_environments.is_empty()
-            && self.begin_aliases.is_empty()
-            && self.end_aliases.is_empty()
-            && self.declared_environments.is_empty()
-    }
-
-    /// Applies project declarations over discovered facts.
-    pub fn overlay_declarations(&mut self, declared: &crate::declarations::ResolvedDeclarations) {
-        let db = declared.as_db();
-        for name in db.environment_names() {
-            if let Some(sig) = db.environment(name) {
-                self.non_verbatim_environments.remove(name);
-                self.declared_environments
-                    .insert(SmolStr::new(name), sig.clone());
-            }
-        }
-        for (name, target) in db.env_begin_aliases() {
-            self.insert_begin_alias(SmolStr::new(name), SmolStr::new(target));
-        }
-        for (name, target) in db.env_end_aliases() {
-            self.insert_end_alias(SmolStr::new(name), SmolStr::new(target));
-        }
-    }
-
-    pub(crate) fn insert(&mut self, name: SmolStr, leading: Vec<ArgSpec>) {
-        self.commands.insert(name, leading);
-    }
-
-    pub(crate) fn suppress(&mut self, name: SmolStr) {
-        self.suppressed.insert(name);
-    }
-
-    pub(crate) fn suppress_reader_after(&mut self, name: SmolStr, offset: usize) {
-        self.reader_overrides
-            .entry(name)
-            .and_modify(|earliest| *earliest = (*earliest).min(offset))
-            .or_insert(offset);
-    }
-
-    fn is_reader_suppressed_at(&self, name: &str, offset: usize) -> bool {
-        self.is_suppressed(name)
-            || self
-                .reader_overrides
-                .get(name)
-                .is_some_and(|start| *start <= offset)
-    }
-
-    pub(crate) fn reader_overrides_after_or_at(&self, offset: usize) -> bool {
-        self.reader_overrides.values().any(|start| *start >= offset)
-    }
-
-    pub(crate) fn rebased_for_fragment(&self, offset: usize) -> std::borrow::Cow<'_, Self> {
-        if self.reader_overrides.is_empty() {
-            return std::borrow::Cow::Borrowed(self);
-        }
-        let mut rebased = self.clone();
-        for start in rebased.reader_overrides.values_mut() {
-            *start = start.saturating_sub(offset);
-        }
-        std::borrow::Cow::Owned(rebased)
-    }
-
-    pub(crate) fn is_suppressed(&self, name: &str) -> bool {
-        self.suppressed.contains(name)
-    }
-
-    pub(crate) fn suppress_environment(&mut self, name: SmolStr) {
-        self.non_verbatim_environments.insert(name);
-    }
-
-    pub(crate) fn insert_environment(&mut self, name: SmolStr, args: Vec<ArgSpec>) {
-        self.environments.insert(name, args);
-    }
-
-    /// A command whose spelling cannot change this parse's lexer state.
-    pub(crate) fn inert_control_word(&self, text: &str) -> bool {
-        let Some(name) = text.strip_prefix('\\') else {
-            return false;
-        };
-        !name.is_empty()
-            && name.bytes().all(|b| b.is_ascii_lowercase())
-            && !reads_following_text(text)
-            && !matches!(
-                name,
-                "verb"
-                    | "makeatletter"
-                    | "makeatother"
-                    | "begingroup"
-                    | "endgroup"
-                    | "bgroup"
-                    | "egroup"
-            )
-            && !super::embedded::observes_settings_command(name)
-            && !self.commands.contains_key(name)
-            && !self.begin_aliases.contains_key(name)
-            && !self.end_aliases.contains_key(name)
-            && builtin()
-                .command(name)
-                .is_none_or(|sig| !sig.verbatim && sig.args.is_empty())
-    }
-
-    fn leading_args(&self, name: &str) -> Option<&[ArgSpec]> {
-        self.commands.get(name).map(Vec::as_slice)
-    }
-
-    fn verbatim_environment_args(&self, name: &str) -> Option<&[ArgSpec]> {
-        if let Some(sig) = self.declared_environment(name) {
-            return sig.verbatim_body.then(|| &*sig.args);
-        }
-        self.environments.get(name).map(Vec::as_slice)
-    }
-
-    pub(crate) fn is_verbatim_environment(&self, name: &str) -> bool {
-        if name == "alltt"
-            && !self.environments.contains_key(name)
-            && self.declared_environment(name).is_none()
-        {
-            return false;
-        }
-        if self.non_verbatim_environments.contains(name) {
-            return false;
-        }
-        match self.declared_environment(name) {
-            Some(sig) => sig.verbatim_body,
-            None => {
-                self.environments.contains_key(name)
-                    || builtin()
-                        .environment(name)
-                        .is_some_and(|env| env.verbatim_body)
-            }
-        }
-    }
-
-    pub(crate) fn insert_begin_alias(&mut self, name: SmolStr, target: SmolStr) {
-        self.begin_aliases.insert(name, target);
-    }
-
-    pub(crate) fn insert_end_alias(&mut self, name: SmolStr, target: SmolStr) {
-        self.end_aliases.insert(name, target);
-    }
-
-    pub(crate) fn begin_alias(&self, name: &str) -> Option<&str> {
-        self.begin_aliases.get(name).map(SmolStr::as_str)
-    }
-
-    pub(crate) fn end_alias(&self, name: &str) -> Option<&str> {
-        self.end_aliases.get(name).map(SmolStr::as_str)
-    }
-
-    pub(crate) fn begin_alias_targets(&self) -> impl Iterator<Item = &str> {
-        self.begin_aliases.values().map(SmolStr::as_str)
-    }
-
-    fn declared_environment(&self, name: &str) -> Option<&EnvironmentSig> {
-        self.declared_environments.get(name)
-    }
-
-    pub(crate) fn is_block_environment(&self, name: &str) -> bool {
-        match self.declared_environment(name) {
-            Some(sig) => sig.block(),
-            None => builtin()
-                .environment(name)
-                .is_some_and(EnvironmentSig::block),
-        }
-    }
-
-    pub(crate) fn is_math_environment(&self, name: &str) -> bool {
-        match self.declared_environment(name) {
-            Some(sig) => sig.math,
-            None => builtin().environment(name).is_some_and(|env| env.math),
-        }
-    }
-
-    pub(crate) fn is_statement_environment(&self, name: &str) -> bool {
-        match self.declared_environment(name) {
-            Some(sig) => sig.statement_body,
-            None => builtin()
-                .environment(name)
-                .is_some_and(|env| env.statement_body),
-        }
-    }
-
-    pub(crate) fn has_env_aliases(&self) -> bool {
-        !self.begin_aliases.is_empty() || !self.end_aliases.is_empty()
-    }
-}
-
-/// Returns whether a control word introduces a definition.
-pub(crate) fn is_definition_keyword(text: &str) -> bool {
-    matches!(
-        text,
-        "\\newcommand"
-            | "\\renewcommand"
-            | "\\providecommand"
-            | "\\DeclareRobustCommand"
-            | "\\newrobustcmd"
-            | "\\renewrobustcmd"
-            | "\\providerobustcmd"
-            | "\\NewDocumentCommand"
-            | "\\NewExpandableDocumentCommand"
-            | "\\RenewExpandableDocumentCommand"
-            | "\\ProvideExpandableDocumentCommand"
-            | "\\DeclareExpandableDocumentCommand"
-            | "\\NewCommandCopy"
-            | "\\RenewCommandCopy"
-            | "\\DeclareCommandCopy"
-            | "\\RenewDocumentCommand"
-            | "\\ProvideDocumentCommand"
-            | "\\DeclareDocumentCommand"
-            | "\\def"
-            | "\\edef"
-            | "\\gdef"
-            | "\\xdef"
-            | "\\let"
-            | "\\newif"
-    )
-}
-
-/// Returns the number of following control words claimed as definition names.
-pub(crate) fn definition_name_slots(text: &str) -> u8 {
-    match text {
-        "\\let" | "\\NewCommandCopy" | "\\RenewCommandCopy" | "\\DeclareCommandCopy" => 2,
-        _ if is_definition_keyword(text) => 1,
-        _ => 0,
-    }
-}
-
-pub(crate) fn primitive_operand_reader(name: &str) -> bool {
-    matches!(
-        name,
-        "meaning"
-            | "show"
-            | "noexpand"
-            | "futurelet"
-            | "let"
-            | "NewCommandCopy"
-            | "RenewCommandCopy"
-            | "DeclareCommandCopy"
-            | "ifx"
-            | "ifdefined"
-    )
-}
-
-/// Literal control-sequence operands do not execute their spelling. This
-/// bounded scan covers declaration names, copies and direct token inspection.
-/// Futurelet's destination is an operand; its following tokens execute again.
-#[derive(Debug, Default)]
-pub(crate) struct PrimitiveOperandScan {
-    remaining: u8,
-    braced: bool,
-    let_equals: bool,
-    compared: bool,
-    skip_spaces: bool,
-    comment_line: bool,
-}
-
-impl PrimitiveOperandScan {
-    fn has_operand(&self) -> bool {
-        self.remaining > 0
-    }
-
-    pub(crate) fn observe(&mut self, kind: SyntaxKind, text: &str, ctx: &ParseCtx) -> bool {
-        self.observe_at(kind, text, ctx, 0)
-    }
-
-    pub(crate) fn observe_at(
-        &mut self,
-        kind: SyntaxKind,
-        text: &str,
-        ctx: &ParseCtx,
-        offset: usize,
-    ) -> bool {
-        if self.compared && self.remaining > 0 {
-            if kind == SyntaxKind::COMMENT {
-                self.comment_line = true;
-                return false;
-            }
-            if kind == SyntaxKind::NEWLINE && self.comment_line {
-                self.comment_line = false;
-                self.skip_spaces = true;
-                return false;
-            }
-            if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) {
-                if !self.skip_spaces {
-                    self.remaining -= 1;
-                    self.skip_spaces = true;
-                }
-                return false;
-            }
-            if matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD) {
-                return false;
-            }
-            self.comment_line = false;
-            let control = matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL);
-            // WORD coalesces source characters, but ifx compares exactly two
-            // tokens. A run of two ordinary characters exhausts both operands.
-            let count = if kind == SyntaxKind::WORD {
-                text.chars().take(self.remaining as usize).count() as u8
-            } else {
-                1
-            };
-            self.remaining = self.remaining.saturating_sub(count);
-            self.skip_spaces = kind == SyntaxKind::CONTROL_WORD;
-            return control;
-        }
-        if crate::syntax::is_trivia(kind)
-            || matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD)
-        {
-            return false;
-        }
-        if self.remaining > 0 {
-            if self.braced && matches!(kind, SyntaxKind::L_BRACE | SyntaxKind::R_BRACE) {
-                return false;
-            }
-            if self.let_equals
-                && self.remaining == 1
-                && kind == SyntaxKind::WORD
-                && text.starts_with('=')
-            {
-                self.let_equals = false;
-                if text.len() > 1 {
-                    self.remaining = 0;
-                }
-                return false;
-            }
-            let operand = matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL);
-            if operand {
-                self.remaining -= 1;
-            } else {
-                self.remaining = 0;
-            }
-            return operand;
-        }
-        if kind == SyntaxKind::CONTROL_WORD
-            && !text
-                .get(1..)
-                .is_some_and(|name| ctx.is_reader_suppressed_at(name, offset))
-        {
-            let name = text.get(1..).unwrap_or_default();
-            self.remaining = match name {
-                "meaning" | "show" | "noexpand" | "futurelet" | "ifdefined" => 1,
-                "let" | "NewCommandCopy" | "RenewCommandCopy" | "DeclareCommandCopy" => 2,
-                "ifx" => 2,
-                _ => definition_name_slots(text),
-            };
-            self.braced = (is_definition_keyword(text) && name != "let")
-                || matches!(
-                    name,
-                    "NewCommandCopy" | "RenewCommandCopy" | "DeclareCommandCopy"
-                );
-            self.let_equals = name == "let";
-            self.compared = name == "ifx";
-            self.skip_spaces = true;
-            self.comment_line = false;
-        }
-        false
-    }
-}
-
-fn is_literal_token_command(text: &str) -> bool {
-    matches!(
-        text,
-        "\\string" | "\\noexpand" | "\\meaning" | "\\expandafter" | "\\show"
-    )
-}
-
-fn is_char_constant_command(text: &str) -> bool {
-    matches!(
-        text,
-        "\\char"
-            | "\\catcode"
-            | "\\lccode"
-            | "\\uccode"
-            | "\\sfcode"
-            | "\\mathcode"
-            | "\\delcode"
-            | "\\number"
-            | "\\the"
-            | "\\romannumeral"
-            | "\\numexpr"
-            | "\\dimexpr"
-            | "\\ifnum"
-            | "\\ifodd"
-            | "\\ifdim"
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -512,13 +112,27 @@ pub fn lex_with(input: &str, ctx: &ParseCtx, config: LexConfig) -> Vec<Token> {
     Lexer::new(input, ctx, config, None).run()
 }
 
-pub(crate) fn lex_with_implicit_expl(
+pub(crate) fn lex_with_offset(
+    input: &str,
+    ctx: &ParseCtx,
+    config: LexConfig,
+    source_offset: usize,
+) -> Vec<Token> {
+    let mut lexer = Lexer::new(input, ctx, config, None);
+    lexer.source_offset = source_offset;
+    lexer.run()
+}
+
+pub(crate) fn lex_with_implicit_expl_offset(
     input: &str,
     ctx: &ParseCtx,
     config: LexConfig,
     implicit_expl: bool,
+    source_offset: usize,
 ) -> Vec<Token> {
-    Lexer::new(input, ctx, config, Some(implicit_expl)).run()
+    let mut lexer = Lexer::new(input, ctx, config, Some(implicit_expl));
+    lexer.source_offset = source_offset;
+    lexer.run()
 }
 
 pub(crate) fn lex_literal_commands(
@@ -527,6 +141,7 @@ pub(crate) fn lex_literal_commands(
     comment: Option<char>,
     ctx: &ParseCtx,
     config: LexConfig,
+    source_offset: usize,
 ) -> Vec<Token> {
     let normalized: String = input
         .chars()
@@ -545,6 +160,7 @@ pub(crate) fn lex_literal_commands(
         })
         .collect();
     let mut lexer = Lexer::new(&normalized, ctx, config, None);
+    lexer.source_offset = source_offset;
     lexer.alltt = true;
     lexer.alltt_comment = comment;
     lexer.opaque_nested_captures = true;
@@ -565,14 +181,6 @@ pub(crate) fn lex_literal_commands(
         }
     }
     tokens
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Pending {
-    Delim,
-    Def,
-    CharConstant,
-    LiteralToken,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -598,8 +206,339 @@ struct ScopeSave {
     uncertain_percent: bool,
     uncertain_dollar: bool,
     uncertain_at: bool,
-    short_verbs: Vec<char>,
+    short_verbs: Rc<HashSet<char>>,
+    short_verb_ascii: u128,
     embedded: Rc<super::embedded::State>,
+}
+
+#[derive(Clone, Copy)]
+enum StoredPlan {
+    PrimitiveName,
+    PrimitiveBody,
+    DeclarationName {
+        groups: u8,
+        optional: u8,
+        environment: bool,
+        star: bool,
+    },
+    DeclarationBody {
+        groups: u8,
+        optional: u8,
+    },
+    Arguments {
+        args: &'static [ArgSpec],
+        slot: usize,
+        star: bool,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum StoredGroup {
+    Name {
+        valid: bool,
+        seen: bool,
+        environment: bool,
+    },
+    Brace,
+    Bracket,
+}
+
+struct StoredFrame {
+    base: usize,
+    plan: StoredPlan,
+    group: Option<StoredGroup>,
+}
+
+#[derive(Default)]
+struct StoredArguments {
+    frames: Vec<StoredFrame>,
+    operands: PrimitiveOperandScan,
+    offset: usize,
+    protected: usize,
+    brackets: Vec<usize>,
+}
+
+impl StoredArguments {
+    fn protects(&self, kind: SyntaxKind, depth: usize) -> bool {
+        self.protected > 0 && matches!(kind, SyntaxKind::L_BRACE | SyntaxKind::R_BRACE)
+            || kind == SyntaxKind::R_BRACKET && self.brackets.last() == Some(&depth)
+            || kind == SyntaxKind::L_BRACE
+                && self.frames.last().is_some_and(|frame| {
+                    frame.base == depth
+                        && frame.group.is_none()
+                        && matches!(frame.plan, StoredPlan::PrimitiveBody)
+                })
+    }
+
+    fn pop(&mut self) {
+        if let Some(frame) = self.frames.pop() {
+            match frame.group {
+                Some(StoredGroup::Brace) => self.protected -= 1,
+                Some(StoredGroup::Bracket) => {
+                    self.protected -= 1;
+                    self.brackets.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn observe(&mut self, token: &Token, depth: usize, ctx: &ParseCtx, source_offset: usize) {
+        let kind = token.kind;
+        let text = token.text.as_str();
+        let offset = source_offset + self.offset;
+        self.offset += text.len();
+        let inert = self.operands.observe_at(kind, text, ctx, offset);
+        if crate::syntax::is_trivia(kind)
+            || matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD)
+        {
+            return;
+        }
+        // A malformed header cannot retain a scope after its enclosing group.
+        while self.frames.last().is_some_and(|frame| {
+            depth < frame.base
+                || matches!(kind, SyntaxKind::R_BRACE | SyntaxKind::R_BRACKET)
+                    && depth == frame.base
+                    && frame.group.is_none()
+        }) {
+            self.pop();
+        }
+        let mut in_name = false;
+        if let Some(frame) = self.frames.last_mut() {
+            match frame.group {
+                Some(StoredGroup::Name {
+                    valid,
+                    seen,
+                    environment,
+                }) => {
+                    in_name = true;
+                    if kind == SyntaxKind::R_BRACE && depth == frame.base + 1 {
+                        if valid && seen {
+                            if let StoredPlan::DeclarationName {
+                                groups, optional, ..
+                            } = frame.plan
+                            {
+                                frame.plan = StoredPlan::DeclarationBody { groups, optional };
+                            }
+                            frame.group = None;
+                        } else {
+                            self.pop();
+                        }
+                    } else {
+                        frame.group = Some(StoredGroup::Name {
+                            valid: valid
+                                && !seen
+                                && if environment {
+                                    kind == SyntaxKind::WORD
+                                } else {
+                                    matches!(
+                                        kind,
+                                        SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL
+                                    )
+                                },
+                            seen: true,
+                            environment,
+                        });
+                    }
+                }
+                Some(StoredGroup::Brace)
+                    if kind == SyntaxKind::R_BRACE && depth == frame.base + 1 =>
+                {
+                    self.protected -= 1;
+                    frame.group = None;
+                    if Self::finished(frame.plan) {
+                        self.pop();
+                    }
+                }
+                Some(StoredGroup::Bracket)
+                    if kind == SyntaxKind::R_BRACKET && depth == frame.base =>
+                {
+                    self.protected -= 1;
+                    self.brackets.pop();
+                    frame.group = None;
+                    if Self::finished(frame.plan) {
+                        self.pop();
+                    }
+                }
+                Some(_) => {}
+                None => match frame.plan {
+                    StoredPlan::PrimitiveName => {
+                        if matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL) {
+                            frame.plan = StoredPlan::PrimitiveBody;
+                        } else {
+                            self.pop();
+                        }
+                        in_name = true;
+                    }
+                    StoredPlan::PrimitiveBody => {
+                        in_name = true;
+                        if kind == SyntaxKind::L_BRACE {
+                            frame.plan = StoredPlan::DeclarationBody {
+                                groups: 0,
+                                optional: 0,
+                            };
+                            frame.group = Some(StoredGroup::Brace);
+                            self.protected += 1;
+                        }
+                    }
+                    StoredPlan::DeclarationName {
+                        groups,
+                        optional,
+                        environment,
+                        star,
+                    } => {
+                        in_name = true;
+                        if star && kind == SyntaxKind::WORD && text == "*" {
+                            frame.plan = StoredPlan::DeclarationName {
+                                groups,
+                                optional,
+                                environment,
+                                star: false,
+                            };
+                        } else if kind == SyntaxKind::L_BRACE {
+                            frame.group = Some(StoredGroup::Name {
+                                valid: true,
+                                seen: false,
+                                environment,
+                            });
+                        } else if !environment
+                            && matches!(kind, SyntaxKind::CONTROL_WORD | SyntaxKind::CONTROL_SYMBOL)
+                        {
+                            frame.plan = StoredPlan::DeclarationBody { groups, optional };
+                        } else {
+                            self.pop();
+                        }
+                    }
+                    StoredPlan::DeclarationBody { groups, optional } => {
+                        if kind == SyntaxKind::L_BRACKET && optional > 0 {
+                            frame.plan = StoredPlan::DeclarationBody {
+                                groups,
+                                optional: optional - 1,
+                            };
+                            frame.group = Some(StoredGroup::Bracket);
+                            self.protected += 1;
+                            self.brackets.push(depth);
+                        } else if kind == SyntaxKind::L_BRACE && groups > 0 {
+                            frame.plan = StoredPlan::DeclarationBody {
+                                groups: groups - 1,
+                                optional: 0,
+                            };
+                            frame.group = Some(StoredGroup::Brace);
+                            self.protected += 1;
+                        } else {
+                            self.pop();
+                        }
+                    }
+                    StoredPlan::Arguments {
+                        args,
+                        mut slot,
+                        star,
+                    } => {
+                        if star && kind == SyntaxKind::WORD && text == "*" {
+                            frame.plan = StoredPlan::Arguments {
+                                args,
+                                slot,
+                                star: false,
+                            };
+                            return;
+                        }
+                        let delimiter = match kind {
+                            SyntaxKind::L_BRACE => Some(ArgKind::Brace),
+                            SyntaxKind::VERB if text.starts_with('{') => Some(ArgKind::Brace),
+                            SyntaxKind::L_BRACKET => Some(ArgKind::Bracket),
+                            _ => None,
+                        };
+                        if delimiter.is_some_and(|delimiter| {
+                            crate::semantic::signature::match_arg_slot(args, &mut slot, delimiter)
+                                .is_some()
+                        }) {
+                            frame.plan = StoredPlan::Arguments {
+                                args,
+                                slot,
+                                star: false,
+                            };
+                            frame.group = match kind {
+                                SyntaxKind::L_BRACE => Some(StoredGroup::Brace),
+                                SyntaxKind::L_BRACKET => Some(StoredGroup::Bracket),
+                                _ => None,
+                            };
+                            match frame.group {
+                                Some(StoredGroup::Brace) => self.protected += 1,
+                                Some(StoredGroup::Bracket) => {
+                                    self.protected += 1;
+                                    self.brackets.push(depth);
+                                }
+                                _ => {}
+                            }
+                            if frame.group.is_none() && Self::finished(frame.plan) {
+                                self.pop();
+                            }
+                        } else {
+                            self.pop();
+                        }
+                    }
+                },
+            }
+        }
+        if !in_name
+            && !inert
+            && kind == SyntaxKind::CONTROL_WORD
+            && let Some(name) = text.strip_prefix('\\')
+            && !ctx.is_reader_suppressed_at(name, offset)
+        {
+            let plan = if primitive_replacement_reader(name) {
+                Some(StoredPlan::PrimitiveName)
+            } else if let Some((groups, optional, environment)) = declaration_header(name) {
+                Some(StoredPlan::DeclarationName {
+                    groups,
+                    optional,
+                    environment,
+                    star: optional > 0,
+                })
+            } else {
+                builtin()
+                    .command(name)
+                    .filter(|sig| !sig.args.is_empty() && !sig.verbatim)
+                    .map(|sig| StoredPlan::Arguments {
+                        args: sig.args.as_ref(),
+                        slot: 0,
+                        star: matches!(
+                            name,
+                            "part"
+                                | "chapter"
+                                | "section"
+                                | "subsection"
+                                | "subsubsection"
+                                | "paragraph"
+                                | "subparagraph"
+                                | "operatorname"
+                                | "includegraphics"
+                                | "DeclareMathOperator"
+                        ),
+                    })
+            };
+            if let Some(plan) = plan {
+                self.frames.push(StoredFrame {
+                    base: depth,
+                    plan,
+                    group: None,
+                });
+            }
+        }
+    }
+
+    fn finished(plan: StoredPlan) -> bool {
+        match plan {
+            StoredPlan::DeclarationBody { groups, .. } => groups == 0,
+            StoredPlan::Arguments { args, slot, .. } => slot >= args.len(),
+            _ => false,
+        }
+    }
+}
+
+struct ReleaseHeader {
+    first_name_token: Option<usize>,
+    description: std::ops::Range<usize>,
 }
 
 struct Lexer<'a> {
@@ -613,7 +552,8 @@ struct Lexer<'a> {
     expl_syntax: bool,
     at_line_start: bool,
     in_doc_line: bool,
-    short_verbs: Vec<char>,
+    short_verbs: Rc<HashSet<char>>,
+    short_verb_ascii: u128,
     macrocode: Option<MacrocodeSave>,
     pending: Option<Pending>,
     brace_depth: usize,
@@ -634,7 +574,11 @@ struct Lexer<'a> {
     opaque_nested_captures: bool,
     global_prefix: bool,
     stringify_next: bool,
+    stored: StoredArguments,
+    source_offset: usize,
     primitive_operands: PrimitiveOperandScan,
+    raw_readers: RawReaders<'a>,
+    release_header: Option<ReleaseHeader>,
 }
 
 impl<'a> Lexer<'a> {
@@ -660,7 +604,12 @@ impl<'a> Lexer<'a> {
             expl_syntax: false,
             at_line_start: true,
             in_doc_line: false,
-            short_verbs: if config.dtx { vec!['|'] } else { Vec::new() },
+            short_verbs: Rc::new(if config.dtx {
+                HashSet::from(['|'])
+            } else {
+                HashSet::new()
+            }),
+            short_verb_ascii: if config.dtx { 1u128 << b'|' } else { 0 },
             macrocode: None,
             pending: None,
             brace_depth: 0,
@@ -681,18 +630,45 @@ impl<'a> Lexer<'a> {
             opaque_nested_captures: false,
             global_prefix: false,
             stringify_next: false,
+            stored: StoredArguments::default(),
+            source_offset: 0,
             primitive_operands: PrimitiveOperandScan::default(),
+            raw_readers: RawReaders::new(input),
+            release_header: None,
         }
     }
 
     fn run(mut self) -> Vec<Token> {
         while self.pos < self.input.len() {
             self.sync_brace_depth();
+            if self.try_release_argument() {
+                continue;
+            }
             if self
                 .token_list_depth
                 .is_some_and(|depth| self.brace_depth < depth)
             {
                 self.token_list_depth = None;
+            }
+            // Docstrip margins and guards belong to the physical documentation
+            // layer, including while a TeX operation is waiting for an operand.
+            if self.config.dtx
+                && self.at_line_start
+                && ((!self.stringify_next
+                    && self.token_list_depth.is_none()
+                    && !self.primitive_operands.has_operand()
+                    && self.try_macrocode_frame())
+                    || self.try_guard()
+                    || self.try_doc_margin())
+            {
+                continue;
+            }
+            if (self.stringify_next
+                || self.token_list_depth.is_some()
+                || self.primitive_operands.has_operand())
+                && self.try_doc_comment()
+            {
+                continue;
             }
             if self.stringify_next {
                 let word_len = control_word_len(self.rest(), self.at_letter, self.expl_syntax);
@@ -720,17 +696,15 @@ impl<'a> Lexer<'a> {
                 self.lex_token(None);
                 continue;
             }
-            if self.try_macrocode_frame()
-                || self.try_guard()
-                || self.try_doc_margin()
-                || self.try_alltt_environment()
+            if self.try_alltt_environment()
                 || self.try_verbatim_environment()
                 || self.try_verbatim_arg_environment()
             {
                 continue;
             }
             let word_len = control_word_len(self.rest(), self.at_letter, self.expl_syntax);
-            if self.try_verbatim_command(word_len)
+            if self.try_release_header(word_len)
+                || self.try_verbatim_command(word_len)
                 || self.try_short_verb()
                 || self.try_char_constant()
                 || self.try_doc_comment()
@@ -761,7 +735,10 @@ impl<'a> Lexer<'a> {
 
     fn sync_brace_depth(&mut self) {
         while self.brace_counted < self.out.len() {
-            match self.out[self.brace_counted].kind {
+            let token = &self.out[self.brace_counted];
+            self.stored
+                .observe(token, self.brace_depth, self.ctx, self.source_offset);
+            match token.kind {
                 SyntaxKind::L_BRACE => {
                     self.brace_depth += 1;
                     self.save_scope();
@@ -786,6 +763,7 @@ impl<'a> Lexer<'a> {
             uncertain_dollar: self.uncertain_dollar,
             uncertain_at: self.uncertain_at,
             short_verbs: self.short_verbs.clone(),
+            short_verb_ascii: self.short_verb_ascii,
             embedded: self.embedded.clone(),
         });
     }
@@ -800,6 +778,7 @@ impl<'a> Lexer<'a> {
             self.uncertain_dollar = save.uncertain_dollar;
             self.uncertain_at = save.uncertain_at;
             self.short_verbs = save.short_verbs;
+            self.short_verb_ascii = save.short_verb_ascii;
             self.embedded = save.embedded;
         }
     }
@@ -810,7 +789,9 @@ impl<'a> Lexer<'a> {
         }
         let rest = self.rest();
         let want_begin = self.macrocode.is_none();
-        let Some(consumed) = lex_macrocode_frame(rest, want_begin, &mut self.out) else {
+        let Some(consumed) =
+            lex_macrocode_frame(rest, want_begin, &mut self.raw_readers, &mut self.out)
+        else {
             return false;
         };
         match self.macrocode.take() {
@@ -875,11 +856,8 @@ impl<'a> Lexer<'a> {
         if self.pending == Some(Pending::Def) {
             return false;
         }
-        if let Some(("alltt", prefix_len)) = begin_name(rest) {
-            if self.ctx.environments.contains_key("alltt")
-                || self.ctx.declared_environment("alltt").is_some()
-                || self.ctx.non_verbatim_environments.contains("alltt")
-            {
+        if let Some(("alltt", prefix_len)) = self.raw_readers.begin_name(rest) {
+            if !self.ctx.is_literal_alltt_environment("alltt") {
                 return false;
             }
             self.alltt_stack.push(AllttSave {
@@ -896,7 +874,9 @@ impl<'a> Lexer<'a> {
         if self.alltt
             && let Some(after) = rest.strip_prefix("\\end")
         {
-            let after = skip_inline_ws(after);
+            let gap_len = inline_ws_len(after);
+            let gap = &after[..gap_len];
+            let after = &after[gap_len..];
             if let Some(tail) = after.strip_prefix("{alltt}")
                 && self
                     .alltt_stack
@@ -904,7 +884,7 @@ impl<'a> Lexer<'a> {
                     .is_some_and(|save| save.depth == self.brace_depth)
             {
                 let save = self.alltt_stack.pop().unwrap();
-                push_env_delimiter(&mut self.out, "\\end", "alltt");
+                push_env_delimiter_with_gap(&mut self.out, "\\end", gap, "alltt");
                 self.consume(rest.len() - tail.len());
                 self.at_letter = save.at_letter;
                 self.expl_syntax = save.expl_syntax;
@@ -917,7 +897,13 @@ impl<'a> Lexer<'a> {
 
     fn try_verbatim_environment(&mut self) -> bool {
         let (rest, ctx) = (self.rest(), self.ctx);
-        if let Some((name, prefix_len)) = begin_name(rest) {
+        if let Some((name, prefix_len)) = self.raw_readers.begin_name(rest) {
+            if !builtin_environment_name_lengths().contains(&name.len())
+                && !ctx.has_environment_name_length(name.len())
+                && !self.embedded.environment_name_lengths.contains(&name.len())
+            {
+                return false;
+            }
             let comment = self
                 .embedded
                 .comments
@@ -925,7 +911,7 @@ impl<'a> Lexer<'a> {
                 .copied()
                 .or_else(|| (name == "comment").then_some(Some(false)));
             if let Some(included) = comment
-                && !ctx.non_verbatim_environments.contains(name)
+                && !ctx.is_environment_suppressed(name)
                 && ctx
                     .declared_environment(name)
                     .is_none_or(|sig| sig.verbatim_body && builtin().environment(name) == Some(sig))
@@ -936,7 +922,15 @@ impl<'a> Lexer<'a> {
                     return true;
                 }
                 let region = &rest[prefix_len..];
-                let len = comment_body_len(region, name);
+                let len = if name == "comment"
+                    && ctx
+                        .verbatim_comment_start
+                        .is_some_and(|start| start <= self.source_offset + self.pos)
+                {
+                    verbatim_comment_body_len(region)
+                } else {
+                    comment_body_len(region, name)
+                };
                 if len > 0 {
                     self.push(
                         if included == Some(false) {
@@ -950,8 +944,10 @@ impl<'a> Lexer<'a> {
                 self.consume(prefix_len + len);
                 return true;
             }
-            if let Some(spec) = self.embedded.environment(name, &rest[prefix_len..])
-                && !ctx.non_verbatim_environments.contains(name)
+            if let Some(spec) =
+                self.embedded
+                    .environment(name, &rest[prefix_len..], &mut self.raw_readers)
+                && !ctx.is_environment_suppressed(name)
                 && ctx
                     .declared_environment(name)
                     .is_none_or(|sig| builtin().environment(name) == Some(sig))
@@ -961,14 +957,15 @@ impl<'a> Lexer<'a> {
                 if !header
                     .trim_start_matches([' ', '\t'])
                     .starts_with(['\n', '\r'])
-                    && let Some((_, tail)) = super::embedded::argument(header, '[', ']')
+                    && let Some((_, tail)) = self.raw_readers.embedded_argument(header, '[', ']')
                 {
                     args_len = header.len() - tail.len();
                 }
                 if (name == "minted"
                     || name.ends_with('*') && self.embedded.environments.contains_key(name))
                     && let Some((_, tail)) =
-                        super::embedded::argument(&header[args_len..], '{', '}')
+                        self.raw_readers
+                            .embedded_argument(&header[args_len..], '{', '}')
                 {
                     args_len = header.len() - tail.len();
                 }
@@ -979,13 +976,22 @@ impl<'a> Lexer<'a> {
                 if self.opaque_nested_captures {
                     self.push(SyntaxKind::VERBATIM_BODY, &region[..len]);
                 } else {
-                    super::embedded::body(&region[..len], &spec, &mut self.out, ctx, self.config);
+                    super::embedded::body(
+                        &region[..len],
+                        &spec,
+                        &mut self.out,
+                        ctx,
+                        self.config,
+                        self.source_offset + self.pos + prefix_len + args_len,
+                    );
                 }
                 self.consume(prefix_len + args_len + len);
                 return true;
             }
         }
-        let Some(consumed) = lex_verbatim_environment(rest, ctx, &mut self.out) else {
+        let Some(consumed) =
+            lex_verbatim_environment(rest, ctx, &mut self.raw_readers, &mut self.out)
+        else {
             return false;
         };
         self.consume(consumed);
@@ -997,21 +1003,120 @@ impl<'a> Lexer<'a> {
             return false;
         }
         let rest = self.rest();
-        let Some(consumed) = lex_verbatim_arg_environment(rest, &mut self.out) else {
+        let Some(consumed) = lex_verbatim_arg_environment(
+            rest,
+            self.ctx,
+            self.config.dtx && self.in_doc_line,
+            &mut self.raw_readers,
+            &mut self.out,
+        ) else {
             return false;
         };
         self.consume(consumed);
         true
     }
 
+    fn verb_at_stored_closer(&self, word_len: Option<usize>) -> bool {
+        word_len.is_some_and(|len| {
+            let rest = self.rest();
+            &rest[..len] == "\\verb"
+                && self.stored.protects(SyntaxKind::R_BRACE, self.brace_depth)
+                && rest[len..]
+                    .strip_prefix('*')
+                    .unwrap_or(&rest[len..])
+                    .starts_with('}')
+        })
+    }
+
+    fn try_release_header(&mut self, word_len: Option<usize>) -> bool {
+        let Some(head_len) = word_len else {
+            return false;
+        };
+        let rest = self.rest();
+        if &rest[..head_len] != "\\IncludeInRelease"
+            || self.release_header.is_some()
+            || self.pending == Some(Pending::Def)
+            || self.config.dtx
+            || self.alltt
+            || self.uncertain_percent
+            || !self.percent_comment
+            || !self
+                .ctx
+                .release_header_start
+                .is_some_and(|start| start <= self.source_offset + self.pos)
+        {
+            return false;
+        }
+        let Some(mut header) = release_header_roles(&rest[head_len..], &mut self.raw_readers)
+        else {
+            return false;
+        };
+        let offset = self.pos + head_len;
+        header.first_name_token = header.first_name_token.map(|position| position + offset);
+        header.description = header.description.start + offset..header.description.end + offset;
+        self.release_header = Some(header);
+        self.push(SyntaxKind::CONTROL_WORD, &rest[..head_len]);
+        self.consume(head_len);
+        true
+    }
+
+    fn try_release_argument(&mut self) -> bool {
+        let Some(header) = self.release_header.as_mut() else {
+            return false;
+        };
+        if self.alltt
+            || self.uncertain_percent
+            || !self.percent_comment
+            || self.pos > header.description.start
+        {
+            self.release_header = None;
+            return false;
+        }
+        if self.pos == header.description.start {
+            let end = header.description.end;
+            self.release_header = None;
+            self.push(SyntaxKind::VERB, &self.input[self.pos..end]);
+            self.consume(end - self.pos);
+            return true;
+        }
+        if header
+            .first_name_token
+            .is_some_and(|position| position <= self.pos)
+        {
+            let position = header.first_name_token.take().unwrap();
+            if position == self.pos && !self.uncertain_at {
+                let rest = self.rest();
+                let len = if rest.starts_with('\\') {
+                    control_word_len(rest, self.at_letter, self.expl_syntax)
+                        .or_else(|| rest[1..].chars().next().map(|c| 1 + c.len_utf8()))
+                } else {
+                    rest.chars().next().map(char::len_utf8)
+                };
+                let Some(len) = len else { return false };
+                self.push(SyntaxKind::STRINGIFIED_TOKEN, &rest[..len]);
+                self.consume(len);
+                return true;
+            }
+        }
+        false
+    }
+
     fn try_verbatim_command(&mut self, word_len: Option<usize>) -> bool {
-        if self.pending == Some(Pending::Def) {
+        if self.pending == Some(Pending::Def)
+            || self.verb_at_stored_closer(word_len)
+            || word_len.is_some_and(|len| {
+                self.ctx
+                    .is_reader_suppressed_at(&self.rest()[1..len], self.source_offset + self.pos)
+            })
+        {
             return false;
         }
         let (rest, ctx) = (self.rest(), self.ctx);
         if let Some(word_len) = word_len
             && !ctx.is_suppressed(&rest[1..word_len])
-            && let Some(spec) = self.embedded.inline(&rest[1..word_len], &rest[word_len..])
+            && let Some(spec) =
+                self.embedded
+                    .inline(&rest[1..word_len], &rest[word_len..], &mut self.raw_readers)
         {
             let name = &rest[1..word_len];
             if !spec.settings.python() && !self.embedded.inline.contains_key(name) {
@@ -1020,6 +1125,7 @@ impl<'a> Lexer<'a> {
                     Some(word_len),
                     ctx,
                     self.config.dtx && self.in_doc_line,
+                    &mut self.raw_readers,
                     &mut self.out,
                 );
                 if let Some(consumed) = consumed {
@@ -1029,18 +1135,18 @@ impl<'a> Lexer<'a> {
                 return false;
             }
             let mut head = word_len;
-            if let Some((_, tail)) = super::embedded::argument(&rest[head..], '[', ']') {
+            if let Some((_, tail)) = self.raw_readers.embedded_argument(&rest[head..], '[', ']') {
                 head = rest.len() - tail.len();
             }
             if matches!(name, "mintinline" | "mint")
-                && let Some((_, tail)) = super::embedded::argument(&rest[head..], '{', '}')
+                && let Some((_, tail)) = self.raw_readers.embedded_argument(&rest[head..], '{', '}')
             {
                 head = rest.len() - tail.len();
             }
             head += tex_whitespace_len(&rest[head..]);
             let region = &rest[head..];
             let len = if region.starts_with('{') {
-                balanced_group_len(region, b'}')
+                self.raw_readers.balanced_group_len(region, b'}')
             } else {
                 delimited_len(region)
             };
@@ -1064,6 +1170,7 @@ impl<'a> Lexer<'a> {
                     &mut self.out,
                     ctx,
                     self.config,
+                    self.source_offset + self.pos + head + open.len_utf8(),
                 );
                 if closed {
                     self.push(SyntaxKind::CODE_CLOSE, &region[end..len]);
@@ -1077,12 +1184,21 @@ impl<'a> Lexer<'a> {
             word_len,
             ctx,
             self.config.dtx && self.in_doc_line,
+            &mut self.raw_readers,
             &mut self.out,
         ) else {
             return false;
         };
         self.consume(consumed);
         true
+    }
+
+    fn short_verb_contains(&self, character: &char) -> bool {
+        if character.is_ascii() {
+            self.short_verb_ascii & (1u128 << u32::from(*character)) != 0
+        } else {
+            self.short_verbs.contains(character)
+        }
     }
 
     fn try_short_verb(&mut self) -> bool {
@@ -1096,7 +1212,7 @@ impl<'a> Lexer<'a> {
         if !rest
             .chars()
             .next()
-            .is_some_and(|c| self.short_verbs.contains(&c))
+            .is_some_and(|c| self.short_verb_contains(&c))
         {
             return false;
         }
@@ -1151,14 +1267,40 @@ impl<'a> Lexer<'a> {
             return false;
         }
         let len = run_len(rest, |c| c != '\n' && c != '\r');
+        self.primitive_operands.observe_at(
+            SyntaxKind::COMMENT,
+            &rest[..len],
+            self.ctx,
+            self.source_offset + self.pos,
+        );
         self.push(SyntaxKind::COMMENT, &rest[..len]);
+        let pending = self.pending;
         self.consume(len);
+        self.pending = pending;
         true
     }
 
     fn lex_token(&mut self, word_len: Option<usize>) {
         let rest = self.rest();
-        let (mut kind, mut len) = next_token(rest, word_len, self.expl_syntax);
+        // A literal control-sequence operand has no active inline delimiter.
+        // Decide before token sizing: trimming a captured VERB afterwards can
+        // already have swallowed the opening brace of a definition or group.
+        let literal_verb = word_len.filter(|&len| {
+            &rest[..len] == "\\verb"
+                && (self.pending == Some(Pending::Def)
+                    || self.primitive_operands.has_operand()
+                    || self.token_list_depth.is_some()
+                    || self.stringify_next
+                    || self.verb_at_stored_closer(word_len)
+                    || self
+                        .ctx
+                        .is_reader_suppressed_at("verb", self.source_offset + self.pos))
+        });
+        let (mut kind, mut len) = if let Some(len) = literal_verb {
+            (SyntaxKind::CONTROL_WORD, len)
+        } else {
+            next_token(rest, word_len, self.expl_syntax)
+        };
         if self.alltt && self.alltt_comment.is_some_and(|c| rest.starts_with(c)) {
             kind = SyntaxKind::COMMENT;
             len = run_len(rest, |c| c != '\n' && c != '\r');
@@ -1232,15 +1374,18 @@ impl<'a> Lexer<'a> {
         } else {
             kind
         };
-        let inert_operand =
-            self.primitive_operands
-                .observe_at(operand_kind, &rest[..len], self.ctx, self.pos);
+        let inert_operand = self.primitive_operands.observe_at(
+            operand_kind,
+            &rest[..len],
+            self.ctx,
+            self.source_offset + self.pos,
+        );
         if kind == SyntaxKind::CONTROL_WORD
-            && &rest[..len] == "\\detokenize"
+            && rest[..len].get(1..).is_some_and(token_list_reader)
             && !inert_operand
             && !self.stringify_next
             && self.pending != Some(Pending::Def)
-            && !self.ctx.is_suppressed("detokenize")
+            && !self.ctx.is_suppressed(&rest[1..len])
         {
             self.token_list_pending = true;
         }
@@ -1262,7 +1407,7 @@ impl<'a> Lexer<'a> {
             && !self.short_verbs.is_empty()
             && let Some((i, c)) = rest[..len]
                 .char_indices()
-                .find(|(_, c)| self.short_verbs.contains(c))
+                .find(|(_, c)| self.short_verb_contains(c))
         {
             len = if i == 0 { c.len_utf8() } else { i };
         }
@@ -1273,7 +1418,10 @@ impl<'a> Lexer<'a> {
             )
         {
             self.stringify_next = false;
-            if kind != SyntaxKind::UNCERTAIN {
+            // A replacement list is scanned and brace-balanced before its
+            // commands execute. String may hide a command spelling here, but
+            // cannot take a structural delimiter away from that scanner.
+            if kind != SyntaxKind::UNCERTAIN && !(self.stored.protects(kind, self.brace_depth)) {
                 len = if let Some(word_len) = word_len {
                     word_len
                 } else if kind == SyntaxKind::CONTROL_SYMBOL {
@@ -1295,7 +1443,19 @@ impl<'a> Lexer<'a> {
             }
             self.apply_toggles(text, &rest[len..]);
         }
-        self.pending = next_pending(self.pending, kind, text);
+        // A literal operand consumes an existing pending reader but cannot
+        // arm another reader from an inert or source-retired control word.
+        let pending_kind = if inert_operand
+            || kind == SyntaxKind::CONTROL_WORD
+                && self
+                    .ctx
+                    .is_reader_suppressed_at(&text[1..], self.source_offset + self.pos)
+        {
+            SyntaxKind::STRINGIFIED_TOKEN
+        } else {
+            kind
+        };
+        self.pending = next_pending(self.pending, pending_kind, text);
         self.push(kind, text);
         self.at_line_start =
             kind == SyntaxKind::NEWLINE || text.ends_with('\n') || text.ends_with('\r');
@@ -1316,10 +1476,24 @@ impl<'a> Lexer<'a> {
         if text != "\\catcode" {
             self.global_prefix = false;
         }
-        if super::embedded::observes_settings_command(&text[1..])
-            && !self.ctx.is_suppressed(&text[1..])
+        if short_verb_observer(&text[1..])
+            && self
+                .ctx
+                .is_reader_suppressed_at(&text[1..], self.source_offset + self.pos)
         {
-            Rc::make_mut(&mut self.embedded).observe(text, after, self.conditional_depth > 0);
+            return;
+        }
+        if super::embedded::observes_settings_command(&text[1..])
+            && !self
+                .ctx
+                .is_reader_suppressed_at(&text[1..], self.source_offset + self.pos)
+        {
+            Rc::make_mut(&mut self.embedded).observe(
+                text,
+                after,
+                self.conditional_depth > 0,
+                &mut self.raw_readers,
+            );
         }
         match text {
             "\\begingroup" | "\\bgroup" => self.save_scope(),
@@ -1374,20 +1548,31 @@ impl<'a> Lexer<'a> {
             "\\makeatletter" => self.at_letter = true,
             "\\makeatother" => self.at_letter = false,
             "\\MakeShortVerb" | "\\DefineShortVerb" => {
-                if let Some(c) = short_verb_char(after)
-                    && !self.short_verbs.contains(&c)
+                if let Some(c) = short_verb_char(after, Some(&mut self.raw_readers))
+                    && !self.short_verb_contains(&c)
                 {
-                    self.short_verbs.push(c);
+                    Rc::make_mut(&mut self.short_verbs).insert(c);
+                    if c.is_ascii() {
+                        self.short_verb_ascii |= 1u128 << u32::from(c);
+                    }
                 }
             }
             "\\DeleteShortVerb" | "\\UndefineShortVerb" => {
-                if let Some(c) = short_verb_char(after) {
-                    self.short_verbs.retain(|&x| x != c);
+                if let Some(c) = short_verb_char(after, Some(&mut self.raw_readers))
+                    && self.short_verb_contains(&c)
+                {
+                    Rc::make_mut(&mut self.short_verbs).remove(&c);
+                    if c.is_ascii() {
+                        self.short_verb_ascii &= !(1u128 << u32::from(c));
+                    }
                 }
             }
             "\\documentclass" | "\\LoadClass" => {
-                if doc_class_enables_bar(after) && !self.short_verbs.contains(&'|') {
-                    self.short_verbs.push('|');
+                if doc_class_enables_bar(after, &mut self.raw_readers)
+                    && !self.short_verb_contains(&'|')
+                {
+                    Rc::make_mut(&mut self.short_verbs).insert('|');
+                    self.short_verb_ascii |= 1u128 << b'|';
                 }
             }
             _ => {
@@ -1401,48 +1586,6 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-    }
-}
-
-pub(crate) fn reads_following_text(text: &str) -> bool {
-    matches!(
-        text,
-        "\\MakeShortVerb"
-            | "\\DeleteShortVerb"
-            | "\\DefineShortVerb"
-            | "\\UndefineShortVerb"
-            | "\\catcode"
-            | "\\documentclass"
-            | "\\LoadClass"
-    ) || matches!(text, "\\ifx" | "\\ifdefined")
-        || next_pending(None, SyntaxKind::CONTROL_WORD, text).is_some()
-}
-
-fn next_pending(pending: Option<Pending>, kind: SyntaxKind, text: &str) -> Option<Pending> {
-    if kind == SyntaxKind::CONTROL_WORD {
-        return if text == "\\left" || text == "\\right" {
-            Some(Pending::Delim)
-        } else if is_definition_keyword(text) {
-            Some(Pending::Def)
-        } else if is_char_constant_command(text) {
-            Some(Pending::CharConstant)
-        } else if is_literal_token_command(text) {
-            Some(Pending::LiteralToken)
-        } else {
-            None
-        };
-    }
-    match pending? {
-        p @ (Pending::Delim | Pending::Def)
-            if matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE) =>
-        {
-            Some(p)
-        }
-        Pending::Def if kind == SyntaxKind::L_BRACE => Some(Pending::Def),
-        p @ (Pending::CharConstant | Pending::LiteralToken) if kind == SyntaxKind::WHITESPACE => {
-            Some(p)
-        }
-        _ => None,
     }
 }
 
@@ -1538,9 +1681,33 @@ fn delimited_len(after: &str) -> Option<usize> {
     Some(consumed)
 }
 
-fn short_verb_char(after: &str) -> Option<char> {
+/// Bound optional-argument probes in the source-wide reparse guard. Repeated
+/// unclosed options must not repeatedly scan the entire remaining source.
+/// An option beyond the budget conservatively retains the full-parse fallback.
+pub(crate) fn may_declare_letter_short_verb(after: &str) -> bool {
+    const MAX_OPTION_BYTES: usize = 1024;
+    let operand = skip_inline_ws(after.strip_prefix('*').unwrap_or(after)).trim_start();
+    if operand.starts_with('[')
+        && operand.len() > MAX_OPTION_BYTES
+        && super::embedded::argument(
+            &operand[..operand.floor_char_boundary(MAX_OPTION_BYTES)],
+            '[',
+            ']',
+        )
+        .is_none()
+    {
+        return true;
+    }
+    short_verb_char(after, None).is_some_and(|character| character.is_ascii_alphabetic())
+}
+
+fn short_verb_char(after: &str, readers: Option<&mut RawReaders<'_>>) -> Option<char> {
     let mut s = skip_inline_ws(after.strip_prefix('*').unwrap_or(after));
-    if let Some((_, rest)) = super::embedded::argument(s, '[', ']') {
+    let option = match readers {
+        Some(readers) => readers.embedded_argument(s, '[', ']'),
+        None => super::embedded::argument(s, '[', ']'),
+    };
+    if let Some((_, rest)) = option {
         s = skip_inline_ws(rest);
     }
     let (body, braced) = match s.strip_prefix('{') {
@@ -1560,10 +1727,10 @@ fn short_verb_char(after: &str) -> Option<char> {
 
 const BAR_SHORT_VERB_CLASSES: [&str; 5] = ["ltxdoc", "ltxguide", "ltnews", "l3doc", "amsldoc"];
 
-fn doc_class_enables_bar(after: &str) -> bool {
+fn doc_class_enables_bar(after: &str, readers: &mut RawReaders<'_>) -> bool {
     let mut s = skip_inline_ws(after);
     if let Some(rest) = s.strip_prefix('[') {
-        match rest.find(']') {
+        match readers.next_close(rest, 1) {
             Some(i) => s = rest[i + 1..].trim_start_matches([' ', '\t', '\n', '\r']),
             None => return false,
         }
@@ -1571,15 +1738,25 @@ fn doc_class_enables_bar(after: &str) -> bool {
     let Some(rest) = s.strip_prefix('{') else {
         return false;
     };
-    let Some(close) = rest.find('}') else {
+    let Some(close) = readers.next_close(rest, 0) else {
         return false;
     };
     BAR_SHORT_VERB_CLASSES.contains(&rest[..close].trim())
 }
 
-fn lex_verbatim_environment(rest: &str, ctx: &ParseCtx, out: &mut Vec<Token>) -> Option<usize> {
-    let (name, prefix_len) = begin_name(rest)?;
-    if ctx.non_verbatim_environments.contains(name)
+fn lex_verbatim_environment(
+    rest: &str,
+    ctx: &ParseCtx,
+    readers: &mut RawReaders<'_>,
+    out: &mut Vec<Token>,
+) -> Option<usize> {
+    let (name, prefix_len) = readers.begin_name(rest)?;
+    if !builtin_environment_name_lengths().contains(&name.len())
+        && !ctx.has_environment_name_length(name.len())
+    {
+        return None;
+    }
+    if ctx.is_environment_suppressed(name)
         || ctx
             .declared_environment(name)
             .is_some_and(|sig| !sig.verbatim_body)
@@ -1599,7 +1776,7 @@ fn lex_verbatim_environment(rest: &str, ctx: &ParseCtx, out: &mut Vec<Token>) ->
     push_env_delimiter(out, "\\begin", name);
 
     let args_region = &rest[prefix_len..];
-    let args_len = scan_verbatim_args(args_region, args);
+    let args_len = scan_verbatim_args(args_region, args, readers);
     lex_into(&args_region[..args_len], out);
 
     let body_region = &args_region[args_len..];
@@ -1641,6 +1818,83 @@ fn comment_body_len(body: &str, name: &str) -> usize {
     body.len()
 }
 
+// The verbatim package's comment reader accepts indentation and horizontal
+// space after end, then resumes the ordinary reader on the same physical line.
+fn verbatim_comment_body_len(body: &str) -> usize {
+    for (at, _) in body.match_indices("\\end") {
+        if body[at + "\\end".len()..]
+            .trim_start_matches([' ', '\t'])
+            .starts_with("{comment}")
+        {
+            return at;
+        }
+    }
+    body.len()
+}
+
+fn release_header_roles(source: &str, readers: &mut RawReaders<'_>) -> Option<ReleaseHeader> {
+    fn gap(source: &str) -> usize {
+        let mut offset = 0;
+        loop {
+            offset += tex_whitespace_len(&source[offset..]);
+            if source[offset..].starts_with('%') {
+                offset += source[offset..]
+                    .find(['\n', '\r'])
+                    .unwrap_or(source.len() - offset);
+            } else {
+                return offset;
+            }
+        }
+    }
+    let mut offset = gap(source);
+    let mut first_name_token = None;
+    for argument in 0..3 {
+        let start = offset;
+        offset += readers.stored_group_len(&source[offset..], b'}')?;
+        if argument == 1 {
+            first_name_token = release_name_first_token(&source[start + 1..offset - 1])
+                .map(|position| position + start + 1);
+        }
+        if argument == 2 {
+            return Some(ReleaseHeader {
+                first_name_token,
+                description: start..offset,
+            });
+        }
+        offset += gap(&source[offset..]);
+        if argument == 0 && source[offset..].starts_with('[') {
+            offset += readers.stored_group_len(&source[offset..], b']')?;
+            offset += gap(&source[offset..]);
+        }
+    }
+    None
+}
+
+// \string consumes the first actual name token, including a leading space.
+// A comment removes its endline; indentation on the following line is skipped
+// in TeX's new_line state. A further blank endline introduces a paragraph token.
+fn release_name_first_token(source: &str) -> Option<usize> {
+    let mut offset = 0;
+    while source[offset..].starts_with('%') {
+        offset += source[offset..].find(['\r', '\n'])?;
+        offset += if source[offset..].starts_with("\r\n") {
+            2
+        } else {
+            1
+        };
+        offset += source[offset..]
+            .bytes()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count();
+    }
+    // Keep the balanced source group topology. Leading whitespace consumes the
+    // string operand without protecting a later token; a blank endline also
+    // precedes any later control sequence with a paragraph token.
+    source[offset..].chars().next().and_then(|character| {
+        (!matches!(character, ' ' | '\t' | '\r' | '\n' | '{' | '}')).then_some(offset)
+    })
+}
+
 fn literal_catcode(after: &str) -> Option<(char, Option<u8>)> {
     let after = after.trim_start();
     let (character, after) = if let Some(after) = after.strip_prefix('`') {
@@ -1664,23 +1918,53 @@ fn literal_catcode(after: &str) -> Option<(char, Option<u8>)> {
     Some((character, value))
 }
 
-fn lex_verbatim_arg_environment(rest: &str, out: &mut Vec<Token>) -> Option<usize> {
-    let (name, prefix_len) = begin_name(rest)?;
-    builtin().environment(name).filter(|e| e.verbatim_arg)?;
+fn lex_verbatim_arg_environment(
+    rest: &str,
+    ctx: &ParseCtx,
+    on_dtx_doc_line: bool,
+    readers: &mut RawReaders<'_>,
+    out: &mut Vec<Token>,
+) -> Option<usize> {
+    let (name, prefix_len) = readers.begin_name(rest)?;
+    if !builtin_environment_name_lengths().contains(&name.len())
+        && !ctx.has_environment_name_length(name.len())
+    {
+        return None;
+    }
+    if !ctx.is_verbatim_arg_environment(name) {
+        return None;
+    }
 
     let region = &rest[prefix_len..];
-    let mut args_len = 0;
-    if let Some(after) = region.strip_prefix('[') {
-        let i = after.find([']', '\n', '\r'])?;
+    let gap = |text: &str| {
+        if on_dtx_doc_line {
+            dtx_doc_argument_gap_len(text)
+                .filter(|_| {
+                    !text
+                        .trim_start_matches([' ', '\t', '\n', '\r'])
+                        .starts_with("%<")
+                })
+                .unwrap_or_else(|| inline_ws_len(text))
+        } else {
+            tex_whitespace_len(text)
+        }
+    };
+    let leading_gap = gap(region);
+    let mut args_len = leading_gap;
+    let mut option_len = 0;
+    if let Some(after) = region[args_len..].strip_prefix('[') {
+        let i = readers.next_close(after, 2)?;
         if after.as_bytes()[i] != b']' {
             return None;
         }
-        args_len = 1 + i + 1;
+        option_len = 1 + i + 1;
+        args_len += option_len;
+        args_len += gap(&region[args_len..]);
     }
     let arg_region = &region[args_len..];
     let delim = arg_region.chars().next()?;
     let braced_content_len = if delim == '{' {
-        Some(braced_verb_content_len(&arg_region[1..])?)
+        Some(readers.braced_verb_content_len(&arg_region[1..], on_dtx_doc_line)?)
     } else {
         if !delim.is_ascii_punctuation()
             || matches!(delim, '\\' | '}' | '[' | ']' | '%' | '*' | '$')
@@ -1691,7 +1975,16 @@ fn lex_verbatim_arg_environment(rest: &str, out: &mut Vec<Token>) -> Option<usiz
     };
 
     push_env_delimiter(out, "\\begin", name);
-    lex_into(&region[..args_len], out);
+    let emit_gap = |text: &str, out: &mut Vec<Token>| {
+        if on_dtx_doc_line && dtx_doc_argument_gap_len(text).is_some() {
+            lex_dtx_doc_argument_gap(text, out);
+        } else {
+            lex_into(text, out);
+        }
+    };
+    emit_gap(&region[..leading_gap], out);
+    lex_into(&region[leading_gap..leading_gap + option_len], out);
+    emit_gap(&region[leading_gap + option_len..args_len], out);
     let verb_len = match braced_content_len {
         Some(content_len) => {
             out.push(Token {
@@ -1720,29 +2013,12 @@ fn lex_verbatim_arg_environment(rest: &str, out: &mut Vec<Token>) -> Option<usiz
     Some(prefix_len + args_len + verb_len)
 }
 
-fn braced_verb_content_len(content: &str) -> Option<usize> {
-    let mut depth = 1usize;
-    let mut chars = content.char_indices();
-    while let Some((i, c)) = chars.next() {
-        match c {
-            '\\' => {
-                chars.next()?;
-            }
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return (i > 0).then_some(i);
-                }
-            }
-            '\n' | '\r' => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
-fn lex_macrocode_frame(rest: &str, want_begin: bool, out: &mut Vec<Token>) -> Option<usize> {
+fn lex_macrocode_frame(
+    rest: &str,
+    want_begin: bool,
+    readers: &mut RawReaders<'_>,
+    out: &mut Vec<Token>,
+) -> Option<usize> {
     let indent = if want_begin { inline_ws_len(rest) } else { 0 };
     let after_pct = rest[indent..].strip_prefix('%')?;
     let ws_len = inline_ws_len(after_pct);
@@ -1753,7 +2029,7 @@ fn lex_macrocode_frame(rest: &str, want_begin: bool, out: &mut Vec<Token>) -> Op
         ("\\end", "\\end{")
     };
     let after_open = body.strip_prefix(open)?;
-    let close = after_open.find('}')?;
+    let close = readers.next_close(after_open, 0)?;
     let name = &after_open[..close];
     if name != "macrocode" && name != "macrocode*" {
         return None;
@@ -1790,6 +2066,7 @@ fn lex_verbatim_command(
     word_len: Option<usize>,
     ctx: &ParseCtx,
     on_dtx_doc_line: bool,
+    readers: &mut RawReaders<'_>,
     out: &mut Vec<Token>,
 ) -> Option<usize> {
     let word_len = word_len?;
@@ -1817,7 +2094,7 @@ fn lex_verbatim_command(
     };
 
     let after_word = &rest[word_len..];
-    let args_len = scan_verbatim_args(after_word, leading);
+    let args_len = scan_verbatim_args(after_word, leading, readers);
 
     let region = &after_word[args_len..];
     let dtx_gap = (!delimited && on_dtx_doc_line)
@@ -1832,7 +2109,7 @@ fn lex_verbatim_command(
     };
     let arg_region = &region[ws_len..];
     let arg_len = match arg_region.bytes().next() {
-        Some(b'{') => balanced_group_len(arg_region, b'}')?,
+        Some(b'{') => readers.balanced_group_len(arg_region, b'}')?,
         Some(_) if delimited => delimited_len(arg_region)?,
         _ => return None,
     };
@@ -1859,7 +2136,7 @@ fn lex_verbatim_command(
     Some(word_len + args_len + ws_len + arg_len)
 }
 
-fn scan_verbatim_args(region: &str, args: &[ArgSpec]) -> usize {
+fn scan_verbatim_args(region: &str, args: &[ArgSpec], readers: &mut RawReaders<'_>) -> usize {
     let bytes = region.as_bytes();
     let mut pos = 0;
     for arg in args {
@@ -1871,7 +2148,7 @@ fn scan_verbatim_args(region: &str, args: &[ArgSpec]) -> usize {
         if bytes.get(probe) != Some(&open) {
             continue;
         }
-        match balanced_group_len(&region[probe..], close) {
+        match readers.balanced_group_len(&region[probe..], close) {
             Some(len) => pos = probe + len,
             None => break, // unbalanced: treat the remainder as body
         }
@@ -1879,29 +2156,350 @@ fn scan_verbatim_args(region: &str, args: &[ArgSpec]) -> usize {
     pos
 }
 
-fn balanced_group_len(s: &str, close: u8) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let mut stack = vec![close];
-    let mut i = 1;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'\\' => {
-                i += 2;
+fn builtin_environment_name_lengths() -> &'static HashSet<usize> {
+    static LENGTHS: std::sync::OnceLock<HashSet<usize>> = std::sync::OnceLock::new();
+    LENGTHS.get_or_init(|| builtin().environment_names().map(str::len).collect())
+}
+
+// Every reader receives a suffix of this lexer's immutable source. Cache only
+// unmatched openings left by a failed scan, under that reader's exact rules.
+// Balanced nested groups and escaped openings are never marked as failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RawReaderMode {
+    Brace,
+    Bracket,
+    NameArgument,
+    DtxNameArgument,
+    EmbeddedBrace,
+    EmbeddedBracket,
+    StoredBrace,
+    StoredBracket,
+}
+
+pub(crate) struct RawReaders<'a> {
+    source: &'a str,
+    next_closes: [Option<(usize, Option<usize>)>; 3],
+    failed: HashSet<(usize, usize, RawReaderMode)>,
+    #[cfg(test)]
+    scanned_bytes: usize,
+}
+
+impl<'a> RawReaders<'a> {
+    // Stored arguments balance braces and ignore comments before executing any
+    // token. Square brackets are data inside a brace argument.
+    fn stored_group_len(&mut self, source: &str, close: u8) -> Option<usize> {
+        let open = if close == b'}' { b'{' } else { b'[' };
+        if source.as_bytes().first() != Some(&open) {
+            return None;
+        }
+        let mode = if close == b'}' {
+            RawReaderMode::StoredBrace
+        } else {
+            RawReaderMode::StoredBracket
+        };
+        let opening = self.offset(source);
+        let end = opening + source.len();
+        if self.failed.contains(&(opening, end, mode)) {
+            return None;
+        }
+        let mut stack = vec![(opening, mode)];
+        let bytes = source.as_bytes();
+        let mut at = 1;
+        while at < bytes.len() {
+            #[cfg(test)]
+            {
+                self.scanned_bytes += 1;
+            }
+            match bytes[at] {
+                b'\\' => {
+                    at += 2;
+                    continue;
+                }
+                b'%' => {
+                    at += source[at..].find(['\n', '\r']).unwrap_or(source.len() - at);
+                    continue;
+                }
+                byte if byte == close && stack.len() == 1 => return Some(at + 1),
+                b'{' => stack.push((opening + at, RawReaderMode::StoredBrace)),
+                b'}' if stack.len() > 1 => {
+                    stack.pop();
+                }
+                b'}' => break,
+                _ => {}
+            }
+            at += 1;
+        }
+        self.failed
+            .extend(stack.into_iter().map(|(offset, mode)| (offset, end, mode)));
+        None
+    }
+
+    pub(crate) fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            next_closes: [None; 3],
+            failed: HashSet::new(),
+            #[cfg(test)]
+            scanned_bytes: 0,
+        }
+    }
+
+    fn offset(&self, suffix: &str) -> usize {
+        let offset = suffix.as_ptr() as usize - self.source.as_ptr() as usize;
+        debug_assert!(offset + suffix.len() <= self.source.len());
+        offset
+    }
+
+    fn next_close(&mut self, source: &str, boundary: usize) -> Option<usize> {
+        let start = self.offset(source);
+        debug_assert_eq!(start + source.len(), self.source.len());
+        let close = match self.next_closes[boundary] {
+            Some((from, close)) if start >= from && close.is_none_or(|close| start <= close) => {
+                close
+            }
+            _ => {
+                let close = source
+                    .bytes()
+                    .position(|byte| {
+                        #[cfg(test)]
+                        {
+                            self.scanned_bytes += 1;
+                        }
+                        match boundary {
+                            0 => byte == b'}',
+                            1 => byte == b']',
+                            2 => matches!(byte, b']' | b'\n' | b'\r'),
+                            _ => unreachable!("unknown raw-reader boundary"),
+                        }
+                    })
+                    .map(|relative| start + relative);
+                self.next_closes[boundary] = Some((start, close));
+                close
+            }
+        }?;
+        Some(close - start)
+    }
+
+    fn begin_name<'s>(&mut self, rest: &'s str) -> Option<(&'s str, usize)> {
+        let after = rest.strip_prefix("\\begin{")?;
+        let close = self.next_close(after, 0)?;
+        Some((&after[..close], "\\begin{".len() + close + 1))
+    }
+
+    fn balanced_group_len(&mut self, s: &str, close: u8) -> Option<usize> {
+        let mode = if close == b'}' {
+            RawReaderMode::Brace
+        } else {
+            RawReaderMode::Bracket
+        };
+        let offset = self.offset(s);
+        let end = offset + s.len();
+        if self.failed.contains(&(offset, end, mode)) {
+            return None;
+        }
+        let bytes = s.as_bytes();
+        let mut stack = vec![(offset, close)];
+        let mut i = 1;
+        while i < bytes.len() {
+            #[cfg(test)]
+            {
+                self.scanned_bytes += 1;
+            }
+            match bytes[i] {
+                b'\\' => {
+                    i += 2;
+                    continue;
+                }
+                b'{' => stack.push((offset + i, b'}')),
+                b'[' => stack.push((offset + i, b']')),
+                c @ (b'}' | b']') if stack.last().is_some_and(|&(_, close)| close == c) => {
+                    stack.pop();
+                    if stack.is_empty() {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        self.failed
+            .extend(stack.into_iter().map(|(opening, close)| {
+                (
+                    opening,
+                    end,
+                    if close == b'}' {
+                        RawReaderMode::Brace
+                    } else {
+                        RawReaderMode::Bracket
+                    },
+                )
+            }));
+        None
+    }
+
+    pub(crate) fn embedded_argument<'s>(
+        &mut self,
+        source: &'s str,
+        open: char,
+        close: char,
+    ) -> Option<(&'s str, &'s str)> {
+        let source = source.trim_start();
+        let after = source.strip_prefix(open)?;
+        let opening = self.offset(source);
+        let end = opening + source.len();
+        let mode = if open == '{' {
+            RawReaderMode::EmbeddedBrace
+        } else {
+            RawReaderMode::EmbeddedBracket
+        };
+        if self.failed.contains(&(opening, end, mode)) {
+            return None;
+        }
+        let mut stack = vec![(opening, mode)];
+        let mut escaped = false;
+        let mut failed_end = after.len();
+        for (i, c) in after.char_indices() {
+            #[cfg(test)]
+            {
+                self.scanned_bytes += c.len_utf8();
+            }
+            if escaped {
+                escaped = false;
                 continue;
             }
-            b'{' => stack.push(b'}'),
-            b'[' => stack.push(b']'),
-            c @ (b'}' | b']') if stack.last() == Some(&c) => {
+            if c == '\\' {
+                escaped = true;
+                continue;
+            }
+            if c == close && stack.len() == 1 {
+                return Some((&after[..i], &after[i + c.len_utf8()..]));
+            }
+            if c == '{' {
+                let nested = opening + open.len_utf8() + i;
+                stack.push((nested, RawReaderMode::EmbeddedBrace));
+                // A proven unclosed brace prevents this enclosing option's
+                // closing bracket from ever becoming eligible.
+                if self
+                    .failed
+                    .contains(&(nested, end, RawReaderMode::EmbeddedBrace))
+                {
+                    failed_end = i;
+                    break;
+                }
+            } else if c == '}' {
+                if stack.len() == 1 {
+                    failed_end = i;
+                    break;
+                }
                 stack.pop();
-                if stack.is_empty() {
-                    return Some(i + 1);
+            }
+        }
+        if open == '[' {
+            // This reader ignores nested square brackets. A same-level '['
+            // after the opener has the same failed suffix, but one inside a
+            // brace group may find a closer that the outer probe ignored.
+            let mut depth = 0usize;
+            let mut escaped = false;
+            for (i, c) in after[..failed_end].char_indices() {
+                #[cfg(test)]
+                {
+                    self.scanned_bytes += c.len_utf8();
+                }
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match c {
+                    '\\' => escaped = true,
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    '[' if depth == 0 => {
+                        self.failed
+                            .insert((opening + open.len_utf8() + i, end, mode));
+                    }
+                    _ => {}
                 }
             }
-            _ => {}
         }
-        i += 1;
+        self.failed.extend(
+            stack
+                .into_iter()
+                .map(|(opening, mode)| (opening, end, mode)),
+        );
+        None
     }
-    None
+
+    fn braced_verb_content_len(&mut self, content: &str, on_dtx_doc_line: bool) -> Option<usize> {
+        let mode = if on_dtx_doc_line {
+            RawReaderMode::DtxNameArgument
+        } else {
+            RawReaderMode::NameArgument
+        };
+        let opening = self.offset(content) - 1;
+        let end = opening + 1 + content.len();
+        if self.failed.contains(&(opening, end, mode)) {
+            return None;
+        }
+        // Clean curated name arguments need no allocation. Only a failed scan
+        // collects unmatched openings, with one additional linear pass.
+        let mut depth = 1usize;
+        let mut failed_end = content.len();
+        let mut chars = content.char_indices();
+        while let Some((i, c)) = chars.next() {
+            #[cfg(test)]
+            {
+                self.scanned_bytes += c.len_utf8();
+            }
+            match c {
+                '\\' => {
+                    if chars.next().is_none() {
+                        break;
+                    }
+                }
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (i > 0).then_some(i);
+                    }
+                }
+                '\n' | '\r' if on_dtx_doc_line => {
+                    let after = &content[i + 1..];
+                    let after = if c == '\r' {
+                        after.strip_prefix('\n').unwrap_or(after)
+                    } else {
+                        after
+                    };
+                    if !after.starts_with('%') || after.starts_with("%<") {
+                        failed_end = i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut stack = vec![opening];
+        let mut chars = content[..failed_end].char_indices();
+        while let Some((i, c)) = chars.next() {
+            #[cfg(test)]
+            {
+                self.scanned_bytes += c.len_utf8();
+            }
+            match c {
+                '\\' => {
+                    chars.next();
+                }
+                '{' => stack.push(opening + 1 + i),
+                '}' => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+        self.failed
+            .extend(stack.into_iter().map(|opening| (opening, end, mode)));
+        None
+    }
 }
 
 fn lex_into(region: &str, out: &mut Vec<Token>) {
@@ -1918,17 +2516,21 @@ fn lex_into(region: &str, out: &mut Vec<Token>) {
     }
 }
 
-fn begin_name(rest: &str) -> Option<(&str, usize)> {
-    let after = rest.strip_prefix("\\begin{")?;
-    let close = after.find('}')?;
-    Some((&after[..close], "\\begin{".len() + close + 1))
+fn push_env_delimiter(out: &mut Vec<Token>, control: &str, name: &str) {
+    push_env_delimiter_with_gap(out, control, "", name);
 }
 
-fn push_env_delimiter(out: &mut Vec<Token>, control: &str, name: &str) {
+fn push_env_delimiter_with_gap(out: &mut Vec<Token>, control: &str, gap: &str, name: &str) {
     out.push(Token {
         kind: SyntaxKind::CONTROL_WORD,
         text: SmolStr::new(control),
     });
+    if !gap.is_empty() {
+        out.push(Token {
+            kind: SyntaxKind::WHITESPACE,
+            text: SmolStr::new(gap),
+        });
+    }
     out.push(Token {
         kind: SyntaxKind::L_BRACE,
         text: SmolStr::new("{"),
@@ -2052,6 +2654,416 @@ mod tests {
     }
 
     #[test]
+    fn malformed_raw_reader_scan_work_is_linear() {
+        for newline in ["\n", "\r\n"] {
+            for pattern in ["\\begin{", "\\url{"] {
+                let source = format!("{pattern}{newline}").repeat(4096);
+                let mut readers = RawReaders::new(&source);
+                for (offset, _) in source.match_indices(pattern) {
+                    let rest = &source[offset..];
+                    if pattern == "\\begin{" {
+                        for _ in 0..3 {
+                            assert_eq!(readers.begin_name(rest), None);
+                        }
+                    } else {
+                        assert_eq!(readers.balanced_group_len(&rest[4..], b'}'), None);
+                    }
+                }
+                assert!(
+                    readers.scanned_bytes <= source.len() * 2,
+                    "{pattern:?}/{newline:?}: {} scanned bytes for {} input bytes",
+                    readers.scanned_bytes,
+                    source.len()
+                );
+            }
+            for dtx in [false, true] {
+                let pattern = if dtx {
+                    "% \\begin{function}{"
+                } else {
+                    "\\begin{function}{"
+                };
+                let source = format!("{pattern}{newline}").repeat(4096);
+                let mut readers = RawReaders::new(&source);
+                for (offset, _) in source.match_indices(pattern) {
+                    let content = &source[offset + pattern.len()..];
+                    assert_eq!(readers.braced_verb_content_len(content, dtx), None);
+                }
+                assert!(
+                    readers.scanned_bytes <= source.len() * 2,
+                    "curated/dtx={dtx}/{newline:?}: {} scanned bytes for {} input bytes",
+                    readers.scanned_bytes,
+                    source.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn environment_length_gate_preserves_explicit_and_embedded_names() {
+        for name in [
+            "unusually-long-environment-".repeat(8),
+            "literal{\n\\name".to_owned(),
+        ] {
+            let source = format!("\\begin{{{name}}}\\ref{{printed}}\\end{{{name}}}");
+            let mut ctx = ParseCtx::default();
+            ctx.insert_environment(SmolStr::new(&name), Vec::new());
+            let tokens = lex_with(&source, &ctx, LexConfig::default());
+            assert_eq!(
+                tokens
+                    .iter()
+                    .map(|token| token.text.as_str())
+                    .collect::<String>(),
+                source
+            );
+            assert!(
+                tokens
+                    .iter()
+                    .any(|token| token.kind == SyntaxKind::VERBATIM_BODY
+                        && token.text == "\\ref{printed}")
+            );
+        }
+        let name = "embeddedalias".repeat(16);
+        let source =
+            format!("\\newminted[{name}]{{json}}{{}}\n\\begin{{{name}}}{{data}}\\end{{{name}}}");
+        let tokens = lex_with(&source, &ParseCtx::default(), LexConfig::default());
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<String>(),
+            source
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.kind == SyntaxKind::VERBATIM_BODY && token.text == "{data}")
+        );
+    }
+
+    #[test]
+    fn documentary_comparison_comments_suppress_the_following_newline() {
+        let source = "% \\ifx a^^A note\n% \\begin{verbatim}\n% \\ref{real}\n% \\fi\n";
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let tokens = lex_with(
+                &source,
+                &ParseCtx::default(),
+                LexConfig {
+                    dtx: true,
+                    ..LexConfig::default()
+                },
+            );
+            assert_eq!(
+                tokens
+                    .iter()
+                    .map(|token| token.text.as_str())
+                    .collect::<String>(),
+                source
+            );
+            assert!(
+                !tokens
+                    .iter()
+                    .any(|token| token.kind == SyntaxKind::VERBATIM_BODY)
+            );
+            assert!(
+                tokens
+                    .iter()
+                    .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\ref")
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_delimiter_probes_match_reference_and_scan_linearly() {
+        for boundary in 0..3 {
+            let source = "\\documentclass[\\begin{unfinished[ ".repeat(4096);
+            let mut readers = RawReaders::new(&source);
+            for (offset, _) in source.match_indices('[') {
+                assert_eq!(readers.next_close(&source[offset + 1..], boundary), None);
+            }
+            assert!(readers.scanned_bytes <= source.len());
+        }
+        let source = "\\begin{function}[".repeat(4096);
+        let mut readers = RawReaders::new(&source);
+        let mut tokens = Vec::new();
+        for (offset, _) in source.match_indices("\\begin{") {
+            assert_eq!(
+                lex_verbatim_arg_environment(
+                    &source[offset..],
+                    &ParseCtx::default(),
+                    false,
+                    &mut readers,
+                    &mut tokens,
+                ),
+                None
+            );
+        }
+        assert!(tokens.is_empty());
+        assert!(readers.scanned_bytes <= source.len() * 2);
+        let source = "é{a}b[c]\r\n{d}e]f";
+        let mut readers = RawReaders::new(source);
+        for (offset, _) in source.char_indices().rev().chain(source.char_indices()) {
+            let suffix = &source[offset..];
+            for boundary in 0..3 {
+                let expected = suffix.bytes().position(|byte| match boundary {
+                    0 => byte == b'}',
+                    1 => byte == b']',
+                    _ => matches!(byte, b']' | b'\r' | b'\n'),
+                });
+                assert_eq!(readers.next_close(suffix, boundary), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn documentary_comments_do_not_consume_pending_literal_operands() {
+        for source in [
+            "% \\def\n% ^^A \\fake{wrong}\n% \\foo{body}\n",
+            "% \\string\n% ^^A \\fake\n% \\verb{printed}\n",
+            "% \\detokenize{\n% ^^A \\fake{wrong}\n% data}\n",
+        ] {
+            for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+                let tokens = lex_with(
+                    &source,
+                    &ParseCtx::default(),
+                    LexConfig {
+                        dtx: true,
+                        ..LexConfig::default()
+                    },
+                );
+                assert_eq!(
+                    tokens
+                        .iter()
+                        .map(|token| token.text.as_str())
+                        .collect::<String>(),
+                    source
+                );
+                assert!(
+                    tokens
+                        .iter()
+                        .any(|token| token.kind == SyntaxKind::COMMENT
+                            && token.text.starts_with("^^A")),
+                    "{source}"
+                );
+                assert!(
+                    !tokens
+                        .iter()
+                        .any(|token| token.kind == SyntaxKind::CONTROL_WORD
+                            && token.text == "\\fake"),
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn curated_documented_names_do_not_capture_docstrip_guards() {
+        for source in [
+            "% \\begin{function}{name\n%<package>\\def\\real{body}\n% }\n% \\end{function}\n",
+            "% \\begin{function}\n%<package>{\\real}\n% \\end{function}\n",
+        ] {
+            for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+                let tokens = lex_with(
+                    &source,
+                    &ParseCtx::default(),
+                    LexConfig {
+                        dtx: true,
+                        ..LexConfig::default()
+                    },
+                );
+                assert_eq!(
+                    tokens
+                        .iter()
+                        .map(|token| token.text.as_str())
+                        .collect::<String>(),
+                    source
+                );
+                assert!(
+                    tokens
+                        .iter()
+                        .any(|token| token.kind == SyntaxKind::GUARD && token.text == "%<package>")
+                );
+                assert!(!tokens.iter().any(|token| token.kind == SyntaxKind::VERB));
+            }
+        }
+    }
+
+    #[test]
+    fn embedded_argument_failure_cache_preserves_bounded_slice_rules() {
+        let samples = [
+            " {a}tail",
+            "\u{2003} [a{b}c]tail",
+            "[a[b]tail",
+            "[a}tail]",
+            "{[a]b}tail",
+            "{{balanced} unfinished",
+            "{\\{escaped}tail",
+            "{\\é{nested}unfinished",
+            "[{a]still}]tail",
+            "{a\\}b}tail",
+            "{}tail",
+            "{a\\",
+            "[a\\]b]tail",
+        ];
+        for source in samples {
+            let mut readers = RawReaders::new(source);
+            for (offset, c) in source.char_indices() {
+                if !matches!(c, '{' | '[') {
+                    continue;
+                }
+                let close = if c == '{' { '}' } else { ']' };
+                let suffix = &source[offset..];
+                for (end, _) in suffix.char_indices().skip(1) {
+                    let slice = &suffix[..end];
+                    assert_eq!(
+                        readers.embedded_argument(slice, c, close),
+                        super::super::embedded::argument(slice, c, close),
+                        "bounded {slice:?}"
+                    );
+                }
+                assert_eq!(
+                    readers.embedded_argument(suffix, c, close),
+                    super::super::embedded::argument(suffix, c, close),
+                    "full {suffix:?}"
+                );
+                assert_eq!(
+                    readers.embedded_argument(suffix, c, close),
+                    super::super::embedded::argument(suffix, c, close),
+                    "cached {suffix:?}"
+                );
+            }
+        }
+        for pattern in ["\\lstset{\n", "\\mintinline[\n", "\\mintinline[{\n"] {
+            let source = pattern.repeat(4096);
+            let mut readers = RawReaders::new(&source);
+            let open = if pattern.contains('[') { '[' } else { '{' };
+            let close = if open == '[' { ']' } else { '}' };
+            for (offset, _) in source.match_indices(pattern) {
+                let argument = &source[offset + pattern.len() - 2..];
+                assert_eq!(readers.embedded_argument(argument, open, close), None);
+            }
+            let passes = if pattern.contains("[{") { 3 } else { 2 };
+            assert!(
+                readers.scanned_bytes <= source.len() * passes,
+                "{pattern:?}: {} scanned bytes for {} source bytes",
+                readers.scanned_bytes,
+                source.len()
+            );
+        }
+    }
+
+    #[test]
+    fn failed_raw_reader_cache_matches_independent_suffix_scans() {
+        fn balanced(s: &str, close: u8) -> Option<usize> {
+            let mut stack = vec![close];
+            let mut i = 1;
+            while i < s.len() {
+                match s.as_bytes()[i] {
+                    b'\\' => {
+                        i += 2;
+                        continue;
+                    }
+                    b'{' => stack.push(b'}'),
+                    b'[' => stack.push(b']'),
+                    c @ (b'}' | b']') if stack.last() == Some(&c) => {
+                        stack.pop();
+                        if stack.is_empty() {
+                            return Some(i + 1);
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            None
+        }
+        fn name_argument(content: &str, dtx: bool) -> Option<usize> {
+            let mut depth = 1;
+            let mut chars = content.char_indices();
+            while let Some((i, c)) = chars.next() {
+                match c {
+                    '\\' => {
+                        chars.next()?;
+                    }
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return (i > 0).then_some(i);
+                        }
+                    }
+                    '\n' | '\r' if dtx => {
+                        let after = &content[i + 1..];
+                        let after = if c == '\r' {
+                            after.strip_prefix('\n').unwrap_or(after)
+                        } else {
+                            after
+                        };
+                        if !after.starts_with('%') || after.starts_with("%<") {
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        let mut seed = 0x4d31_94ab_u64;
+        let alphabet = [
+            "{", "}", "[", "]", "\\", "%", "<", "é", "\n", "\r", "a", "\\begin{",
+        ];
+        for _ in 0..1024 {
+            let mut source = String::from("\\begin{{");
+            for _ in 0..40 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                source.push_str(alphabet[seed as usize % alphabet.len()]);
+            }
+            let offsets: Vec<_> = source.char_indices().map(|(i, _)| i).collect();
+            let mut readers = RawReaders::new(&source);
+            // Reverse queries also check that the next-name-close cache does
+            // not reuse a result from a later opening.
+            let reversed: Vec<_> = offsets.iter().copied().rev().collect();
+            for offsets in [&offsets[..], &reversed[..]] {
+                for &offset in offsets {
+                    let suffix = &source[offset..];
+                    let expected_name = suffix.strip_prefix("\\begin{").and_then(|after| {
+                        after
+                            .find('}')
+                            .map(|close| (&after[..close], 7 + close + 1))
+                    });
+                    assert_eq!(readers.begin_name(suffix), expected_name);
+                    let close = match suffix.as_bytes()[0] {
+                        b'{' => b'}',
+                        b'[' => b']',
+                        _ => continue,
+                    };
+                    let open = if close == b'}' { '{' } else { '[' };
+                    let embedded_close = close as char;
+                    assert_eq!(
+                        readers.embedded_argument(suffix, open, embedded_close),
+                        super::super::embedded::argument(suffix, open, embedded_close)
+                    );
+                    assert_eq!(
+                        readers.balanced_group_len(suffix, close),
+                        balanced(suffix, close),
+                        "{suffix:?}"
+                    );
+                    if close == b'}' {
+                        for dtx in [true, false, true] {
+                            assert_eq!(
+                                readers.braced_verb_content_len(&suffix[1..], dtx),
+                                name_argument(&suffix[1..], dtx),
+                                "dtx={dtx}: {suffix:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn alltt_keeps_commands_and_groups_but_disables_other_specials() {
         let input = "\\begin{alltt}\n% $ # ^ _ & ~ \\textbf{active} \\ref{real}\n\\end{alltt}";
         let tokens = lex(input);
@@ -2130,59 +3142,6 @@ mod tests {
                 .iter()
                 .any(|token| token.kind == SyntaxKind::CONTROL_WORD && token.text == "\\foo@bar")
         );
-    }
-
-    #[test]
-    fn the_pending_arming_sets_are_disjoint() {
-        for name in [
-            "\\left",
-            "\\right",
-            "\\newcommand",
-            "\\renewcommand",
-            "\\providecommand",
-            "\\DeclareRobustCommand",
-            "\\NewDocumentCommand",
-            "\\RenewDocumentCommand",
-            "\\ProvideDocumentCommand",
-            "\\DeclareDocumentCommand",
-            "\\def",
-            "\\edef",
-            "\\gdef",
-            "\\xdef",
-            "\\let",
-            "\\char",
-            "\\catcode",
-            "\\lccode",
-            "\\uccode",
-            "\\sfcode",
-            "\\mathcode",
-            "\\delcode",
-            "\\number",
-            "\\the",
-            "\\romannumeral",
-            "\\numexpr",
-            "\\dimexpr",
-            "\\ifnum",
-            "\\ifodd",
-            "\\ifdim",
-            "\\string",
-            "\\noexpand",
-            "\\meaning",
-            "\\expandafter",
-            "\\show",
-        ] {
-            let armed = [
-                name == "\\left" || name == "\\right",
-                is_definition_keyword(name),
-                is_char_constant_command(name),
-                is_literal_token_command(name),
-            ];
-            assert_eq!(
-                armed.iter().filter(|&&x| x).count(),
-                1,
-                "{name} arms {armed:?} — the `Pending` slot needs disjoint sets"
-            );
-        }
     }
 
     #[test]
@@ -2288,6 +3247,371 @@ mod tests {
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].kind, SyntaxKind::VERB);
         assert_eq!(toks[0].text, r"\verb|$x$|");
+    }
+
+    #[test]
+    fn literal_verb_operands_do_not_consume_following_source() {
+        for source in [
+            "\\def\\verb{%\n body\n}\n",
+            "\\let\\other\\verb{body}\n",
+            "\\ifx\\verb\\other{body}\\fi\n",
+            "\\meaning\\verb{body}\n",
+            "\\noexpand\\verb{body}\n",
+            "\\detokenize{\\verb{body}}\n",
+        ] {
+            let tokens = lex(source);
+            assert_lossless(source);
+            assert!(
+                tokens.iter().any(|token| {
+                    matches!(token.kind, SyntaxKind::CONTROL_WORD | SyntaxKind::WORD)
+                        && token.text == "\\verb"
+                }),
+                "{source}"
+            );
+            assert!(
+                !tokens.iter().any(|token| token.kind == SyntaxKind::VERB),
+                "{source}"
+            );
+            let parsed = super::super::core::parse_with_flavor(source, LatexFlavor::Document);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            assert_eq!(parsed.syntax().to_string(), source);
+        }
+    }
+
+    #[test]
+    fn stringified_verb_consumes_only_the_control_sequence() {
+        let source = "\\string\\verb|body| \\verb|active|";
+        let tokens = lex(source);
+        assert_lossless(source);
+        let literals: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.kind == SyntaxKind::VERB)
+            .map(|token| token.text.as_str())
+            .collect();
+        assert_eq!(literals, ["\\verb|active|"]);
+        assert!(tokens.iter().any(|token| token.text == "|body|"));
+    }
+
+    #[test]
+    fn stored_string_operands_cannot_consume_replacement_delimiters() {
+        for source in [
+            "\\def\\foo{Invalid use of \\string}\\ref{live}",
+            "\\long\\gdef\\foo#1{\\string{#1}}\\ref{live}",
+            "\\edef\\foo{\\string\\begin}\\ref{live}",
+            "\\DoNotIndex{\\relax,\\space,\\string}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+        // Executed primitive operands have no scanned replacement owner.
+        for source in [
+            "\\string}",
+            "{\\string}",
+            "\\let\\foo\\def\\relax{\\string}",
+        ] {
+            let tokens = lex(source);
+            assert!(
+                tokens.iter().any(|token| {
+                    token.kind == SyntaxKind::STRINGIFIED_TOKEN && token.text == "}"
+                }),
+                "{source}"
+            );
+            assert_lossless(source);
+        }
+    }
+
+    #[test]
+    fn stored_declaration_headers_keep_structural_string_delimiters() {
+        for source in [
+            "\\newcommand{\\foo}{\\string}\\ref{live}",
+            "\\newcommand\\foo[1][\\string]{body}\\ref{live}",
+            "\\DeclareRobustCommand*{\\foo}[1][\\string]{\\string}\\ref{live}",
+            "\\NewDocumentCommand{\\foo}{O{\\string}m}{\\string}\\ref{live}",
+            "\\DeclareExpandableDocumentCommand\\foo{m}{\\string}\\ref{live}",
+            "\\newenvironment{foo}[1][\\string]{\\string}{\\string}\\ref{live}",
+            "\\NewDocumentEnvironment{foo}{O{\\string}m}{\\string}{\\string}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+    }
+
+    #[test]
+    fn stored_declaration_owners_respect_source_shadowing_and_inert_heads() {
+        for source in [
+            "\\let\\newcommand\\relax\\newcommand{\\foo}{\\string}",
+            "\\let\\def\\relax\\def\\foo{\\string}",
+            "\\meaning\\newcommand{\\foo}{\\string}",
+            "\\string\\newcommand{\\foo}{\\string}",
+            "{\\string}",
+            "\\string}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            let tokens: Vec<_> = parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .collect();
+            assert!(
+                tokens
+                    .iter()
+                    .any(|token| token.kind() == SyntaxKind::STRINGIFIED_TOKEN
+                        && token.text() == "}"),
+                "{source}: {tokens:?}"
+            );
+        }
+        let source = "\\def\\newcommand{\\string}\\newcommand{\\foo}{\\string}";
+        let parsed = super::super::core::parse(source);
+        let tokens: Vec<_> = parsed
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .collect();
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind() == SyntaxKind::STRINGIFIED_TOKEN && token.text() == "}")
+                .count(),
+            1,
+            "the active overriding definition owns its body; only its later shadowed call is executable"
+        );
+    }
+
+    #[test]
+    fn curated_macro_arguments_keep_string_braces_structural() {
+        for source in [
+            "\\texttt{\\string}\\ref{live}",
+            "\\section*{\\string}\\ref{live}",
+            "\\operatorname*{\\string}\\ref{live}",
+            "\\DeclareMathOperator*{\\foo}{\\string}\\ref{live}",
+            "\\includegraphics*{\\string}\\ref{live}",
+            "\\textbf{\\string{}}\\ref{live}",
+            "\\frac{\\string}{x}\\ref{live}",
+            "\\section[\\string]{\\string}\\ref{live}",
+            "\\href{https://example.test}{\\string}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            assert_eq!(parsed.syntax().to_string(), source);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+        for source in [
+            "\\hbox{\\string}",
+            "\\mathop{\\string}",
+            "\\meaning\\texttt{\\string}",
+            "\\let\\texttt\\relax\\texttt{\\string}",
+            "\\texttt*{\\string}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert!(
+                parsed
+                    .syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.kind() == SyntaxKind::STRINGIFIED_TOKEN
+                        && token.text() == "}"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn fancy_readers_use_rebased_source_override_offsets() {
+        let source = "\\let\\meaning\\relax\n\\begin{Verbatim}[commandchars=+()]\n+meaning+verb|+ref(eq:fake)|\n\\end{Verbatim}\n";
+        let parsed = super::super::core::parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(
+            parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::VERB
+                    && token.text() == "+verb|+ref(eq:fake)|"),
+            "the source-shadowed meaning cannot make the active verb an inert operand"
+        );
+        let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+        assert!(model.refs().is_empty());
+    }
+
+    #[test]
+    fn stored_owner_groups_survive_nested_headers_and_raw_arguments() {
+        for source in [
+            "\\newenvironment{outer}{\\newcommand{\\inner}{\\string}}{\\string}\\ref{live}",
+            "\\newcommand{\\foo}[1][{\\string}]{\\string}\\ref{live}",
+            "\\def\\foo#1\\texttt{\\string}\\ref{live}",
+            "\\href[unicode]{https://example.test}{\\textbf{\\string}}\\ref{live}",
+            "\\newcommand*{\\foo}{\\string}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+    }
+
+    #[test]
+    fn primitive_parameter_control_words_do_not_steal_or_extend_body_ownership() {
+        let source = "\\def\\foo\\texttt{\\string} {\\string}";
+        let parsed = super::super::core::parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert_eq!(parsed.syntax().descendants_with_tokens().filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SyntaxKind::STRINGIFIED_TOKEN && token.text() == "}").count(), 1);
+    }
+    #[test]
+    fn primitive_parameter_string_cannot_consume_the_first_body_brace() {
+        for source in [
+            "\\def\\foo\\string{X}\\ref{live}",
+            "\\def\\foo\\string\\texttt{X}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1);
+            assert_eq!(model.refs()[0].name, "live");
+        }
+    }
+
+    #[test]
+    fn supported_literal_declaration_names_do_not_run_raw_readers() {
+        for source in [
+            "\\newcommand*{\\verb}{x}\\ref{live}",
+            "\\DeclareMathOperator{\\verb}{x}\\ref{live}",
+            "\\DeclareMathOperator*{\\verb}{x}\\ref{live}",
+            "\\newlength{\\verb}\\ref{live}",
+            "\\newcount\\verb\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+            assert!(
+                crate::semantic::scan_definition_sites(&parsed.syntax())
+                    .iter()
+                    .any(|site| site.name == "verb"),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_name_ownership_ends_and_respects_shadowed_or_inert_heads() {
+        for source in [
+            "\\newlength{\\length}\\verb|active|\\ref{live}",
+            "\\let\\newlength\\relax\\newlength{\\verb|active|}\\ref{live}",
+            "\\let\\DeclareMathOperator\\relax\\DeclareMathOperator{\\verb|active|}\\ref{live}",
+            "\\meaning\\DeclareMathOperator{\\verb|active|}\\ref{live}",
+            "\\string\\newlength{\\verb|active|}\\ref{live}",
+            "\\let\\copy\\newlength{\\verb|active|}\\ref{live}",
+            "\\newlength*{\\verb|active|}\\ref{live}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            assert!(
+                parsed
+                    .syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .any(|token| token.kind() == SyntaxKind::VERB
+                        && token.text() == "\\verb|active|"),
+                "{source}"
+            );
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+    }
+    #[test]
+    fn embedded_islands_use_exact_source_override_offsets() {
+        let source = "\\let\\meaning\\relax\n\\begin{lstlisting}[escapeinside={(*@}{@*)}]\n(*@\\meaning\\verb|\\ref{fake}|@*)\n\\end{lstlisting}\n";
+        let parsed = super::super::core::parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(
+            parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::VERB
+                    && token.text() == "\\verb|\\ref{fake}|")
+        );
+        assert!(
+            crate::semantic::SemanticModel::build(&parsed.syntax())
+                .refs()
+                .is_empty()
+        );
+
+        let source = "\\begin{Verbatim}[commandchars=+()]\n+meaning+verb|payload|\n\\end{Verbatim}\n\\let\\meaning\\relax";
+        let parsed = super::super::core::parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(
+            !parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::VERB)
+        );
+    }
+    #[test]
+    fn documentary_index_arguments_are_inert_and_source_shadowable() {
+        for source in [
+            "\\DoNotIndex{\\string,\\ref{fake},\\def\\ghost{x}}\\ref{live}",
+            "\\renewcommand{\\DoNotIndex}[1]{#1}\\DoNotIndex{\\ref{live}}",
+            "\\let\\DoNotIndex\\relax\\DoNotIndex{\\ref{live}}",
+            "\\meaning\\DoNotIndex{\\ref{live}}",
+        ] {
+            let parsed = super::super::core::parse(source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+            assert_eq!(model.refs().len(), 1, "{source}");
+            assert_eq!(model.refs()[0].name, "live");
+        }
+    }
+
+    #[test]
+    fn ordinary_source_redefinition_suppresses_builtin_verb_capture() {
+        let source = "\\renewcommand{\\verb}[1]{\\texttt{#1}}\n\\verb{a_b}\n";
+        let parsed = super::super::core::parse_with_flavor(source, LatexFlavor::Document);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let root = parsed.syntax();
+        assert_eq!(root.to_string(), source);
+        assert!(!root.descendants_with_tokens().any(|element| {
+            element
+                .into_token()
+                .is_some_and(|token| token.kind() == SyntaxKind::VERB)
+        }));
+        assert!(root.descendants_with_tokens().any(|element| {
+            element
+                .into_token()
+                .is_some_and(|token| token.kind() == SyntaxKind::UNDERSCORE)
+        }));
+    }
+
+    #[test]
+    fn ordinary_release_header_replacement_does_not_hide_argument_calls() {
+        let source = "\\renewcommand{\\IncludeInRelease}[3]{#3}\n\\IncludeInRelease{date}{name}{\\ref{live}}\n";
+        let parsed = super::super::core::parse_with_flavor(source, LatexFlavor::Document);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let model = crate::semantic::SemanticModel::build(&parsed.syntax());
+        assert_eq!(model.refs().len(), 1);
     }
 
     #[test]
@@ -2675,6 +3999,105 @@ mod tests {
         let toks = lex("\\MakeShortVerb{\\|} $\\left|x\\right|$");
         assert!(!toks.iter().any(|t| t.kind == SyntaxKind::VERB));
         assert_lossless("\\MakeShortVerb{\\|} $\\left|x\\right|$");
+    }
+
+    #[test]
+    fn short_verb_scope_snapshots_share_large_unicode_delimiter_sets() {
+        let mut input = String::new();
+        let mut declarations = Vec::new();
+        for value in 0xe000..0xf000 {
+            let character = char::from_u32(value).unwrap();
+            let start = input.len();
+            input.push_str(&format!("\\MakeShortVerb{{\\{character}}}\n"));
+            declarations.push((start, start + "\\MakeShortVerb".len(), character));
+        }
+        let ctx = ParseCtx::default();
+        let mut lexer = Lexer::new(&input, &ctx, LexConfig::default(), None);
+        for &(start, after, _) in &declarations {
+            lexer.pos = start;
+            lexer.apply_toggles("\\MakeShortVerb", &input[after..]);
+        }
+        assert_eq!(lexer.short_verbs.len(), 4096);
+        lexer.save_scope();
+        assert!(
+            std::ptr::eq(
+                lexer.short_verbs.iter().next().unwrap(),
+                lexer
+                    .scopes
+                    .last()
+                    .unwrap()
+                    .short_verbs
+                    .iter()
+                    .next()
+                    .unwrap(),
+            ),
+            "ordinary scopes must share immutable delimiter state rather than copy it"
+        );
+        let (start, after, character) = declarations[0];
+        lexer.pos = start;
+        lexer.apply_toggles("\\MakeShortVerb", &input[after..]);
+        lexer.apply_toggles("\\DeleteShortVerb", "{\\z}");
+        assert!(std::ptr::eq(
+            lexer.short_verbs.iter().next().unwrap(),
+            lexer
+                .scopes
+                .last()
+                .unwrap()
+                .short_verbs
+                .iter()
+                .next()
+                .unwrap(),
+        ));
+        lexer.apply_toggles("\\DeleteShortVerb", &input[after..]);
+        assert!(!lexer.short_verbs.contains(&character));
+        assert!(!lexer.short_verb_contains(&character));
+        assert!(
+            lexer
+                .scopes
+                .last()
+                .unwrap()
+                .short_verbs
+                .contains(&character)
+        );
+        lexer.restore_scope();
+        assert_eq!(lexer.short_verbs.len(), 4096);
+        assert!(lexer.short_verbs.contains(&character));
+        assert!(lexer.short_verb_contains(&character));
+    }
+
+    #[test]
+    fn short_verb_nested_add_remove_restores_outer_delimiters() {
+        let input = concat!(
+            "\\MakeShortVerb{\\|}|outer|",
+            "{\\MakeShortVerb{\\!}!inner!|still|",
+            "{\\DeleteShortVerb{\\|}|plain|!nested!}",
+            "|restored|!inner-again!}",
+            "|after|!plain-again!",
+        );
+        let tokens = lex(input);
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|token| token.text.as_str())
+                .collect::<String>(),
+            input
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| token.kind == SyntaxKind::VERB)
+                .map(|token| token.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "|outer|",
+                "!inner!",
+                "|still|",
+                "!nested!",
+                "|restored|",
+                "!inner-again!",
+                "|after|"
+            ]
+        );
     }
 
     #[test]

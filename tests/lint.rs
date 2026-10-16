@@ -208,6 +208,7 @@ fn lint_with_bib(tex: &str, bibs: &[(&str, &str)]) -> Vec<&'static str> {
     }];
     let graph = IncludeGraph::build(&facts, None);
     let cite_facts = vec![CiteFileFacts {
+        case_sensitive: tex_ls_analysis::project::citations::citation_case_sensitive(&root),
         path: tex_path.clone(),
         bib_targets: collect_bib_resource_targets(&root, tex_path.parent()),
         manual_keys: Vec::new(),

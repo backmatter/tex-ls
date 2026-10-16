@@ -27,6 +27,7 @@ pub struct Session {
     encoding: PositionEncoding,
     active_path: Option<PathBuf>,
     policy: ResponsePolicy,
+    semantic_tokens: semantic_token_store::SemanticTokenStore,
     acquisitions: HashMap<u64, (ProjectId, ExternalInputKind, AcquisitionToken)>,
     next_acquisition: u64,
     settings: crate::settings::ResolvedSettings,
@@ -44,6 +45,7 @@ impl Default for Session {
             encoding: PositionEncoding::Utf16,
             active_path: None,
             policy: ResponsePolicy::default(),
+            semantic_tokens: semantic_token_store::SemanticTokenStore::default(),
             acquisitions: HashMap::new(),
             next_acquisition: 0,
             settings: crate::settings::ResolvedSettings::default(),
@@ -152,7 +154,7 @@ impl Session {
     }
 
     /// Handle LSP method parameters without stdio, threads, or a JSON-RPC loop.
-    /// Positions use UTF-16, matching browsers and LSP's default encoding.
+    /// Positions use the negotiated encoding, defaulting to UTF-16.
     pub fn dispatch(&mut self, method: &str, params: Value) -> Result<Value, String> {
         let uri = params.pointer("/textDocument/uri").cloned();
         if let Some(uri) = uri
@@ -161,6 +163,13 @@ impl Session {
             .and_then(|uri| uri_to_fs_path(&uri))
         {
             self.active_path = Some(uri);
+        }
+        let previous = params
+            .get("previousResultId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if method.ends_with("semanticTokens/full/delta") && previous.is_none() {
+            return Err("Missing previousResultId".into());
         }
         let mut result = self.dispatch_raw(method, params)?;
         if self
@@ -177,6 +186,24 @@ impl Session {
             );
         }
         self.policy.response(method, uri.as_ref(), &mut result);
+        if let Some(uri) = uri.as_ref().and_then(Value::as_str) {
+            if matches!(method, "textDocument/didClose" | "textDocument/didOpen") {
+                self.semantic_tokens.forget(uri);
+            }
+            if self
+                .policy
+                .supports("/textDocument/semanticTokens/requests/full/delta")
+                && uri
+                    .parse::<Uri>()
+                    .is_ok_and(|uri| self.documents.contains_key(&uri))
+            {
+                self.semantic_tokens
+                    .response(method, uri, previous.as_deref(), &mut result);
+            }
+        }
+        if matches!(method, "initialize" | "shutdown" | "exit") {
+            self.semantic_tokens.clear();
+        }
         Ok(result)
     }
 
@@ -194,7 +221,15 @@ impl Session {
                     .map_err(|error| error.to_string())?;
                 self.source_settings
                     .retain(|path, _| self.projects.select(path, None) != Ok(old));
-                self.documents.retain(|_, document| document.project != old);
+                let token_store = &mut self.semantic_tokens;
+                self.documents.retain(|uri, document| {
+                    if document.project == old {
+                        token_store.forget(uri.as_str());
+                        false
+                    } else {
+                        true
+                    }
+                });
                 self.acquisitions
                     .retain(|_, (project, _, _)| *project != old);
                 let was_default = old == self.db.project_id();
@@ -525,6 +560,11 @@ impl Session {
             "workspace/didRenameFiles" => {
                 let files = tex_ls_protocol::file_operations::decode_files(&params)
                     .ok_or("Invalid rename files")?;
+                for (old, new) in &files {
+                    for uri in [path_to_uri(old), path_to_uri(new)].into_iter().flatten() {
+                        self.semantic_tokens.forget(uri.as_str());
+                    }
+                }
                 self.projects.rename_files(&mut self.db, &files);
                 let moved: Vec<_> = files
                     .iter()
@@ -536,13 +576,18 @@ impl Session {
                     .collect();
                 let settings: Vec<_> = files
                     .iter()
-                    .filter_map(|(old, new)| {
-                        self.source_settings
-                            .remove(old)
-                            .map(|settings| (new.clone(), settings))
-                    })
+                    .map(|(old, new)| (new.clone(), self.source_settings.remove(old)))
                     .collect();
-                self.source_settings.extend(settings);
+                for (new, settings) in settings {
+                    match settings {
+                        Some(settings) => {
+                            self.source_settings.insert(new, settings);
+                        }
+                        None => {
+                            self.source_settings.remove(&new);
+                        }
+                    }
+                }
                 for (new, uri, mut document) in moved {
                     document.project = self
                         .projects
@@ -632,7 +677,9 @@ impl Session {
             || decode::<Position>(params.get("position").cloned().ok_or("Missing position")?);
 
         match method {
-            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => {
+            "textDocument/semanticTokens/full"
+            | "textDocument/semanticTokens/full/delta"
+            | "textDocument/semanticTokens/range" => {
                 let range = if method.ends_with("/range") {
                     Some(decode(
                         params.get("range").cloned().ok_or("Missing range")?,
@@ -852,3 +899,72 @@ use tex_ls_analysis::{
     source::FileKind,
     text::{PositionEncoding, TextBuffer},
 };
+
+#[cfg(test)]
+mod token_project_retirement_tests {
+    use super::*;
+
+    #[test]
+    fn replacing_one_project_retires_only_its_token_baselines() {
+        let one = fixture_uri!("/token-project-one/main.tex");
+        let two = fixture_uri!("/token-project-two/main.tex");
+        let mut session = Session::default();
+        session
+            .dispatch(
+                "initialize",
+                json!({
+                    "workspaceFolders":[
+                        {"uri":fixture_uri!("/token-project-one"),"name":"one"},
+                        {"uri":fixture_uri!("/token-project-two"),"name":"two"}
+                    ],
+                    "capabilities":{"textDocument":{"semanticTokens":{
+                        "formats":["relative"],"tokenTypes":["macro"],"tokenModifiers":[],
+                        "requests":{"full":{"delta":true}}
+                    }}}
+                }),
+            )
+            .unwrap();
+        let mut responses = Vec::new();
+        for uri in [one, two] {
+            session
+                .dispatch(
+                    "textDocument/didOpen",
+                    json!({"textDocument":{
+                        "uri":uri,"languageId":"latex","version":0,"text":"\\textbf{A}\n".repeat(20)
+                    }}),
+                )
+                .unwrap();
+            responses.push(
+                session
+                    .dispatch(
+                        "textDocument/semanticTokens/full",
+                        json!({"textDocument":{"uri":uri}}),
+                    )
+                    .unwrap(),
+            );
+        }
+        let retired_id = responses[0]["resultId"].as_str().unwrap().to_owned();
+        let preserved_id = responses[1]["resultId"].as_str().unwrap().to_owned();
+        session
+            .dispatch("tex-ls/replaceProject", json!({"uri":one}))
+            .unwrap();
+        assert!(!session.documents.contains_key(&one.parse::<Uri>().unwrap()));
+        assert!(session.documents.contains_key(&two.parse::<Uri>().unwrap()));
+        // Exercise the private store directly to distinguish actual retirement
+        // from dispatch's independent closed-document guard.
+        session.semantic_tokens.response(
+            "textDocument/semanticTokens/full/delta",
+            one,
+            Some(&retired_id),
+            &mut responses[0],
+        );
+        assert!(responses[0].get("data").is_some());
+        session.semantic_tokens.response(
+            "textDocument/semanticTokens/full/delta",
+            two,
+            Some(&preserved_id),
+            &mut responses[1],
+        );
+        assert_eq!(responses[1]["edits"], json!([]));
+    }
+}

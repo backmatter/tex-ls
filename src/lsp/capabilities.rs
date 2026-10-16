@@ -1,4 +1,4 @@
-use super::*;
+use crate::text::PositionEncoding;
 
 /// Read the client's diagnostic capabilities from the `initialize` params, as
 /// `(supports_pull, supports_refresh)`. Pointer-walks the JSON (like
@@ -45,11 +45,7 @@ pub(super) fn client_show_document_support(init_params: &serde_json::Value) -> b
         .unwrap_or(false)
 }
 
-/// The workspace this server owns, as filesystem paths: the `workspaceFolders`,
-/// falling back to the deprecated `rootUri`. Empty when the client opened a bare
-/// file, which an inverse-search client reads as "will take anything".
-pub(super) use tex_ls_protocol::projects::workspace_roots;
-
+/// Add native commands to the shared server capabilities.
 pub(super) fn native_capabilities(
     encoding: PositionEncoding,
     pull: bool,

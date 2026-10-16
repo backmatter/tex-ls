@@ -62,7 +62,8 @@ impl Rule for UnknownOption {
     }
 
     fn description(&self) -> &'static str {
-        "Report package options absent from a loaded local package's `\\DeclareOption` \
+        "Report options on active package loads, excluding stored token lists and local load-command overrides. \
+         Options are checked against a loaded local package's `\\DeclareOption` \
          declarations. The rule skips installed packages, class options, and `key=value` options. \
          A default handler, key-value processor, option forwarding, or `\\input` makes the \
          package's declared set incomplete and disables the check. No fix is offered because \
@@ -91,6 +92,9 @@ impl Rule for UnknownOption {
             Some("RequirePackage") => PackageKind::RequirePackage,
             _ => return,
         };
+        if !ctx.file_roles().allows(node) {
+            return;
+        }
 
         // `None`: no bracket, or dynamic content — nothing literal to judge.
         let Some(options) = load_option_args(node) else {
@@ -181,6 +185,30 @@ mod tests {
     }
 
     const DECLARES_DRAFT: &str = "\\DeclareOption{draft}{}\n\\ProcessOptions\\relax\n";
+
+    #[test]
+    fn inactive_or_redefined_loads_do_not_check_package_options() {
+        for source in [
+            "\\newcommand{\\usepackage}[2][]{}\\usepackage[final]{mypkg}",
+            "\\detokenize{\\usepackage[final]{mypkg}}",
+            "\\meaning\\usepackage[final]{mypkg}",
+        ] {
+            assert!(
+                findings_with(source, &[("/p/mypkg.sty", DECLARES_DRAFT)]).is_empty(),
+                "{source}"
+            );
+        }
+        for active in [
+            "\\usepackage[final]{mypkg}\\newcommand{\\usepackage}[2][]{}",
+            // Replacement bodies remain possible future loads in the graph.
+            "\\newcommand{\\example}{\\usepackage[final]{mypkg}}",
+        ] {
+            assert_eq!(
+                findings_with(active, &[("/p/mypkg.sty", DECLARES_DRAFT)]).len(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn unknown_option_is_flagged_with_tight_span() {

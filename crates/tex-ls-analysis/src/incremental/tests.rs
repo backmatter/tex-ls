@@ -890,9 +890,9 @@ fn base_for(text: &str) -> PrevParse {
         text,
         green: parse.green,
         errors: parse.errors,
-        ctx,
+        ctx: Arc::new(ctx),
         config,
-        declared,
+        declared: Arc::new(declared),
     }
 }
 
@@ -933,6 +933,147 @@ fn a_base_is_current_only_for_the_inputs_it_was_parsed_under() {
             .resolve()
             .expect("declarations resolve");
     assert!(base.is_current(&same, LexConfig::default(), &commands_only.parse_tier()));
+}
+
+#[test]
+fn successful_token_reparses_share_immutable_context_and_declarations() {
+    let environments: serde_json::Map<String, serde_json::Value> = (0..2048)
+        .map(|index| {
+            (
+                format!("declared{index}"),
+                serde_json::json!({"like": "quote"}),
+            )
+        })
+        .collect();
+    let declared = serde_json::from_value::<crate::declarations::Declarations>(
+        serde_json::json!({"environments": environments}),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap()
+    .parse_tier();
+    let mut db = Database::default();
+    db.set_declarations(declared.clone());
+    let path = Path::new("/project/shared-context.tex");
+    let mut text = "alphabet beta\n".to_owned();
+    let file = db.upsert_file(path, text.as_str());
+    let initial = parsed_document(&db, file).clone();
+    let initial_green = initial.green.clone();
+    let initial_errors = initial.errors.clone();
+    let mut previous = initial.clone();
+    for insert in ["X", "Y", "Z"] {
+        let edit = Edit {
+            range: 2..2,
+            insert: insert.into(),
+        };
+        let changed = edit.apply(&text);
+        let previous_base = previous.as_reparse_base(&previous.declared);
+        let proved = crate::parser::reparse(&previous_base, &edit, &changed)
+            .expect("this known ASCII word edit must splice");
+        assert_eq!(proved.tier, crate::parser::ReparseTier::Token);
+        let (full, full_ctx) =
+            parse_with_declarations_resolved(&changed, LexConfig::default(), &declared);
+        assert_eq!(proved.green, full.green);
+        assert_eq!(proved.errors, full.errors);
+        db.upsert_file(path, changed.as_str());
+        db.reparse_stage_edits(file, Some(vec![edit]));
+        let actual = parsed_document(&db, file).clone();
+        assert_eq!(actual.green, full.green);
+        assert_eq!(actual.errors, full.errors);
+        let initial_base = initial.as_reparse_base(&initial.declared);
+        let actual_base = actual.as_reparse_base(&actual.declared);
+        assert_eq!(actual_base.ctx, &full_ctx);
+        assert_eq!(actual_base.declared, &declared);
+        assert!(
+            std::ptr::eq(initial_base.ctx, actual_base.ctx),
+            "a successful splice must share the immutable full-file context"
+        );
+        assert!(
+            std::ptr::eq(initial_base.declared, actual_base.declared),
+            "a successful splice must share its unchanged declarations"
+        );
+        assert_eq!(initial.green, initial_green);
+        assert_eq!(initial.errors, initial_errors);
+        assert_eq!(initial_base.text, "alphabet beta\n");
+        assert_eq!(
+            initial_base.declared.as_db().environment_names().count(),
+            2048
+        );
+        text = changed;
+        previous = actual;
+    }
+}
+
+#[test]
+fn parsed_document_retains_rebased_reader_context_across_staged_edits() {
+    let mut db = Database::default();
+    let path = Path::new("/project/rebased-readers.tex");
+    let mut text = "alphabet beta\n\\renewcommand{\\meaning}[1]{#1}\nAfterword.\n".to_owned();
+    let declared = ResolvedDeclarations::default();
+    let file = db.upsert_file(path, text.as_str());
+    let initial = parsed_document(&db, file).clone();
+    let retained = initial.ctx.clone();
+    let mut previous = initial.clone();
+    for (at, remove, insert) in [(2, 0, "XY"), (2, 1, ""), (2, 1, "Q")] {
+        let edit = Edit {
+            range: at..at + remove,
+            insert: insert.into(),
+        };
+        let changed = edit.apply(&text);
+        let proved = crate::parser::reparse(&previous.as_reparse_base(&declared), &edit, &changed)
+            .expect("known word with rebased later reader must splice");
+        assert_eq!(proved.tier, crate::parser::ReparseTier::Token);
+        let (full, full_ctx) =
+            parse_with_declarations_resolved(&changed, LexConfig::default(), &declared);
+        assert!(full.errors.is_empty());
+        assert_eq!(full.syntax().to_string(), changed);
+        assert_eq!(proved.green, full.green);
+        assert_eq!(proved.errors, full.errors);
+        assert_eq!(proved.context(&previous.ctx), &full_ctx);
+        db.upsert_file(path, changed.as_str());
+        db.reparse_stage_edits(file, Some(vec![edit]));
+        let actual = parsed_document(&db, file).clone();
+        assert_eq!(actual.green, full.green);
+        assert_eq!(actual.errors, full.errors);
+        assert_eq!(actual.ctx.as_ref(), &full_ctx);
+        assert!(Arc::ptr_eq(&initial.declared, &actual.declared));
+        let (_, original_ctx) = parse_with_declarations_resolved(
+            "alphabet beta\n\\renewcommand{\\meaning}[1]{#1}\nAfterword.\n",
+            LexConfig::default(),
+            &declared,
+        );
+        assert_eq!(retained.as_ref(), &original_ctx);
+        previous = actual;
+        text = changed;
+    }
+}
+
+#[test]
+fn staged_prose_edit_does_not_reuse_a_previous_declaration_context() {
+    let mut db = Database::default();
+    let path = Path::new("/project/main.tex");
+    let original = "Before.\n\\begin{custom}\nx_i\n\\end{custom}\n";
+    let file = db.upsert_file(path, original);
+    db.parsed_tree(file);
+    let edit = Edit {
+        range: 1..2,
+        insert: "a".into(),
+    };
+    let changed = edit.apply(original);
+    db.upsert_file(path, changed.as_str());
+    db.reparse_stage_edits(file, Some(vec![edit]));
+    let declared = toml::from_str::<crate::declarations::Declarations>(
+        "[environments.custom]\nlike = 'equation'\n",
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    db.set_declarations(declared.clone());
+    let actual = parsed_document(&db, file);
+    let expected =
+        parse_with_declarations_resolved(&changed, LexConfig::default(), &declared.parse_tier()).0;
+    assert_eq!(actual.green, expected.green);
+    assert_eq!(actual.errors, expected.errors);
 }
 
 /// Reparse state is retained until its source is removed.
@@ -1286,6 +1427,151 @@ fn label_context_cache_stores_long_titles_once_per_source_context() {
 }
 
 #[test]
+fn bibliography_targets_are_lazy_shared_and_refresh_source_ownership() {
+    let path = Path::new("/project/bibliography-targets.tex");
+    let source = r"\bibliography{first, second}\addbibresource{third.bib}\meaning\addbibresource{printed}\let\copy\addbibresource{copied}\newcommand{\wrap}[1]{\addbibresource{protected}}\bibitem{manual}\nocite{*}";
+    let edited = format!(r"\renewcommand{{\addbibresource}}[1]{{}}{source}");
+    let mut db = Database::default();
+    let file = db.upsert_file(path, source);
+    let identity = *file.identity(&db);
+    for (text, names) in [
+        // Discovery conservatively retains literal resources in replacement
+        // bodies, matching the existing full citation facts.
+        (
+            source,
+            vec!["first.bib", "second.bib", "third.bib", "protected.bib"],
+        ),
+        (edited.as_str(), vec!["first.bib", "second.bib"]),
+    ] {
+        db.upsert_file(path, text);
+        db.clear_query_log();
+        let targets = queries::file_bibliography_targets(&db, file).clone();
+        assert_eq!(
+            targets,
+            names
+                .into_iter()
+                .map(|name| BibTarget::Path(name.into()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(targets, *queries::file_bibliography_targets(&db, file));
+        assert_eq!(
+            db.query_log()
+                .iter()
+                .filter(|entry| entry.kind == QueryKind::FileBibliographyTargets
+                    && entry.file == Some(identity))
+                .count(),
+            1,
+            "cold resource discovery executes once per source revision"
+        );
+        assert!(
+            db.query_log().iter().all(|entry| !matches!(
+                entry.kind,
+                QueryKind::SemanticModel | QueryKind::ResolvedLabels | QueryKind::ComponentLabels
+            )),
+            "resource discovery does not materialize citation or label semantics"
+        );
+        db.clear_query_log();
+        assert_eq!(targets, *queries::file_bibliography_targets(&db, file));
+        assert!(
+            db.query_log().is_empty(),
+            "warm resource discovery reuses its memo"
+        );
+        let facts = queries::file_cite_facts(&db, file);
+        assert_eq!(targets, facts.bib_targets);
+        assert_eq!(facts.manual_keys, vec![SmolStr::new("manual")]);
+        assert!(facts.nocite_all);
+        let mut fresh = Database::default();
+        let fresh_file = fresh.upsert_file(path, text);
+        assert_eq!(
+            targets,
+            *queries::file_bibliography_targets(&fresh, fresh_file)
+        );
+        assert_eq!(facts, queries::file_cite_facts(&fresh, fresh_file));
+    }
+}
+
+#[test]
+fn file_role_consumers_share_one_context_per_revision_and_refresh_loader_overrides() {
+    let path = Path::new("/project/role-cache.tex");
+    let source = r"\documentclass{article}\graphicspath{{images/}}\input{chapter}\usepackage{array}\addbibresource{refs.bib}\includegraphics{plot}";
+    let overridden = format!(
+        r"\renewcommand{{\input}}[1]{{}}\renewcommand{{\usepackage}}[1]{{}}\renewcommand{{\addbibresource}}[1]{{}}\renewcommand{{\graphicspath}}[1]{{}}{source}"
+    );
+    let mut db = Database::default();
+    let file = db.upsert_file(path, source);
+    let identity = *file.identity(&db);
+    let check = |db: &Database, text: &str, overridden: bool| {
+        let includes = queries::include_edges(db, file);
+        let packages = queries::package_edges(db, file);
+        let citations = queries::file_cite_facts(db, file);
+        let references = queries::file_references(db, file);
+        let graphics = queries::root_graphics(db, file);
+        assert_eq!(includes.len(), usize::from(!overridden));
+        assert_eq!(packages.len(), if overridden { 1 } else { 2 });
+        assert_eq!(citations.bib_targets.len(), usize::from(!overridden));
+        let expected_graphics = if overridden {
+            Vec::new()
+        } else {
+            vec![PathBuf::from("/project/images")]
+        };
+        assert_eq!(graphics, &expected_graphics);
+        let image = references
+            .iter()
+            .find(|reference| {
+                reference
+                    .candidates
+                    .local
+                    .iter()
+                    .any(|p| p.ends_with("plot.pdf"))
+            })
+            .expect("live graphics call remains a file reference");
+        assert_eq!(
+            image
+                .candidates
+                .local
+                .contains(&PathBuf::from("/project/images/plot.pdf")),
+            !overridden
+        );
+        assert_eq!(references.len(), if overridden { 2 } else { 5 });
+        // A full fresh analysis is the oracle for extraction, including exact
+        // current spans and candidate ordering after the declarations change.
+        let mut fresh = Database::default();
+        let fresh_file = fresh.upsert_file(path, text);
+        assert_eq!(includes, queries::include_edges(&fresh, fresh_file));
+        assert_eq!(packages, queries::package_edges(&fresh, fresh_file));
+        assert_eq!(citations, queries::file_cite_facts(&fresh, fresh_file));
+        assert_eq!(references, queries::file_references(&fresh, fresh_file));
+        assert_eq!(graphics, queries::root_graphics(&fresh, fresh_file));
+    };
+    db.clear_query_log();
+    check(&db, source, false);
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::FileRoles && entry.file == Some(identity))
+            .count(),
+        1,
+        "all five extraction paths share one source-role index"
+    );
+    db.clear_query_log();
+    check(&db, source, false);
+    assert!(
+        db.query_log().is_empty(),
+        "unchanged extractions remain cached"
+    );
+    assert!(db.upsert_file(path, overridden.as_str()) == file);
+    check(&db, &overridden, true);
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::FileRoles && entry.file == Some(identity))
+            .count(),
+        1,
+        "a source loader override rebuilds the shared index once"
+    );
+}
+
+#[test]
 fn operand_facts_are_shared_across_consumers_and_match_fresh_analysis_after_edits() {
     let path = Path::new("/project/operand-cache.tex");
     let source = r"\includeonly{a}\meaning\includeonly{b}\include{a}\meaning\newcommand{\fake}[1]{#1}\section{Live}\label{live}\meaning\ref{printed}\ref{live}";
@@ -1380,4 +1666,85 @@ fn empty_definition_cache_preserves_copied_file_roles_and_nested_live_uses() {
         .map(|node| roles.allows(&node))
         .collect::<Vec<_>>();
     assert_eq!(heads, vec![false, true, false, true]);
+}
+
+#[test]
+fn manual_bib_body_ends_share_queries_and_preserve_extent_boundaries() {
+    use crate::syntax::SyntaxKind;
+    use rowan::TextSize;
+    let path = Path::new("/project/manual.tex");
+    let source = "\\begin{thebibliography}{9}\n\\bibitem[One]{Écho} First.\n\\bibitem{Two}\\bibitem{Three} Third.\n\\end{thebibliography}\n\\bibitem{Tail} EOF body";
+    let mut db = IncrementalDatabase::default();
+    let file = db.upsert_file(path, source);
+    let old_ends = |snapshot: &Analysis| {
+        let mut ends: Vec<_> = snapshot
+            .semantic_model(file)
+            .bibitems()
+            .iter()
+            .map(|item| item.range.start())
+            .chain(
+                snapshot
+                    .parsed_tree(file)
+                    .descendants()
+                    .filter(|node| {
+                        node.kind() == SyntaxKind::END
+                            && crate::ast::environment_name(node).as_deref()
+                                == Some("thebibliography")
+                    })
+                    .map(|node| node.text_range().start()),
+            )
+            .collect();
+        ends.sort();
+        ends
+    };
+    db.clear_query_log();
+    for _ in 0..3 {
+        let snapshot = db.snapshot();
+        assert_eq!(snapshot.manual_bib_body_ends(file), old_ends(&snapshot));
+        let ends = snapshot.manual_bib_body_ends(file);
+        let text = snapshot.file_text(file);
+        let bodies: Vec<_> = snapshot
+            .semantic_model(file)
+            .bibitems()
+            .iter()
+            .map(|item| {
+                let start = item.range.end();
+                let end = ends
+                    .get(ends.partition_point(|end| *end < start))
+                    .copied()
+                    .unwrap_or_else(|| TextSize::new(text.len() as u32));
+                &text[usize::from(start)..usize::from(end)]
+            })
+            .collect();
+        assert_eq!(bodies, [" First.\n", "", " Third.\n", " EOF body"]);
+    }
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::ManualBibBodyEnds)
+            .count(),
+        1
+    );
+    db.upsert_file(Path::new("/project/unrelated.tex"), "unrelated");
+    assert_eq!(
+        db.snapshot().manual_bib_body_ends(file),
+        old_ends(&db.snapshot())
+    );
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::ManualBibBodyEnds)
+            .count(),
+        1
+    );
+    db.upsert_file(path, format!("prefix\n\n{source}"));
+    let snapshot = db.snapshot();
+    assert_eq!(snapshot.manual_bib_body_ends(file), old_ends(&snapshot));
+    assert_eq!(
+        db.query_log()
+            .iter()
+            .filter(|entry| entry.kind == QueryKind::ManualBibBodyEnds)
+            .count(),
+        2
+    );
 }

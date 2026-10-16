@@ -7,7 +7,7 @@
 //! [`ResolvedPackageOptions::build`] folds the per-file facts into the map the
 //! `unknown-option` lint consumes through `RuleContext`.
 //!
-//! Everything here reads static facts only (AGENTS.md decision #1): literal
+//! Everything here reads static facts only: literal
 //! `\DeclareOption{name}` declarations from the semantic model, command *names*
 //! (never meanings) for the keyval-family processors, and load/include edges.
 //! The bias is conservative by construction — any signal that the declared set

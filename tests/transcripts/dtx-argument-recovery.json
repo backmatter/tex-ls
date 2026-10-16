@@ -1,0 +1,266 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "hover": {
+          "contentFormat": [
+            "markdown"
+          ]
+        },
+        "diagnostic": {}
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\ExplSyntaxOn\n\\foo:nn {\n%    \\begin{macrocode}\nx\n} {b}\n%    \\end{macrocode}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "%    \\begin{macrocode}\n\\section{Recovered}\n%    \\end{macrocode}\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx"
+        }
+      },
+      "request": true,
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture0.dtx"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\ExplSyntaxOn\r\n\\foo:nn {\r\n%    \\begin{macrocode}\r\nx\r\n} {b}\r\n%    \\end{macrocode}\r\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "%    \\begin{macrocode}\r\n\\section{Recovered}\r\n%    \\end{macrocode}\r\n"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx"
+        }
+      },
+      "request": true,
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture1.dtx"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\ExplSyntaxOn\r\\foo:nn {\r%    \\begin{macrocode}\rx\r} {b}\r%    \\end{macrocode}\r"
+        }
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/diagnostic",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx"
+        }
+      },
+      "request": true
+    },
+    {
+      "method": "textDocument/didChange",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx",
+          "version": 2
+        },
+        "contentChanges": [
+          {
+            "text": "%    \\begin{macrocode}\r\\section{Recovered}\r%    \\end{macrocode}\r"
+          }
+        ]
+      }
+    },
+    {
+      "method": "textDocument/documentSymbol",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx"
+        }
+      },
+      "request": true,
+      "expectedNonEmpty": true
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/fixture2.dtx"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/comments.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "% Documentation \ud83d\ude00\r\\newcommand{\\custom}[1]{#1}\r\\custom{value}"
+        }
+      }
+    },
+    {
+      "method": "textDocument/hover",
+      "params": {
+        "textDocument": {
+          "uri": "file:///recovery/comments.tex"
+        },
+        "position": {
+          "line": 2,
+          "character": 2
+        }
+      },
+      "request": true,
+      "expected": {
+        "contents": {
+          "kind": "markdown",
+          "value": "```latex\n\\custom{}\n```\nuser-defined command \u00b7 1 required argument\n\n[Definition in comments.tex, line 2](file:///recovery/comments.tex#L2)\n\nSource comments:\n\n    Documentation \ud83d\ude00\n\nDefinition:\n\n    % Documentation \ud83d\ude00\n    \\newcommand{\\custom}[1]{#1}"
+        },
+        "range": {
+          "start": {
+            "line": 2,
+            "character": 0
+          },
+          "end": {
+            "line": 2,
+            "character": 7
+          }
+        }
+      }
+    }
+  ]
+}

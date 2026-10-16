@@ -40,19 +40,7 @@ fn replacement_group_after(command: &SyntaxNode, after: TextSize) -> Option<Synt
 
 fn literal_group(group: &SyntaxNode) -> Option<(SmolStr, TextRange)> {
     let (range, text) = Group::cast(group.clone())?.inner()?;
-    let name = text.trim();
-    if name.is_empty()
-        || name
-            .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '\\' | '#' | '{' | '}' | '%'))
-    {
-        return None;
-    }
-    let start = range.start() + TextSize::new((text.len() - text.trim_start().len()) as u32);
-    Some((
-        name.into(),
-        TextRange::at(start, TextSize::new(name.len() as u32)),
-    ))
+    literal_name_text(&text, range)
 }
 
 fn literal_tex_group(group: &SyntaxNode) -> Option<(SmolStr, TextRange)> {

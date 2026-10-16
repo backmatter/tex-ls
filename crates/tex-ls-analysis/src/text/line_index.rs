@@ -3,8 +3,7 @@
 //! Kept free of any LSP type dependency: it exposes a 1-indexed **code-point**
 //! [`LineCol`] for CLI diagnostics and a 0-indexed `(line, character)` pair for
 //! LSP positions, counted in the [`PositionEncoding`] the index was built with
-//! (the encoding negotiated at `initialize`). (Marked an extraction candidate
-//! in `AGENTS.md`.)
+//! (the encoding negotiated at `initialize`).
 //!
 //! The tables and the queries are *separate types*, because the language server
 //! maintains its tables across an edit rather than rescanning:

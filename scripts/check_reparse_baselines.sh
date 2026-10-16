@@ -45,10 +45,11 @@ trap 'rm -rf "${tmp}"' EXIT
 # The sweep exits non-zero when a splice floor trips. That is a real failure, but it
 # still printed every row before asserting (deliberately), so the diff below is worth
 # showing first — it is what says whether a guard narrowed or a workload moved.
+# Terse harness output keeps the first sweep row free of the test-name prefix.
 sweep_status=0
 TEX_LS_REPARSE_SWEEP_CORPORA="${CORPORA[*]}" \
   cargo test --release -p tex-ls-parser --test reparse_corpus_sweep \
-  -- --ignored --nocapture >"${tmp}/raw" 2>&1 || sweep_status=$?
+  -- --ignored --nocapture --format terse >"${tmp}/raw" 2>&1 || sweep_status=$?
 
 # Distill the run into baseline lines: every `sweep<TAB>…` line with the marker
 # dropped, so a line is `corpus<TAB>row<TAB>fields…`.

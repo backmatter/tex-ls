@@ -10,34 +10,6 @@ use super::{AstNode, AstToken, child, child_token, children};
 use crate::ast::tokens::ControlWord;
 use crate::syntax::{SyntaxKind, SyntaxNode};
 
-/// Declares a newtype wrapper over a `SyntaxNode` of exactly one `SyntaxKind`,
-/// implementing [`AstNode`]. Only the *identity* (`can_cast`/`cast`/`syntax`) is
-/// generated; every accessor is hand-written in a separate `impl` block. This is
-/// ordinary in-tree Rust, not codegen — no build step, no generated artifacts.
-macro_rules! ast_node {
-    ($(#[$meta:meta])* $name:ident, $kind:ident) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name {
-            syntax: SyntaxNode,
-        }
-
-        impl AstNode for $name {
-            fn can_cast(kind: SyntaxKind) -> bool {
-                kind == SyntaxKind::$kind
-            }
-
-            fn cast(syntax: SyntaxNode) -> Option<Self> {
-                Self::can_cast(syntax.kind()).then_some(Self { syntax })
-            }
-
-            fn syntax(&self) -> &SyntaxNode {
-                &self.syntax
-            }
-        }
-    };
-}
-
 ast_node!(
     /// A control sequence with its greedily-attached argument groups.
     Command, COMMAND
@@ -135,7 +107,7 @@ impl Command {
     /// its *first* `{…}` group — e.g. `\label{key}` up to the closing brace of
     /// `{key}`. Deliberately not [`SyntaxNode::text_range`], which the greedy parser
     /// may stretch over a *second* group it attached without knowing arity
-    /// (`\label{a}\n{…}`; decision #8). Falls back to the full command range when the
+    /// (`\label{a}\n{…}`). Falls back to the full command range when the
     /// first group is absent.
     pub fn first_group_range(&self) -> TextRange {
         match self.nth_group(0) {
@@ -298,8 +270,8 @@ impl Begin {
     ///
     /// A `BEGIN` opened by an *environment alias* (`\bea`, issue #109) carries no
     /// `NAME_GROUP` at all — the whole node is the bare control word — so the name
-    /// falls back to that word with its `\` stripped. Positional and syntax-only,
-    /// per decision #10: it reads the name from wherever the tree puts it and looks
+    /// falls back to that word with its `\` stripped. This positional accessor
+    /// reads the name from wherever the tree puts it and looks
     /// nothing up. `Signatures::environment` is what maps `bea` on to the target's
     /// curated behavior.
     ///
@@ -376,7 +348,7 @@ impl Conditional {
     /// The closing `\fi`, read *positionally* as the last child node rather than
     /// by matching the name: which control word closes a conditional is the
     /// grammar's call, and re-deciding it here would be the same semantics check
-    /// twice (decision #10). `None` only if the gate's guarantee is ever broken,
+    /// twice. `None` only if the gate's guarantee is ever broken,
     /// which callers must tolerate rather than assume away.
     pub fn closer(&self) -> Option<Command> {
         self.syntax.last_child().and_then(Command::cast)

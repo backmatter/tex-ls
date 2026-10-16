@@ -247,7 +247,8 @@ impl Base {
     ///
     /// The corpus sweep needs this: a `.sty` is loaded under an implicit
     /// `\makeatletter` and a `.dtx` under the docstrip mode, and a tier's answer
-    /// differs between the regimes — the leaf tiers refuse `.dtx` outright. Sweeping
+    /// differs between the regimes. Docstrip-sensitive fragment tiers decline
+    /// `.dtx`, while leaf tiers retain their lexical and boundary proofs. Sweeping
     /// package source as if it were a plain document would measure a workload no
     /// caller ever asks for.
     pub fn with_config(text: impl Into<String>, config: LexConfig) -> Self {
@@ -344,7 +345,13 @@ pub fn assert_result_matches(
     label: &str,
     edit: &Edit,
 ) {
-    let full = parse_with_declarations_resolved(new_text, config, declared).0;
+    let (full, full_ctx) = parse_with_declarations_resolved(new_text, config, declared);
+    if let Some(updated) = result.ctx.as_ref() {
+        assert_eq!(
+            updated, &full_ctx,
+            "updated context diverged: {label}, seed {seed}, edit {edit:?}"
+        );
+    }
     let spliced = SyntaxNode::new_root(result.green.clone());
 
     assert_eq!(

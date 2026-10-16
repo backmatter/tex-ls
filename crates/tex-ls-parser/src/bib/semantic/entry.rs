@@ -10,8 +10,8 @@ use smol_str::SmolStr;
 /// A regular bibliographic entry (`@article{key, …}`). Entry type and key are
 /// lowercased and as-authored respectively — `entry_type` is normalized (BibTeX is
 /// case-insensitive), `key` keeps its source casing (cite keys are case-sensitive in
-/// practice, though BibTeX folds them; we preserve and compare case-insensitively in
-/// the resolver).
+/// Biber. Project resolution chooses case-sensitive Biber or ASCII-folded classic
+/// BibTeX identity without changing this source model).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
     /// The entry type, lowercased (`"article"`, `"inproceedings"`).
@@ -28,9 +28,18 @@ pub struct Entry {
     pub key_range: TextRange,
     /// The byte range of the whole entry.
     pub range: TextRange,
-    /// `true` when an earlier entry already defined this key (case-insensitive); set
+    /// Standalone classic BibTeX fallback duplicate flag, ASCII case-insensitive; set
     /// by the resolve pass. The *first* occurrence stays `false`.
     pub duplicate: bool,
+    /// Literal entry-key dependencies. String expressions remain unresolved.
+    pub dependencies: Vec<EntryDependency>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryDependency {
+    pub field: SmolStr,
+    pub key: Option<SmolStr>,
+    pub range: TextRange,
 }
 
 /// An `@string{ name = value }` macro definition.

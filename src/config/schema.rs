@@ -110,8 +110,7 @@ impl Config {
 /// The `[build]` section: where the TeX compiler leaves its artifacts, and which
 /// file it was run on. Read by the language server only (label-number hover and
 /// document symbols pull resolved numbers from the `.aux`; forward search locates
-/// the compiled PDF); never by the formatter or linter, which stay hermetic (see
-/// `AGENTS.md`).
+/// the compiled PDF); never by the formatter or linter, which stay hermetic.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default, schemars::JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct BuildConfig {

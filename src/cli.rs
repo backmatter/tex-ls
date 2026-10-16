@@ -1,7 +1,8 @@
 //! The `tex-ls` command-line surface.
 //!
 //! Clap definitions for the executable and its help output.
-//! Conversions to language-library types live in `main.rs`.
+//! Conversions to language-library types live in `commands/config.rs` and
+//! `commands/lint.rs`.
 
 use std::path::PathBuf;
 

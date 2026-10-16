@@ -98,9 +98,10 @@ sentence spacing.
 ## Machine-readable output
 
 `tex-ls lint --output json` writes a JSON array to stdout. The `pretty` and
-`concise` modes write to stderr. A clean run
-emits `[]`, so consumers always receive valid JSON; the exit code still signals
-whether findings exist.
+`concise` modes write to stderr. A clean run emits `[]`; findings use exit code 1.
+JSON path fields require UTF-8. If a report contains an unrepresentable path,
+the CLI reports a serialization error on stderr, writes no JSON and exits with
+code 2.
 
 ```json
 [

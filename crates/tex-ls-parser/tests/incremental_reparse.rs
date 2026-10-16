@@ -35,6 +35,1519 @@ use reparse_harness::{
     Base, Lcg, Tally, assert_result_matches, assert_splice_floor, config, random_edit,
 };
 
+#[test]
+fn reader_offsets_follow_proven_leaf_edits_and_retained_context_chains() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig, reparse_edits};
+
+    for flavor in [LatexFlavor::Document, LatexFlavor::Package] {
+        for dtx in [false, true] {
+            for newline in ["\n", "\r\n"] {
+                for (body, tier) in [
+                    ("alphabet gamma", ReparseTier::Token),
+                    ("$alphabet gamma$", ReparseTier::Token),
+                    ("\\textbf{$alphabet gamma$}", ReparseTier::Token),
+                    ("\\verb|alphabet|", ReparseTier::Verbatim),
+                ] {
+                    let source = format!(
+                        "\\lstset{{}}{newline}{body}{newline}\\renewcommand{{\\meaning}}[1]{{#1}}{newline}Afterword gamma{newline}"
+                    );
+                    let config = LexConfig { flavor, dtx };
+                    let declared = ResolvedDeclarations::default();
+                    let (original, original_ctx) =
+                        parse_with_declarations_resolved(&source, config, &declared);
+                    assert!(original.errors.is_empty());
+                    assert_eq!(original.syntax().text().to_string(), source);
+                    assert!(
+                        format!("{original_ctx:?}").contains("reader_overrides: {\"meaning\":")
+                    );
+                    let mut text = source.clone();
+                    let mut green = original.green.clone();
+                    let mut errors = original.errors.clone();
+                    let mut ctx = original_ctx.clone();
+                    let mut edits = Vec::new();
+                    let word_start = source.find("alphabet").unwrap();
+                    for (remove, insert) in [(0, "XY"), (1, ""), (1, "Q")] {
+                        let at = word_start + 3;
+                        let edit = Edit {
+                            range: at..at + remove,
+                            insert: insert.into(),
+                        };
+                        let changed = edit.apply(&text);
+                        let (full, full_ctx) =
+                            parse_with_declarations_resolved(&changed, config, &declared);
+                        assert!(full.errors.is_empty());
+                        assert_eq!(full.syntax().text().to_string(), changed);
+                        let base = ReparseBase::from_parts(
+                            &text, &green, &errors, &ctx, config, &declared,
+                        );
+                        let result = reparse(&base, &edit, &changed)
+                            .expect("proved leaf edit must return coherent rebased reader offsets");
+                        assert_eq!(result.tier, tier);
+                        assert_eq!(result.green, full.green);
+                        assert_eq!(result.errors, full.errors);
+                        assert_eq!(result.context(&ctx), &full_ctx);
+                        ctx = result.context(&ctx).clone();
+                        green = result.green;
+                        errors = result.errors;
+                        text = changed;
+                        edits.push(edit);
+                    }
+                    // A distant final edit prevents coalescing the whole batch,
+                    // so the chain path must actually use intermediate contexts.
+                    let at = text.find("Afterword").unwrap() + 3;
+                    let syntax = tex_ls_parser::syntax::SyntaxNode::new_root(green.clone());
+                    let leaf = syntax
+                        .token_at_offset(at.try_into().unwrap())
+                        .right_biased()
+                        .unwrap();
+                    assert_eq!(leaf.kind(), tex_ls_parser::syntax::SyntaxKind::WORD);
+                    assert!(leaf.text().bytes().all(|byte| byte.is_ascii_alphabetic()));
+                    let edit = Edit {
+                        range: at..at,
+                        insert: "ZZ".into(),
+                    };
+                    let changed = edit.apply(&text);
+                    let (full, full_ctx) =
+                        parse_with_declarations_resolved(&changed, config, &declared);
+                    let base =
+                        ReparseBase::from_parts(&text, &green, &errors, &ctx, config, &declared);
+                    let result = reparse(&base, &edit, &changed).expect("ordinary later leaf");
+                    assert_eq!(result.green, full.green);
+                    assert_eq!(result.errors, full.errors);
+                    assert_eq!(result.context(&ctx), &full_ctx);
+                    ctx = result.context(&ctx).clone();
+                    green = result.green;
+                    errors = result.errors;
+                    text = changed;
+                    edits.push(edit);
+                    let original_base = ReparseBase::from_parts(
+                        &source,
+                        &original.green,
+                        &original.errors,
+                        &original_ctx,
+                        config,
+                        &declared,
+                    );
+                    let combined = reparse_edits(&original_base, &edits, &text)
+                        .expect("edit chain must carry each intermediate reader context");
+                    assert_eq!(combined.green, green);
+                    assert_eq!(combined.errors, errors);
+                    assert_eq!(combined.context(&original_ctx), &ctx);
+                    let (_, retained_full_ctx) =
+                        parse_with_declarations_resolved(&source, config, &declared);
+                    assert_eq!(original_ctx, retained_full_ctx);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn edits_after_qualified_reader_profiles_keep_positions_and_proven_splices() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    for (setup, profile) in [
+        (
+            include_str!("source_readers/comment_setup.tex"),
+            "verbatim_comment_start",
+        ),
+        (
+            include_str!("source_readers/release_setup.sty"),
+            "release_header_start",
+        ),
+    ] {
+        for newline in ["\n", "\r\n"] {
+            for body in ["alphabet gamma", "$alphabet gamma$", "\\verb|alphabet|"] {
+                let source = format!("{setup}\n{body}\n\\renewcommand{{\\meaning}}[1]{{#1}}\n")
+                    .replace('\n', newline);
+                let config = LexConfig {
+                    flavor: LatexFlavor::Package,
+                    dtx: false,
+                };
+                let declared = ResolvedDeclarations::default();
+                let (parsed, ctx) = parse_with_declarations_resolved(&source, config, &declared);
+                assert!(parsed.errors.is_empty(), "{profile}: {:?}", parsed.errors);
+                assert_eq!(parsed.syntax().to_string(), source);
+                assert!(format!("{ctx:?}").contains(&format!("{profile}: Some(")));
+                let at = source.rfind("alphabet").unwrap() + 2;
+                assert!(at > setup.len());
+                for (remove, insert) in [(0, "XY"), (2, "QR")] {
+                    let edit = Edit {
+                        range: at..at + remove,
+                        insert: insert.into(),
+                    };
+                    let changed = edit.apply(&source);
+                    let (full, full_ctx) =
+                        parse_with_declarations_resolved(&changed, config, &declared);
+                    assert!(full.errors.is_empty());
+                    assert_eq!(full.syntax().to_string(), changed);
+                    let base = ReparseBase::from_parts(
+                        &source,
+                        &parsed.green,
+                        &parsed.errors,
+                        &ctx,
+                        config,
+                        &declared,
+                    );
+                    let result = reparse(&base, &edit, &changed)
+                        .expect("a proved suffix leaf cannot shift an earlier qualified profile");
+                    assert_eq!(result.green, full.green);
+                    assert_eq!(result.errors, full.errors);
+                    assert_eq!(result.context(&ctx), &full_ctx);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn edits_between_reader_bindings_preserve_both_source_sides() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    for newline in ["\n", "\r\n"] {
+        for dtx in [false, true] {
+            let source = "\\lstset{}\nEarlyword gamma\n\\renewcommand{\\meaning}[1]{#1}\nMiddleword gamma\n\\renewcommand{\\ifx}[1]{#1}\nAfterword gamma\n"
+                .replace('\n', newline);
+            let config = LexConfig {
+                flavor: LatexFlavor::Package,
+                dtx,
+            };
+            let declared = ResolvedDeclarations::default();
+            let (parsed, ctx) = parse_with_declarations_resolved(&source, config, &declared);
+            assert!(parsed.errors.is_empty());
+            assert_eq!(parsed.syntax().to_string(), source);
+            let at = source.find("Middleword").unwrap() + 3;
+            for (remove, insert) in [(0, "XY"), (2, "")] {
+                let edit = Edit {
+                    range: at..at + remove,
+                    insert: insert.into(),
+                };
+                let changed = edit.apply(&source);
+                let (full, full_ctx) =
+                    parse_with_declarations_resolved(&changed, config, &declared);
+                assert!(full.errors.is_empty());
+                assert_eq!(full.syntax().to_string(), changed);
+                let base = ReparseBase::from_parts(
+                    &source,
+                    &parsed.green,
+                    &parsed.errors,
+                    &ctx,
+                    config,
+                    &declared,
+                );
+                let result = reparse(&base, &edit, &changed)
+                    .expect("mixed offset map must preserve the earlier binding and shift the later binding");
+                assert_eq!(result.tier, ReparseTier::Token);
+                assert_eq!(result.green, full.green);
+                assert_eq!(result.errors, full.errors);
+                assert_eq!(result.context(&ctx), &full_ctx);
+                let (_, retained_ctx) =
+                    parse_with_declarations_resolved(&source, config, &declared);
+                assert_eq!(ctx, retained_ctx);
+            }
+        }
+    }
+}
+
+#[test]
+fn equal_width_edits_before_reader_retirement_keep_proven_splices() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for flavor in [LatexFlavor::Document, LatexFlavor::Package] {
+        for dtx in [false, true] {
+            for newline in ["\n", "\r\n"] {
+                for (body, tier) in [
+                    ("alphabet gamma", ReparseTier::Token),
+                    ("$alphabet gamma$", ReparseTier::Token),
+                    ("\\verb|alphabet|", ReparseTier::Verbatim),
+                ] {
+                    let source = format!(
+                        "\\lstset{{}}{newline}{body}{newline}\\renewcommand{{\\meaning}}[1]{{#1}}{newline}After.{newline}"
+                    );
+                    let config = LexConfig { flavor, dtx };
+                    let declared = ResolvedDeclarations::default();
+                    let (parsed, ctx) =
+                        parse_with_declarations_resolved(&source, config, &declared);
+                    assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
+                    assert_eq!(parsed.syntax().text().to_string(), source);
+                    let debug = format!("{ctx:?}");
+                    assert!(
+                        debug.contains("reader_overrides: {\"meaning\":"),
+                        "fixture must contain an ordered future retirement: {debug}"
+                    );
+                    if tier == ReparseTier::Verbatim {
+                        assert!(parsed.syntax().descendants_with_tokens().any(|element| {
+                            element.into_token().is_some_and(|token| {
+                                token.kind() == SyntaxKind::VERB
+                                    && token.text() == "\\verb|alphabet|"
+                            })
+                        }));
+                    }
+                    let base = ReparseBase::from_parts(
+                        &source,
+                        &parsed.green,
+                        &parsed.errors,
+                        &ctx,
+                        config,
+                        &declared,
+                    );
+                    let at = source.find("alphabet").unwrap() + 2;
+                    let edit = Edit {
+                        range: at..at + 2,
+                        insert: "XY".into(),
+                    };
+                    let changed = edit.apply(&source);
+                    assert_eq!(changed.len(), source.len());
+                    let (full, full_ctx) =
+                        parse_with_declarations_resolved(&changed, config, &declared);
+                    assert!(full.errors.is_empty());
+                    assert_eq!(full.syntax().text().to_string(), changed);
+                    assert_eq!(ctx, full_ctx, "same-width edit must retain exact context");
+                    let result = reparse(&base, &edit, &changed)
+                        .expect("same-width edit leaves every future reader offset unchanged");
+                    assert_eq!(result.tier, tier);
+                    assert_eq!(result.green, full.green);
+                    assert_eq!(result.errors, full.errors);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn equal_width_reader_recovery_declines_changed_source_guard_signals() {
+    for (body, needle, insert) in [
+        ("alphabetword", "alphabetword", "escapeinside"),
+        ("\\verb!\\MakeShortVerb{\\|}!", "|", "x"),
+    ] {
+        let source = format!("{body}\n\\renewcommand{{\\meaning}}[1]{{#1}}\n");
+        let declared = ResolvedDeclarations::default();
+        let (parsed, ctx) = parse_with_declarations_resolved(&source, config(), &declared);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        let at = source.find(needle).unwrap();
+        let edit = Edit {
+            range: at..at + needle.len(),
+            insert: insert.into(),
+        };
+        let changed = edit.apply(&source);
+        assert_eq!(changed.len(), source.len());
+        let (full, full_ctx) = parse_with_declarations_resolved(&changed, config(), &declared);
+        assert!(full.errors.is_empty());
+        assert_eq!(full.syntax().text().to_string(), changed);
+        assert_ne!(
+            ctx, full_ctx,
+            "fixture must alter the conservative source cache"
+        );
+        let base = ReparseBase::from_parts(
+            &source,
+            &parsed.green,
+            &parsed.errors,
+            &ctx,
+            config(),
+            &declared,
+        );
+        assert!(reparse(&base, &edit, &changed).is_none());
+    }
+}
+
+#[test]
+fn unrelated_settings_keep_pure_builtin_raw_body_splices() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+    for flavor in [LatexFlavor::Document, LatexFlavor::Package] {
+        for dtx in [false, true] {
+            for newline in ["\n", "\r\n"] {
+                for capture in [
+                    "\\url{alphabet}",
+                    "\\url|alphabet|",
+                    "\\path{alphabet}",
+                    "\\begin{verbatim}\nalphabet\n\\end{verbatim}",
+                    "\\begin{verbatim*}\nalphabet\n\\end{verbatim*}",
+                ] {
+                    let source = format!(
+                        "\\lstset{{escapeinside={{A}}{{B}}}}\n{capture}\n\\renewcommand{{\\meaning}}[1]{{#1}}\nAfterword gamma\n"
+                    ).replace('\n', newline);
+                    let cfg = LexConfig { flavor, dtx };
+                    let declared = ResolvedDeclarations::default();
+                    let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+                    assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
+                    assert_eq!(parsed.syntax().to_string(), source);
+                    assert!(format!("{ctx:?}").contains("full: true"));
+                    let at = source.find("alphabet").unwrap() + 3;
+                    let syntax = parsed.syntax();
+                    let leaf = syntax
+                        .token_at_offset(at.try_into().unwrap())
+                        .right_biased()
+                        .unwrap();
+                    assert!(matches!(
+                        leaf.kind(),
+                        SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY
+                    ));
+                    let owner = leaf.parent().unwrap();
+                    assert!(matches!(
+                        owner.kind(),
+                        SyntaxKind::COMMAND | SyntaxKind::ENVIRONMENT
+                    ));
+                    for (remove, insert) in [(0, "XY"), (1, ""), (1, "Ω")] {
+                        let edit = Edit {
+                            range: at..at + remove,
+                            insert: insert.into(),
+                        };
+                        let changed = edit.apply(&source);
+                        let (full, full_ctx) =
+                            parse_with_declarations_resolved(&changed, cfg, &declared);
+                        assert!(full.errors.is_empty());
+                        assert_eq!(full.syntax().to_string(), changed);
+                        let base = ReparseBase::from_parts(
+                            &source,
+                            &parsed.green,
+                            &parsed.errors,
+                            &ctx,
+                            cfg,
+                            &declared,
+                        );
+                        let result = reparse(&base, &edit, &changed).expect(
+                            "unrelated settings cannot affect a qualified pure builtin capture",
+                        );
+                        assert_eq!(result.tier, ReparseTier::Verbatim);
+                        assert_eq!(result.green, full.green);
+                        assert_eq!(result.errors, full.errors);
+                        assert_eq!(result.context(&ctx), &full_ctx);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn pure_builtin_raw_recovery_keeps_delimiters_and_retired_profiles_conservative() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for capture in ["\\url{alphabet}", "\\url|alphabet|", "\\path{alphabet}"] {
+        let source = format!("\\lstset{{}}\n{capture}\nAfterword gamma\n");
+        let cfg = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: false,
+        };
+        let declared = ResolvedDeclarations::default();
+        let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+        assert!(parsed.errors.is_empty());
+        let syntax = parsed.syntax();
+        let body = source.find("alphabet").unwrap();
+        let token = syntax
+            .token_at_offset(body.try_into().unwrap())
+            .right_biased()
+            .unwrap();
+        assert_eq!(token.kind(), SyntaxKind::VERB);
+        for at in [body - 1, body + "alphabet".len()] {
+            let edit = Edit {
+                range: at..at + 1,
+                insert: "!".into(),
+            };
+            let changed = edit.apply(&source);
+            let base = ReparseBase::from_parts(
+                &source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            assert!(
+                reparse(&base, &edit, &changed).is_none(),
+                "delimiter mutation: {source}"
+            );
+        }
+    }
+
+    for source in [
+        "\\lstset{}\n\\let\\url\\relax\n\\url{alphabet}\n",
+        "\\lstset{}\n\\newenvironment{verbatim}{}{}\n\\begin{verbatim}\nalphabet\n\\end{verbatim}\n",
+    ] {
+        let cfg = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: false,
+        };
+        let declared = ResolvedDeclarations::default();
+        let (parsed, ctx) = parse_with_declarations_resolved(source, cfg, &declared);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.syntax().to_string(), source);
+        let at = source.find("alphabet").unwrap() + 3;
+        let syntax = parsed.syntax();
+        let leaf = syntax
+            .token_at_offset(at.try_into().unwrap())
+            .right_biased()
+            .unwrap();
+        assert!(
+            !matches!(leaf.kind(), SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY),
+            "replacement must be ordinary"
+        );
+        let edit = Edit {
+            range: at..at,
+            insert: "X".into(),
+        };
+        let changed = edit.apply(source);
+        let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+        assert!(full.errors.is_empty());
+        let base =
+            ReparseBase::from_parts(source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+        if let Some(result) = reparse(&base, &edit, &changed) {
+            assert_ne!(result.tier, ReparseTier::Verbatim);
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+            assert_eq!(result.context(&ctx), &full_ctx);
+        }
+    }
+}
+
+#[test]
+fn pure_builtin_raw_recovery_excludes_generated_and_project_profiles() {
+    use tex_ls_parser::declarations::Declarations;
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    let replaced: Declarations = serde_json::from_value(serde_json::json!({
+        "environments": {"verbatim": {"like": "quote"}}
+    }))
+    .unwrap();
+    for (source, declared, generated) in [
+        (
+            "\\lstset{}\n\\newmintinline[url]{python}{mathescape=true}\n\\url{alphabet}\n",
+            ResolvedDeclarations::default(),
+            true,
+        ),
+        (
+            "\\lstset{}\n\\begin{verbatim}\nalphabet\n\\end{verbatim}\n",
+            replaced.resolve().unwrap(),
+            false,
+        ),
+    ] {
+        let cfg = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: false,
+        };
+        let (parsed, ctx) = parse_with_declarations_resolved(source, cfg, &declared);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().to_string(), source);
+        let at = source.find("alphabet").unwrap() + 3;
+        let syntax = parsed.syntax();
+        let leaf = syntax
+            .token_at_offset(at.try_into().unwrap())
+            .right_biased()
+            .unwrap();
+        if generated {
+            assert!(
+                syntax
+                    .descendants_with_tokens()
+                    .any(|element| element.kind() == SyntaxKind::CODE_OPEN),
+                "generated embedded profile must be active"
+            );
+        } else {
+            assert!(
+                !matches!(leaf.kind(), SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY),
+                "explicit normal project profile must be active"
+            );
+        }
+        let edit = Edit {
+            range: at..at,
+            insert: "X".into(),
+        };
+        let changed = edit.apply(source);
+        let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+        assert!(full.errors.is_empty());
+        let base =
+            ReparseBase::from_parts(source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+        if let Some(result) = reparse(&base, &edit, &changed) {
+            assert_ne!(result.tier, ReparseTier::Verbatim);
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+            assert_eq!(result.context(&ctx), &full_ctx);
+        }
+    }
+}
+
+#[test]
+fn narrow_raw_recovery_declines_changed_dtx_implicit_expl_signal() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for newline in ["\n", "\r\n"] {
+        for capture in [
+            "\\verb|alphabet|",
+            "\\url{alphabet}",
+            "\\begin{verbatim}\nalphabet\n\\end{verbatim}",
+        ] {
+            let source =
+                format!("%    \\begin{{macrocode}}\n\\lstset{{}}\n{capture}\n\\foo_bar:n{{later}}\n%    \\end{{macrocode}}\n").replace('\n', newline);
+            let cfg = LexConfig {
+                flavor: LatexFlavor::Package,
+                dtx: true,
+            };
+            let declared = ResolvedDeclarations::default();
+            let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert_eq!(parsed.syntax().to_string(), source);
+            let at = source.find("alphabet").unwrap() + 3;
+            let syntax = parsed.syntax();
+            let leaf = syntax
+                .token_at_offset(at.try_into().unwrap())
+                .right_biased()
+                .unwrap();
+            assert!(matches!(
+                leaf.kind(),
+                SyntaxKind::VERB | SyntaxKind::VERBATIM_BODY
+            ));
+            assert!(!syntax.descendants_with_tokens().any(|element| {
+                element.as_token().is_some_and(|token| {
+                    token.kind() == SyntaxKind::CONTROL_WORD && token.text() == "\\foo_bar:n"
+                })
+            }));
+            let edit = Edit {
+                range: at..at,
+                insert: "\\ProvidesExplPackage".into(),
+            };
+            let changed = edit.apply(&source);
+            let (full, _) = parse_with_declarations_resolved(&changed, cfg, &declared);
+            assert!(full.errors.is_empty(), "{:?}", full.errors);
+            assert_eq!(full.syntax().to_string(), changed);
+            assert!(
+                full.syntax()
+                    .descendants_with_tokens()
+                    .any(|element| element
+                        .as_token()
+                        .is_some_and(|token| token.kind() == SyntaxKind::CONTROL_WORD
+                            && token.text() == "\\foo_bar:n")),
+                "inactive raw text changes the cached whole-file DTX regime"
+            );
+            let base = ReparseBase::from_parts(
+                &source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            assert!(
+                reparse(&base, &edit, &changed).is_none(),
+                "raw leaf isolation cannot prove later DTX tokenization"
+            );
+        }
+    }
+}
+
+#[test]
+fn full_mode_builtin_verb_body_edits_keep_protected_splice() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for flavor in [LatexFlavor::Document, LatexFlavor::Package] {
+        for dtx in [false, true] {
+            for newline in ["\n", "\r\n"] {
+                for star in ["", "*"] {
+                    for delimiter in ['|', '!', '§'] {
+                        let source = format!(
+                            "\\lstset{{escapeinside={{A}}{{B}}}}{newline}\\verb{star}{delimiter}alphabet{delimiter}{newline}After.{newline}"
+                        );
+                        let config = LexConfig { flavor, dtx };
+                        let declared = ResolvedDeclarations::default();
+                        let (parsed, ctx) =
+                            parse_with_declarations_resolved(&source, config, &declared);
+                        assert!(parsed.errors.is_empty(), "{source:?}");
+                        assert_eq!(parsed.syntax().text().to_string(), source);
+                        assert!(
+                            parsed.syntax().descendants_with_tokens().any(|element| {
+                                element.into_token().is_some_and(|token| {
+                                    token.kind() == SyntaxKind::VERB
+                                        && token.text().starts_with("\\verb")
+                                        && token.text().contains("alphabet")
+                                })
+                            }),
+                            "fixture must contain an active builtin verb capture: {source:?}"
+                        );
+                        let base = ReparseBase::from_parts(
+                            &source,
+                            &parsed.green,
+                            &parsed.errors,
+                            &ctx,
+                            config,
+                            &declared,
+                        );
+                        let at = source.find("alphabet").unwrap() + 2;
+                        for edit in [
+                            Edit {
+                                range: at..at,
+                                insert: "X".into(),
+                            },
+                            Edit {
+                                range: at..at + 1,
+                                insert: String::new(),
+                            },
+                            Edit {
+                                range: at..at + 1,
+                                insert: "Ω".into(),
+                            },
+                        ] {
+                            let changed = edit.apply(&source);
+                            let (full, full_ctx) =
+                                parse_with_declarations_resolved(&changed, config, &declared);
+                            assert!(full.errors.is_empty(), "{changed:?}");
+                            assert_eq!(full.syntax().text().to_string(), changed);
+                            assert_eq!(ctx, full_ctx, "raw body cannot alter context");
+                            let incremental = reparse(&base, &edit, &changed).expect(
+                                "unrelated listing settings cannot disable builtin verb proof",
+                            );
+                            assert_eq!(incremental.tier, ReparseTier::Verbatim);
+                            assert_eq!(incremental.green, full.green, "{changed:?}");
+                            assert_eq!(incremental.errors, full.errors, "{changed:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn full_mode_builtin_verb_proof_keeps_delimiter_and_inert_controls() {
+    let source = "\\lstset{}\n\\verb|alphabet|\nAfter.\n";
+    let opener = source.find("|alphabet").unwrap();
+    let closer = opener + "|alphabet".len();
+    for edit in [
+        Edit {
+            range: opener..opener + 1,
+            insert: "!".into(),
+        },
+        Edit {
+            range: closer..closer + 1,
+            insert: String::new(),
+        },
+        Edit {
+            range: opener + 3..opener + 3,
+            insert: "\n".into(),
+        },
+    ] {
+        assert!(reparse_once(source, &edit).is_none());
+        let changed = edit.apply(source);
+        assert_eq!(
+            tex_ls_parser::parser::parse(&changed)
+                .syntax()
+                .text()
+                .to_string(),
+            changed
+        );
+    }
+    for source in [
+        "\\lstset{}\n\\detokenize{\\verb|alphabet|}\nAfter.\n",
+        "\\lstset{}\n\\let\\verb\\relax\n\\verb|alphabet|\nAfter.\n",
+    ] {
+        let parsed = tex_ls_parser::parser::parse(source);
+        assert_eq!(parsed.syntax().text().to_string(), source);
+        assert!(
+            !parsed.syntax().descendants_with_tokens().any(|element| {
+                element.into_token().is_some_and(|token| {
+                    token.kind() == tex_ls_parser::syntax::SyntaxKind::VERB
+                        && token.text().starts_with("\\verb")
+                })
+            }),
+            "fixture must not contain an active builtin verb: {source:?}"
+        );
+        let at = source.find("alphabet").unwrap() + 2;
+        let edit = Edit {
+            range: at..at,
+            insert: "X".into(),
+        };
+        assert!(reparse_once(source, &edit).is_none(), "{source:?}");
+        let changed = edit.apply(source);
+        assert_eq!(
+            tex_ls_parser::parser::parse(&changed)
+                .syntax()
+                .text()
+                .to_string(),
+            changed
+        );
+    }
+}
+
+#[test]
+fn literal_verb_and_multiline_name_edits_match_full_parse() {
+    for (source, dtx) in [
+        ("\\def\\verb{%\n body\n}\n", false),
+        ("\\let\\other\\verb{body}\n", false),
+        ("\\detokenize{\\verb{body}}\n\\ref{real}\n", false),
+        ("\\def\\foo#1{\\string{#1}\\string}\n\\ref{real}\n", false),
+        ("\\def\\foo\\string{X}\\ref{real}\n", false),
+        ("\\def\\foo{\\verb*}\\ref{real}\n", false),
+        ("\\DeclareMathOperator*{\\verb}{name}\\ref{real}\n", false),
+        ("\\newlength{\\verb}\\ref{real}\n", false),
+        ("\\code{literal}\\let\\code\\relax\\code{a_b}\n", false),
+        (
+            "\\newmintinline[py]{python}{}\\py{\\ref{fake}}\\let\\py\\relax\\py{\\ref{live}}\n",
+            false,
+        ),
+        (
+            "\\ExplSyntaxOn\\cs_new:Npn\\verb#1{#1}\\ExplSyntaxOff\\ref{real}\n",
+            false,
+        ),
+        (
+            "\\ExplSyntaxOn\\cs_new:Npn\\foo{\\string}\\ExplSyntaxOff\\ref{real}\n",
+            false,
+        ),
+        (
+            "\\ExplSyntaxOn\\cs_set_eq:NN\\copy\\verb\\ExplSyntaxOff\\ref{real}\n",
+            false,
+        ),
+        (
+            "\\let\\newlength\\relax\\newlength{\\verb|active|}\n",
+            false,
+        ),
+        (
+            "\\newcommand{\\foo}[1][\\string]{\\string}\n\\ref{real}\n",
+            false,
+        ),
+        (
+            "\\NewDocumentCommand{\\foo}{O{\\string}m}{\\string}\n",
+            false,
+        ),
+        ("\\texttt{\\string}\\ref{real}\n", false),
+        (
+            "\\changes{v1}{2000/01/01}{Added \\cmd\\verb}\\ref{real}\n",
+            false,
+        ),
+        ("\\cmd{\\verb}\\ref{real}\n", false),
+        ("\\cmd\\verb\\let\\cmd\\relax\\cmd\\verb|active|\n", false),
+        ("\\meaning\\cmd\\verb|active|\n", false),
+        (
+            "% \\changes{v1}{2000/01/01}{Added \\cmd\\verb}\n% \\ref{real}\n",
+            true,
+        ),
+        (
+            "\\let\\meaning\\relax\n\\begin{Verbatim}[commandchars=+()]\n+meaning+verb|+ref(fake)|\n\\end{Verbatim}\n",
+            false,
+        ),
+        ("\\DoNotIndex{\\relax,\\string}\n\\ref{real}\n", false),
+        (
+            "% \\DoNotIndex{\\relax,\n% \\string}\n% \\ref{real}\n",
+            true,
+        ),
+        (
+            "\\renewcommand{\\verb}[1]{\\texttt{#1}}\n\\verb{a_b}\n",
+            false,
+        ),
+        (
+            "% \\begin{function}\n% {\\NewDocumentCommand,\n% \\RenewDocumentCommand}\n% Documentation.\n% \\end{function}\n",
+            true,
+        ),
+    ] {
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let base = Base::with_config(
+                source.clone(),
+                tex_ls_parser::parser::LexConfig { dtx, ..config() },
+            );
+            let mut tally = Tally::default();
+            for (at, character) in source.char_indices() {
+                for insert in ["x", "%", "\n", "{", "}"] {
+                    base.check(
+                        &Edit {
+                            range: at..at,
+                            insert: insert.into(),
+                        },
+                        at as u64,
+                        "literal verb and multiline name boundary",
+                        &mut tally,
+                    );
+                }
+                base.check(
+                    &Edit {
+                        range: at..at + character.len_utf8(),
+                        insert: String::new(),
+                    },
+                    at as u64,
+                    "literal verb and multiline name deletion",
+                    &mut tally,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ordinary_math_word_splices_with_unrelated_full_mode_settings() {
+    for (source, dtx) in [
+        (
+            "\\lstset{language=Python,escapeinside={A}{B}}\n$alphabet gamma$\n",
+            false,
+        ),
+        (
+            "\\catcode`\\%=12\n\\input{unused}\n$alphabet gamma$\n",
+            false,
+        ),
+        (
+            "% \\lstset{language=Python,escapeinside={A}{B}}\n% Ordinary $alphabet gamma$.\n",
+            true,
+        ),
+    ] {
+        let declared = ResolvedDeclarations::default();
+        let cfg = tex_ls_parser::parser::LexConfig { dtx, ..config() };
+        let (parsed, ctx) = parse_with_declarations_resolved(source, cfg, &declared);
+        let base =
+            ReparseBase::from_parts(source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        let changed = edit.apply(source);
+        let result = reparse(&base, &edit, &changed)
+            .unwrap_or_else(|| panic!("ordinary math needs its local token proof: {source}"));
+        let full = parse_with_declarations_resolved(&changed, cfg, &declared).0;
+        assert_eq!(result.tier, ReparseTier::Token);
+        assert_eq!(result.green, full.green);
+        assert_eq!(result.errors, full.errors);
+    }
+}
+
+#[test]
+fn ordinary_prose_word_splices_with_unrelated_full_mode_settings() {
+    for source in [
+        "\\lstset{language=Python,escapeinside={A}{B}}\nalphabet gamma\n",
+        "\\catcode`\\%=12\n\\input{unused}\nalphabet gamma\n",
+        "\\MakeShortVerb{\\|}\nalphabet gamma\n",
+        "\\lstset{}\n\\textbf{alphabet gamma}\n",
+    ] {
+        for dtx in [false, true] {
+            let declared = ResolvedDeclarations::default();
+            let cfg = tex_ls_parser::parser::LexConfig { dtx, ..config() };
+            let (parsed, ctx) = parse_with_declarations_resolved(source, cfg, &declared);
+            let base = ReparseBase::from_parts(
+                source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            let start = source.find("alphabet").unwrap() + 1;
+            for edit in [
+                Edit {
+                    range: start..start,
+                    insert: "x".into(),
+                },
+                Edit {
+                    range: start..start + 1,
+                    insert: String::new(),
+                },
+            ] {
+                let changed = edit.apply(source);
+                let result = reparse(&base, &edit, &changed).unwrap_or_else(|| {
+                    panic!("ordinary prose needs its local token proof: {source}")
+                });
+                let full = parse_with_declarations_resolved(&changed, cfg, &declared).0;
+                assert_eq!(result.tier, ReparseTier::Token);
+                assert_eq!(result.green, full.green);
+                assert_eq!(result.errors, full.errors);
+            }
+        }
+    }
+}
+
+#[test]
+fn full_mode_prose_word_proof_rejects_readers_orphans_and_literal_islands() {
+    for source in [
+        "\\lstset\n\n{escapeinside={alphabet gamma}{Y}}\n\\begin{lstlisting}alphabet gammapayloadY\\end{lstlisting}",
+        "\\lstset{}\n\\ifx\\foo alphabet gamma\\fi",
+        "\\lstset{}\n\\let\\foo\n alphabet gamma",
+        "\\lstset{}\n\\string alphabet gamma",
+        "\\lstset{}\n\\renewcommand{\\textbf}[2]{\\@makeother\\$#2}\n\\textbf{alphabet gamma}{body}",
+        "\\MakeShortVerb{\\x}\nalphabet gamma xprotectedx",
+        "\\lstset{}\n{alphabet gamma}",
+        "\\lstset{}\n\\detokenize{alphabet gamma}",
+        "\\begin{alltt}alphabet gamma\\end{alltt}",
+        "\\lstset{escapeinside={A}{B}}\n\\begin{lstlisting}Aalphabet gammaB\\end{lstlisting}",
+    ] {
+        let start = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: start..start,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(source, &edit).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn full_mode_math_word_splices_through_qualified_outer_arguments() {
+    for wrapper in ["textbf", "textit", "emph"] {
+        let source = format!("\\lstset{{}}\n\\{wrapper}{{$alphabet gamma$}}\n");
+        for source in [source.clone(), source.replace('\n', "\r\n")] {
+            for cfg in [
+                config(),
+                tex_ls_parser::parser::LexConfig {
+                    dtx: true,
+                    ..config()
+                },
+            ] {
+                let declared = ResolvedDeclarations::default();
+                let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+                assert!(
+                    parsed.errors.is_empty(),
+                    "fixture must have closed owned math: {source}"
+                );
+                let base = ReparseBase::from_parts(
+                    &source,
+                    &parsed.green,
+                    &parsed.errors,
+                    &ctx,
+                    cfg,
+                    &declared,
+                );
+                let at = source.find("alphabet").unwrap() + 1;
+                let syntax = tex_ls_parser::syntax::SyntaxNode::new_root(parsed.green.clone());
+                let leaf = syntax
+                    .token_at_offset(at.try_into().unwrap())
+                    .right_biased()
+                    .unwrap();
+                assert_eq!(leaf.text(), "alphabet");
+                let ancestors: Vec<_> = leaf.parent_ancestors().map(|node| node.kind()).collect();
+                let math = ancestors
+                    .iter()
+                    .position(|kind| *kind == tex_ls_parser::syntax::SyntaxKind::MATH)
+                    .expect("the edit must be in explicit math");
+                assert!(ancestors[math + 1..].contains(&tex_ls_parser::syntax::SyntaxKind::GROUP));
+                assert!(
+                    ancestors[math + 1..].contains(&tex_ls_parser::syntax::SyntaxKind::COMMAND)
+                );
+                for edit in [
+                    Edit {
+                        range: at..at,
+                        insert: "xy".into(),
+                    },
+                    Edit {
+                        range: at..at + 1,
+                        insert: String::new(),
+                    },
+                    Edit {
+                        range: at..at + 1,
+                        insert: "pq".into(),
+                    },
+                ] {
+                    let changed = edit.apply(&source);
+                    let result = reparse(&base, &edit, &changed).unwrap_or_else(|| {
+                        panic!("owned outer argument must retain local math proof: {source}")
+                    });
+                    let (full, full_ctx) =
+                        parse_with_declarations_resolved(&changed, cfg, &declared);
+                    assert_eq!(result.tier, ReparseTier::Token);
+                    assert_eq!(result.green, full.green);
+                    assert_eq!(result.errors, full.errors);
+                    assert_eq!(ctx, full_ctx, "the shared context must remain exact");
+                }
+                let other = source.find("gamma").unwrap() + 3;
+                let chain = [
+                    Edit {
+                        range: at..at,
+                        insert: "xy".into(),
+                    },
+                    Edit {
+                        range: other..other + 1,
+                        insert: "pq".into(),
+                    },
+                ];
+                let changed = chain
+                    .iter()
+                    .fold(source.clone(), |text, edit| edit.apply(&text));
+                let result = tex_ls_parser::parser::reparse_edits(&base, &chain, &changed)
+                    .expect("owned math arguments must retain the proof through sequential edits");
+                let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+                assert_eq!(result.tier, ReparseTier::Token);
+                assert_eq!(result.green, full.green);
+                assert_eq!(result.errors, full.errors);
+                assert_eq!(ctx, full_ctx);
+            }
+        }
+    }
+}
+
+#[test]
+fn qualified_outer_math_arguments_keep_raw_context_exclusions() {
+    for source in [
+        "\\lstset{}\n\\textbf{{ $alphabet gamma$ }}\n",
+        "\\lstset{}\n\\renewcommand{\\textbf}[2]{\\@makeother\\$#2}\n\\textbf{$alphabet gamma$}{body}\n",
+    ] {
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(source, &edit).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn full_mode_math_splices_when_alltt_literal_profile_is_overridden() {
+    let normal: tex_ls_parser::declarations::Declarations =
+        serde_json::from_value(serde_json::json!({
+            "environments": {"alltt": {"like": "quote"}}
+        }))
+        .unwrap();
+    let normal = normal.resolve().unwrap();
+    for (prefix, declared) in [
+        (
+            "\\newenvironment{alltt}{}{}\n",
+            ResolvedDeclarations::default(),
+        ),
+        (
+            "\\renewenvironment{alltt}{}{}\n",
+            ResolvedDeclarations::default(),
+        ),
+        ("", normal),
+    ] {
+        let source = format!("{prefix}\\begin{{alltt}}\n$alphabet gamma$\n\\end{{alltt}}\n");
+        for source in [source.clone(), source.replace('\n', "\r\n")] {
+            for cfg in [
+                config(),
+                tex_ls_parser::parser::LexConfig {
+                    dtx: true,
+                    ..config()
+                },
+            ] {
+                let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+                assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+                let at = source.find("alphabet").unwrap() + 1;
+                let syntax = parsed.syntax();
+                let leaf = syntax
+                    .token_at_offset(at.try_into().unwrap())
+                    .right_biased()
+                    .unwrap();
+                assert_eq!(leaf.text(), "alphabet");
+                assert!(
+                    leaf.parent_ancestors()
+                        .any(|node| node.kind() == tex_ls_parser::syntax::SyntaxKind::MATH),
+                    "the overridden environment must lex ordinary math"
+                );
+                let base = ReparseBase::from_parts(
+                    &source,
+                    &parsed.green,
+                    &parsed.errors,
+                    &ctx,
+                    cfg,
+                    &declared,
+                );
+                for edit in [
+                    Edit {
+                        range: at..at,
+                        insert: "xy".into(),
+                    },
+                    Edit {
+                        range: at..at + 1,
+                        insert: String::new(),
+                    },
+                ] {
+                    let changed = edit.apply(&source);
+                    let result = reparse(&base, &edit, &changed).unwrap_or_else(|| {
+                        panic!("an overridden alltt name must use its actual ordinary profile: {source:?}, config {cfg:?}, edit {edit:?}")
+                    });
+                    let (full, full_ctx) =
+                        parse_with_declarations_resolved(&changed, cfg, &declared);
+                    assert_eq!(result.tier, ReparseTier::Token);
+                    assert_eq!(result.green, full.green);
+                    assert_eq!(result.errors, full.errors);
+                    assert_eq!(ctx, full_ctx);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn full_mode_keeps_active_literal_alltt_profile_excluded() {
+    for source in [
+        "\\begin{alltt}\nalphabet gamma\n\\end{alltt}\n",
+        "\\begin{alltt}\n\\(alphabet gamma\\)\n\\end{alltt}\n",
+    ] {
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let parsed = tex_ls_parser::parser::parse(&source);
+            assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+            let at = source.find("alphabet").unwrap() + 1;
+            let syntax = parsed.syntax();
+            let leaf = syntax
+                .token_at_offset(at.try_into().unwrap())
+                .right_biased()
+                .unwrap();
+            assert_eq!(leaf.text(), "alphabet");
+            if source.contains("\\(") {
+                assert!(
+                    leaf.parent_ancestors()
+                        .any(|node| { node.kind() == tex_ls_parser::syntax::SyntaxKind::MATH })
+                );
+            }
+            let edit = Edit {
+                range: at..at,
+                insert: "x".into(),
+            };
+            assert!(reparse_once(&source, &edit).is_none(), "{source}");
+        }
+    }
+}
+
+#[test]
+fn overridden_alltt_same_line_begin_reader_still_declines() {
+    let source = "\\newenvironment{alltt}{}{}\n\\begin{alltt}$alphabet gamma$\\end{alltt}\n";
+    let at = source.find("alphabet").unwrap() + 1;
+    let edit = Edit {
+        range: at..at,
+        insert: "x".into(),
+    };
+    assert!(reparse_once(source, &edit).is_none());
+}
+
+#[test]
+fn full_mode_math_word_splices_in_ordinary_internal_groups_and_commands() {
+    for source in [
+        "\\lstset{}\n$\\mathrm{alphabet gamma}$\n",
+        "\\lstset{}\n$\\text{alphabet gamma}$\n",
+    ] {
+        let declared = ResolvedDeclarations::default();
+        let (parsed, ctx) = parse_with_declarations_resolved(source, config(), &declared);
+        let base = ReparseBase::from_parts(
+            source,
+            &parsed.green,
+            &parsed.errors,
+            &ctx,
+            config(),
+            &declared,
+        );
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        let changed = edit.apply(source);
+        let result = reparse(&base, &edit, &changed).unwrap_or_else(|| {
+            panic!("ordinary internal math grouping needs its local proof: {source}")
+        });
+        let full = parse_with_declarations_resolved(&changed, config(), &declared).0;
+        assert_eq!(result.tier, ReparseTier::Token);
+        assert_eq!(result.green, full.green);
+        assert_eq!(result.errors, full.errors);
+    }
+}
+
+#[test]
+fn full_mode_math_word_splices_with_punctuation_shortverb_delimiters() {
+    for prefix in [
+        "\\MakeShortVerb{\\|}\n",
+        "\\DefineShortVerb*[language=Python]{\\\"}\n",
+        "\\MakeShortVerb\\|\n\\DeleteShortVerb\\|\n",
+        "\\UndefineShortVerb{\\|}\n",
+    ] {
+        let source = format!("{prefix}$\\mathrm{{alphabet gamma}}$\n");
+        for dtx in [false, true] {
+            let declared = ResolvedDeclarations::default();
+            let cfg = tex_ls_parser::parser::LexConfig { dtx, ..config() };
+            let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+            let base = ReparseBase::from_parts(
+                &source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            let at = source.find("alphabet").unwrap() + 1;
+            let edit = Edit {
+                range: at..at,
+                insert: "x".into(),
+            };
+            let changed = edit.apply(&source);
+            let result = reparse(&base, &edit, &changed).unwrap_or_else(|| {
+                panic!("punctuation delimiter does not affect letters: {source}")
+            });
+            let full = parse_with_declarations_resolved(&changed, cfg, &declared).0;
+            assert_eq!(result.tier, ReparseTier::Token);
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+        }
+    }
+}
+
+#[test]
+fn full_mode_shortverb_option_probe_declines_long_or_unclosed_options() {
+    for options in [
+        format!("[{}]{{\\x}}", "a".repeat(2048)),
+        format!("[{}", "a".repeat(2048)),
+    ] {
+        let source = format!("\\DefineShortVerb{options}\n$alphabet gamma$\n");
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(&source, &edit).is_none(), "{options}");
+    }
+}
+
+#[test]
+fn full_mode_math_word_rejects_all_letter_shortverb_operand_forms() {
+    for prefix in [
+        "\\MakeShortVerb{\\x}\n",
+        "\\MakeShortVerb\\x\n",
+        "\\DefineShortVerb*[language=Python]{\\x}\n",
+        "\\DeleteShortVerb{\\x}\n",
+        "\\UndefineShortVerb\\x\n",
+    ] {
+        let source = format!("{prefix}$alphabet gamma$\n");
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(&source, &edit).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn full_mode_internal_math_proof_rejects_state_readers_and_raw_commands() {
+    for source in [
+        "\\lstset{}\n$\\lstset{escapeinside={alphabet}{Y}} gamma$\n\\begin{lstlisting}alphabetpayloadY\\end{lstlisting}",
+        "\\lstset{}\n$\\lstdefinestyle{demo}{escapeinside={alphabet}{Y}} gamma$\n\\lstset{style=demo}\n\\begin{lstlisting}alphabetpayloadY\\end{lstlisting}",
+        "\\lstset{}\n$\\newmintinline[demo]{python}{escapeinside=alphabetY} gamma$\n\\demo|alphabetpayloadY|",
+        "\\lstset{}\n\\NewDocumentCommand{\\raw}{m v}{#1#2}\n$\\raw{alphabet gamma}|body|$",
+        "\\lstset{}\n\\renewcommand{\\text}[2]{\\@makeother\\$#2}\n$\\text{alphabet gamma}{body}$",
+        "\\MakeShortVerb{\\x}\n$\\mathrm{alphabet gamma}$ xprotectedx\n",
+        "\\lstset{}\n$\\detokenize{alphabet gamma}$",
+        "\\lstset{}\n{ $\\mathrm{alphabet gamma}$ }",
+        "\\begin{equation}\\lstset\n\n{escapeinside={alphabet gamma}{Y}}\\end{equation}\n\\begin{lstlisting}alphabet gammapayloadY\\end{lstlisting}",
+        "\\begin{equation}\\text{\\lstset\n\n{escapeinside={alphabet gamma}{Y}}}\\end{equation}\n\\begin{lstlisting}alphabet gammapayloadY\\end{lstlisting}",
+    ] {
+        if source.contains("\\renewcommand{\\text}") {
+            let (_, ctx) = parse_with_declarations_resolved(
+                source,
+                config(),
+                &ResolvedDeclarations::default(),
+            );
+            assert!(
+                !ctx.is_empty(),
+                "the definition must install a source-proved raw context"
+            );
+        }
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(reparse_once(source, &edit).is_none(), "{source}");
+    }
+}
+
+#[test]
+fn full_mode_math_proof_bounds_environment_name_probes() {
+    let name = "a".repeat(2048);
+    let source = format!("\\lstset{{}}\n\\begin{{{name}}}$alphabet gamma$\\end{{{name}}}");
+    let at = source.find("alphabet").unwrap() + 1;
+    let edit = Edit {
+        range: at..at,
+        insert: "x".into(),
+    };
+    assert!(reparse_once(&source, &edit).is_none());
+}
+
+#[test]
+fn full_mode_math_proof_rejects_shadowed_builtin_listing_options() {
+    let source = "\\newmintinline[text]{python}{}\n\\begin{equation}\\text[mathescap]|$alphabet gamma$|\\end{equation}";
+    let at = source.find("mathescap").unwrap() + "mathescap".len();
+    let edit = Edit {
+        range: at..at,
+        insert: "e".into(),
+    };
+    assert!(reparse_once(source, &edit).is_none());
+}
+
+#[test]
+fn pure_builtin_raw_recovery_rejects_generated_fancy_environment_shadow() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::semantic::SemanticModel;
+    use tex_ls_parser::syntax::SyntaxKind;
+
+    for newline in ["\n", "\r\n"] {
+        let source = "\\DefineVerbatimEnvironment{verbatim}{Verbatim}{commandchars=+()}\n\\begin{verbatim}\nalphabet\n\\end{verbatim}\n".replace('\n', newline);
+        let cfg = LexConfig {
+            flavor: LatexFlavor::Document,
+            dtx: false,
+        };
+        let declared = ResolvedDeclarations::default();
+        let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(SemanticModel::build(&parsed.syntax()).refs().is_empty());
+        let at = source.find("alphabet").unwrap() + 3;
+        let syntax = parsed.syntax();
+        let leaf = syntax
+            .token_at_offset(at.try_into().unwrap())
+            .right_biased()
+            .unwrap();
+        assert_eq!(
+            leaf.kind(),
+            SyntaxKind::VERBATIM_BODY,
+            "old leaf must look like the pure builtin body"
+        );
+        assert_eq!(leaf.parent().unwrap().kind(), SyntaxKind::ENVIRONMENT);
+        let edit = Edit {
+            range: at..at,
+            insert: "+ref(activated)".into(),
+        };
+        let changed = edit.apply(&source);
+        let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+        assert!(full.errors.is_empty(), "{:?}", full.errors);
+        assert_eq!(full.syntax().to_string(), changed);
+        let model = SemanticModel::build(&full.syntax());
+        assert_eq!(
+            model.refs().len(),
+            1,
+            "source-generated Fancy escape must actually activate"
+        );
+        assert_eq!(model.refs()[0].name, "activated");
+        let base =
+            ReparseBase::from_parts(&source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+        if let Some(result) = reparse(&base, &edit, &changed) {
+            assert_ne!(
+                result.tier,
+                ReparseTier::Verbatim,
+                "builtin isolation cannot prove this mutable profile"
+            );
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+            assert_eq!(result.context(&ctx), &full_ctx);
+        }
+    }
+}
+
+#[test]
+fn classic_verbatim_math_spelling_uses_protected_proof_in_full_mode() {
+    use tex_ls_parser::syntax::SyntaxKind;
+    let source = "\\begin{verbatim}$alphabet gamma$\\end{verbatim}\n\\lstset{}";
+    let cfg = config();
+    let declared = ResolvedDeclarations::default();
+    let (parsed, ctx) = parse_with_declarations_resolved(source, cfg, &declared);
+    assert!(parsed.errors.is_empty());
+    assert_eq!(parsed.syntax().to_string(), source);
+    let at = source.find("alphabet").unwrap() + 1;
+    let syntax = parsed.syntax();
+    let leaf = syntax
+        .token_at_offset(at.try_into().unwrap())
+        .right_biased()
+        .unwrap();
+    assert_eq!(leaf.kind(), SyntaxKind::VERBATIM_BODY);
+    assert_eq!(leaf.parent().unwrap().kind(), SyntaxKind::ENVIRONMENT);
+    let edit = Edit {
+        range: at..at,
+        insert: "x".into(),
+    };
+    let changed = edit.apply(source);
+    let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+    assert!(full.errors.is_empty());
+    assert_eq!(full.syntax().to_string(), changed);
+    let base = ReparseBase::from_parts(source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+    let result = reparse(&base, &edit, &changed)
+        .expect("literal math spelling is still an opaque builtin body");
+    assert_eq!(result.tier, ReparseTier::Verbatim);
+    assert_eq!(result.green, full.green);
+    assert_eq!(result.errors, full.errors);
+    assert_eq!(result.context(&ctx), &full_ctx);
+}
+
+#[test]
+fn full_mode_math_word_proof_rejects_literal_islands_and_settings() {
+    for source in [
+        "\\begin{alltt}\\begin{equation}alphabet gamma\\end{equation}\\end{alltt}",
+        "\\detokenize{$alphabet gamma$}",
+        "\\lstset{escapeinside={A}{B}}\n\\begin{lstlisting}A$alphabet gamma$B\\end{lstlisting}",
+        "\\lstinline[escapeinside={A}{B}]|A$alphabet gamma$B|",
+        "\\lstset{}\n$alphabet+gamma$",
+        "\\MakeShortVerb{\\x}\n$alphabet gamma$ xprotectedx\n",
+        "\\lstset{escapeinside={$alphabet$}{B}}\n$gamma$",
+        "\\DefineVerbatimEnvironment{demo}{Verbatim}{commandchars={$alphabet$}}\n$gamma$",
+        "\\catcode`\\%=$alphabet$\n$gamma$",
+        "\\begin{lstlisting}$alphabet gamma$\\end{lstlisting}\n\\lstset{}",
+    ] {
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(
+            reparse_once(source, &edit).is_none(),
+            "local math proof must decline: {source}"
+        );
+        let changed = edit.apply(source);
+        assert_eq!(
+            tex_ls_parser::parser::parse(&changed)
+                .syntax()
+                .text()
+                .to_string(),
+            changed
+        );
+    }
+}
+
+#[test]
+fn full_mode_math_word_proof_rejects_orphan_settings_arguments() {
+    for source in [
+        "\\lstset\n\n{escapeinside={$alphabet gamma$}{Y}}\n\n\\begin{lstlisting}\n$alphabet gamma$payloadY\n\\end{lstlisting}\n",
+        "\\lstdefinestyle{demo}\n\n{escapeinside={$alphabet gamma$}{Y}}\n\\lstset{style=demo}\n\\begin{lstlisting}\n$alphabet gamma$payloadY\n\\end{lstlisting}\n",
+    ] {
+        let at = source.find("alphabet").unwrap() + 1;
+        let edit = Edit {
+            range: at..at,
+            insert: "x".into(),
+        };
+        assert!(
+            reparse_once(source, &edit).is_none(),
+            "raw settings scan can own a group across paragraph trivia: {source}"
+        );
+    }
+}
+
+#[test]
+fn validating_single_reparse_rejects_a_same_length_stale_transform() {
+    let source = "alpha beta";
+    let declared = ResolvedDeclarations::default();
+    let (parsed, ctx) = parse_with_declarations_resolved(source, config(), &declared);
+    let base = ReparseBase::from_parts(
+        source,
+        &parsed.green,
+        &parsed.errors,
+        &ctx,
+        config(),
+        &declared,
+    );
+    let edit = Edit {
+        range: 1..2,
+        insert: "X".into(),
+    };
+    assert!(tex_ls_parser::parser::reparse_edits(&base, &[edit], "alpha zeta").is_none());
+}
+
+#[test]
+fn reparse_rejects_a_base_with_a_different_tree_length() {
+    let declared = ResolvedDeclarations::default();
+    let (parsed, ctx) = parse_with_declarations_resolved("short", config(), &declared);
+    let source = "much longer text";
+    let base = ReparseBase::from_parts(
+        source,
+        &parsed.green,
+        &parsed.errors,
+        &ctx,
+        config(),
+        &declared,
+    );
+    let edit = Edit {
+        range: 12..13,
+        insert: "X".into(),
+    };
+    assert!(reparse(&base, &edit, &edit.apply(source)).is_none());
+}
+
 /// Hand-written inputs, one per construct whose recognition depends on text a
 /// keystroke can reach. These are where the interesting edits live; the corpus
 /// sweep is breadth.
@@ -479,6 +1992,7 @@ fn the_harness_rejects_a_wrong_tree() {
     let declared = ResolvedDeclarations::default();
     let wrong = parse_with_declarations_resolved("\\section{Ho}\n", config(), &declared).0;
     let result = Reparsed {
+        ctx: None,
         green: wrong.green,
         errors: wrong.errors,
         tier: ReparseTier::Token,
@@ -505,6 +2019,7 @@ fn the_harness_rejects_a_perturbed_error_vector() {
     let text = "\\section{Hi}\n";
     let parse = parse_with_declarations_resolved(text, config(), &declared).0;
     let result = Reparsed {
+        ctx: None,
         green: parse.green,
         errors: vec![tex_ls_parser::parser::SyntaxError {
             message: "invented".to_string(),
@@ -898,7 +2413,15 @@ fn ordered_reader_overrides_remain_valid_across_prose_and_fragment_edits() {
             range: 1..1,
             insert: "x".into(),
         };
-        assert!(reparse_once(source, &edit).is_none(), "{source}");
+        let result = reparse_once(source, &edit).expect("early prose with rebased later readers");
+        assert_eq!(result.tier, ReparseTier::Token);
+        let declared = ResolvedDeclarations::default();
+        let (_, original_ctx) = parse_with_declarations_resolved(source, config(), &declared);
+        let (full, full_ctx) =
+            parse_with_declarations_resolved(&edit.apply(source), config(), &declared);
+        assert_eq!(result.green, full.green);
+        assert_eq!(result.errors, full.errors);
+        assert_eq!(result.context(&original_ctx), &full_ctx);
     }
 }
 
@@ -985,5 +2508,171 @@ fn alphabetic_shortverb_and_new_lexical_triggers_decline() {
         let base =
             ReparseBase::from_parts(text, &parsed.green, &parsed.errors, &ctx, config, &declared);
         assert!(reparse(&base, &edit, &edit.apply(text)).is_none());
+    }
+}
+
+#[test]
+fn equal_width_inert_prefix_edits_before_qualified_profiles_keep_leaf_splices() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    for (setup, profile) in [
+        (
+            include_str!("source_readers/comment_setup.tex"),
+            "verbatim_comment_start",
+        ),
+        (
+            include_str!("source_readers/release_setup.sty"),
+            "release_header_start",
+        ),
+    ] {
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = format!("alphabet gamma\n{setup}\nAfterword\n").replace('\n', newline);
+            let cfg = LexConfig {
+                flavor: LatexFlavor::Package,
+                dtx: false,
+            };
+            let declared = ResolvedDeclarations::default();
+            let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(format!("{ctx:?}").contains(&format!("{profile}: Some(")));
+            let edit = Edit {
+                range: 2..4,
+                insert: "QR".into(),
+            };
+            let changed = edit.apply(&source);
+            let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+            assert!(full.errors.is_empty(), "{:?}", full.errors);
+            assert_eq!(full.syntax().to_string(), changed);
+            assert_eq!(
+                ctx, full_ctx,
+                "same-width inert prefix retains all qualified positions"
+            );
+            let base = ReparseBase::from_parts(
+                &source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            let result = reparse(&base, &edit, &changed)
+                .expect("inert same-width prefix has an unchanged qualified context");
+            assert_eq!(result.tier, ReparseTier::Token);
+            assert_eq!(result.green, full.green);
+            assert_eq!(result.errors, full.errors);
+            assert_eq!(result.context(&ctx), &full_ctx);
+        }
+    }
+}
+
+#[test]
+fn qualified_profile_prefix_recovery_keeps_definition_and_offset_guards() {
+    use tex_ls_parser::parser::{LatexFlavor, LexConfig};
+    use tex_ls_parser::syntax::SyntaxKind;
+    let cfg = LexConfig {
+        flavor: LatexFlavor::Package,
+        dtx: false,
+    };
+    let declared = ResolvedDeclarations::default();
+    for (setup, marker, mutation, expected_kind) in [
+        (
+            include_str!("source_readers/comment_setup.tex"),
+            "@bsphack",
+            "@bsphacK",
+            SyntaxKind::CONTROL_WORD,
+        ),
+        (
+            include_str!("source_readers/release_setup.sty"),
+            "missing",
+            "mXssing",
+            SyntaxKind::WORD,
+        ),
+    ] {
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = format!("alphabet gamma\n{setup}\nAfterword\n").replace('\n', newline);
+            let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+            assert!(parsed.errors.is_empty());
+            let base = ReparseBase::from_parts(
+                &source,
+                &parsed.green,
+                &parsed.errors,
+                &ctx,
+                cfg,
+                &declared,
+            );
+            let start = source.find(marker).unwrap();
+            let token = tex_ls_parser::syntax::token_at_offset(
+                &parsed.syntax(),
+                rowan::TextSize::try_from(start).unwrap(),
+            )
+            .right_biased()
+            .unwrap();
+            assert_eq!(token.kind(), expected_kind);
+            let edit = Edit {
+                range: start..start + marker.len(),
+                insert: mutation.into(),
+            };
+            let changed = edit.apply(&source);
+            let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+            assert!(full.errors.is_empty(), "{:?}", full.errors);
+            assert_eq!(full.syntax().to_string(), changed);
+            assert_ne!(
+                ctx, full_ctx,
+                "definition mutation must remove its qualified profile"
+            );
+            let profile = if marker == "missing" {
+                "release_header_start"
+            } else {
+                "verbatim_comment_start"
+            };
+            assert!(format!("{full_ctx:?}").contains(&format!("{profile}: None")));
+            assert!(reparse(&base, &edit, &changed).is_none());
+            for insert in ["Q", "QRS", "12", "😀"] {
+                let edit = Edit {
+                    range: 2..4,
+                    insert: insert.into(),
+                };
+                let changed = edit.apply(&source);
+                assert!(
+                    reparse(&base, &edit, &changed).is_none(),
+                    "unproved prefix edit {insert:?}"
+                );
+            }
+            let edit = Edit {
+                range: 2..6,
+                insert: "😀".into(),
+            };
+            assert_eq!(edit.range.len(), edit.insert.len());
+            assert!(reparse(&base, &edit, &edit.apply(&source)).is_none());
+        }
+    }
+    for prefix in [
+        "\\unknown{alphabet}\n",
+        "\\unknown\n\n{alphabet}\n",
+        "\\detokenize{alphabet}\n",
+        "\\verb|alphabet|\n",
+    ] {
+        let source = format!(
+            "{prefix}{}",
+            include_str!("source_readers/comment_setup.tex")
+        );
+        let (parsed, ctx) = parse_with_declarations_resolved(&source, cfg, &declared);
+        assert!(parsed.errors.is_empty());
+        let base =
+            ReparseBase::from_parts(&source, &parsed.green, &parsed.errors, &ctx, cfg, &declared);
+        let start = source.find("alphabet").unwrap();
+        let edit = Edit {
+            range: start + 2..start + 4,
+            insert: "QR".into(),
+        };
+        let changed = edit.apply(&source);
+        let (full, full_ctx) = parse_with_declarations_resolved(&changed, cfg, &declared);
+        assert!(full.errors.is_empty());
+        assert_eq!(full.syntax().to_string(), changed);
+        assert_eq!(ctx, full_ctx);
+        assert!(
+            reparse(&base, &edit, &changed).is_none(),
+            "unproved owner {prefix:?}"
+        );
     }
 }

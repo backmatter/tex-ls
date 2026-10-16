@@ -1,4 +1,5 @@
 use super::*;
+use tex_ls_parser::parser::lexer::{ExplToggle, expl_toggle};
 
 /// Lower a [`SyntaxKind::PARAGRAPH`] under [`WrapMode::Reflow`]: greedily wrap its
 /// prose to the line width. Maximal runs of *adjacent* non-whitespace elements
@@ -91,7 +92,7 @@ pub(super) fn dtx_paragraph_starts_margined(node: &SyntaxNode) -> bool {
 /// trivia in the CST, but every generated line must regain one; admitting only a
 /// line-owning block makes that prefix scope exact.
 pub(super) fn dtx_doc_region(node: &SyntaxNode, cx: LowerCtx<'_>) -> bool {
-    if !cx.is_dtx
+    if !cx.source.is_dtx
         || cx.in_dtx_doc_region
         || node.kind() != SyntaxKind::ENVIRONMENT
         || has_verbatim_body(node)
@@ -279,7 +280,7 @@ pub(super) fn inside_macrocode(node: &SyntaxNode) -> bool {
 /// never margined — turning documentation into live code. [`contains_doc_margin`]
 /// cannot see this: the margin sits *outside* the node, before it on the line.
 pub(super) fn doc_margin_opens_line(node: &SyntaxNode, cx: LowerCtx<'_>) -> bool {
-    if !cx.is_dtx || cx.in_dtx_doc_region {
+    if !cx.source.is_dtx || cx.in_dtx_doc_region {
         return false;
     }
     let mut prev = node.first_token().and_then(|t| t.prev_token());
@@ -383,7 +384,7 @@ pub(super) fn dtx_doc_paragraph_reflows_safely(node: &SyntaxNode, cx: LowerCtx<'
     if !dtx_paragraph_reflows(node, cx) || !dtx_paragraph_starts_margined(node) {
         return false;
     }
-    if let Some(&answer) = cx.dtx_reflow_cache.borrow().get(node) {
+    if let Some(&answer) = cx.source.dtx_reflow_cache.borrow().get(node) {
         return answer;
     }
     // Answer every *nested* doc paragraph first, innermost-first (reverse
@@ -405,7 +406,8 @@ pub(super) fn dtx_doc_paragraph_reflows_safely(node: &SyntaxNode, cx: LowerCtx<'
     let (_, margin_escaped) =
         reflow_elements_checked(node.children_with_tokens(), probe, ReflowKind::DtxProse);
     let answer = !margin_escaped;
-    cx.dtx_reflow_cache
+    cx.source
+        .dtx_reflow_cache
         .borrow_mut()
         .insert(node.clone(), answer);
     answer
@@ -1207,7 +1209,7 @@ pub(super) fn ride_after_block(ir: Ir, gap: bool) -> Ir {
 /// still reflow under the `% ` margin when [`dtx_run_reflows_safely`] holds.
 /// Always false outside the `.dtx` lexer config, where neither token kind exists.
 pub(super) fn run_carries_doc_margin(run: &[SyntaxElement], cx: LowerCtx<'_>) -> bool {
-    if !cx.is_dtx {
+    if !cx.source.is_dtx {
         return false;
     }
     run.iter().any(|element| match element {

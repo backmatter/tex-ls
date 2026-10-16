@@ -163,6 +163,13 @@ fn rich_capabilities() -> serde_json::Value {
 fn start_server(
     init_options: Option<serde_json::Value>,
 ) -> (Connection, std::thread::JoinHandle<()>) {
+    start_server_in_workspace(init_options, None)
+}
+
+fn start_server_in_workspace(
+    init_options: Option<serde_json::Value>,
+    root: Option<&std::path::Path>,
+) -> (Connection, std::thread::JoinHandle<()>) {
     let (server, client) = Connection::memory();
     let server_thread = std::thread::spawn(move || tex_ls::lsp::serve(server).unwrap());
 
@@ -177,6 +184,15 @@ fn start_server(
     let params = InitializeParams {
         initialization_options: Some(init_options),
         capabilities: serde_json::from_value(rich_capabilities()).unwrap(),
+        workspace_folders_initialize_params: lsp_types::WorkspaceFoldersInitializeParams {
+            workspace_folders: root.map(|path| {
+                vec![lsp_types::WorkspaceFolder {
+                    uri: path_to_file_uri(path),
+                    name: "fixture".into(),
+                }]
+                .into()
+            }),
+        },
         ..Default::default()
     };
     send_request(
@@ -3903,7 +3919,7 @@ fn lsp_registers_file_watchers_on_initialized() {
         .map(|w| w["globPattern"].as_str().expect("string glob").to_owned())
         .collect();
     assert!(
-        globs.contains(&"**/*.{tex,bib,bibtex,sty,cls,dtx,ins,def,lco,aux,log,fls}".to_owned()),
+        globs.contains(&"**/*.{tex,bib,bibtex,sty,cls,clo,dtx,ins,def,lco,aux,log,fls}".to_owned()),
         "expected the supported-source glob, got {globs:?}"
     );
     assert!(
@@ -4057,7 +4073,7 @@ fn lsp_watched_config_change_reanalyzes_open_doc() {
 fn lsp_watched_config_change_reseeds_declarations() {
     // The sharper half of the test above: a config change that alters the
     // *parse* rather than the rule filter. Declaring `mycode` verbatim
-    // (`AGENTS.md` decision #12) protects its body, so the finding inside it
+    // protects its body, so the finding inside it
     // disappears — but only if the config path actually re-seeds the
     // declarations input and invalidates the cached parse. A server that
     // re-resolved settings and reused its tree would still report it.
@@ -5221,6 +5237,32 @@ fn inverse_search_declines_a_file_outside_the_workspace() {
 }
 
 #[test]
+fn inverse_search_declines_after_shutdown_without_sending_editor_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let ipc_dir = dir.path().join("ipc");
+    let workspace = dir.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let (client, server_thread) = start_server_show_document(&ipc_dir, &[&workspace]);
+    wait_for_ipc_advertisement(&ipc_dir);
+    send_request(&client, 99, "shutdown", serde_json::Value::Null);
+    let response = recv_response(&client);
+    assert_eq!(response.id, RequestId::from(99));
+    assert!(response.response_result.is_ok());
+    let result = tex_ls::ipc::send_inverse_search_in(&ipc_dir, &workspace.join("main.tex"), 1, 0);
+    let outbound = client.receiver.try_recv();
+    send_notification(&client, "exit", serde_json::Value::Null);
+    server_thread.join().expect("server thread panicked");
+    assert!(
+        matches!(result, Err(tex_ls::ipc::IpcError::NoServerForFile(_))),
+        "{result:?}"
+    );
+    assert!(
+        matches!(outbound, Err(crossbeam_channel::TryRecvError::Empty)),
+        "{outbound:?}"
+    );
+}
+
+#[test]
 fn a_client_without_show_document_support_never_advertises() {
     // Inverse search ends in `window/showDocument`; a server that cannot finish
     // the job must not claim the request from one that can.
@@ -5336,6 +5378,58 @@ fn configuration_pull_is_negotiated_and_rejects_invalid_replacements() {
     };
     assert_eq!(error.method, "window/showMessage");
     shutdown(&client, thread);
+}
+
+#[test]
+fn shutdown_discards_late_configuration_replies_and_keeps_wire_request_ids() {
+    for settings in [
+        serde_json::json!([{"lineWidth": 0}]),
+        serde_json::json!([{"lineWidth": 20}]),
+    ] {
+        let (client, thread, _) =
+            start_with_capabilities(serde_json::json!({"workspace":{"configuration":true}}));
+        let Message::Request(configuration) = recv(&client) else {
+            panic!("configuration request");
+        };
+        assert_eq!(configuration.method, "workspace/configuration");
+        send_request(&client, 99, "shutdown", serde_json::Value::Null);
+        let response = recv_response(&client);
+        assert_eq!(response.id, RequestId::from(99));
+        assert!(response.response_result.is_ok());
+        client
+            .sender
+            .send(Message::Response(Response::new_ok(
+                configuration.id,
+                settings,
+            )))
+            .unwrap();
+        let late = client.receiver.recv_timeout(Duration::from_millis(300));
+        // Invalid post-shutdown requests must still receive their original IDs,
+        // including reuse after the previous rejection completes.
+        let mut rejections = Vec::new();
+        for _ in 0..2 {
+            send_request(
+                &client,
+                17,
+                "workspace/symbol",
+                serde_json::json!({"query":""}),
+            );
+            rejections.push(recv_response(&client));
+        }
+        send_notification(&client, "exit", serde_json::Value::Null);
+        thread.join().expect("server thread panicked");
+        assert!(
+            matches!(late, Err(crossbeam_channel::RecvTimeoutError::Timeout)),
+            "late shutdown traffic: {late:?}"
+        );
+        for response in rejections {
+            assert_eq!(response.id, RequestId::from(17));
+            assert_eq!(
+                response.response_result.unwrap_err().code,
+                lsp_server::ErrorCode::InvalidRequest as i32
+            );
+        }
+    }
 }
 
 #[test]
@@ -6189,15 +6283,57 @@ fn watched_bibliography_creation_deletion_and_recreation_update_completion() {
         start_with_capabilities(serde_json::json!({"textDocument":{"diagnostic":{}}}));
     did_open(&client, &uri, 1, text);
     let keys = |id| {
-        send_request(
-            &client,
-            id,
-            "textDocument/completion",
-            serde_json::json!({
-                "textDocument":{"uri":uri},"position":{"line":2,"character":6}
-            }),
-        );
-        let result = recv_response(&client).response_result.unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let result = loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "bibliography inputs never settled"
+            );
+            send_request(
+                &client,
+                id,
+                "textDocument/completion",
+                serde_json::json!({
+                    "textDocument":{"uri":uri},"position":{"line":2,"character":6}
+                }),
+            );
+            let response = loop {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                assert!(!remaining.is_zero(), "bibliography inputs never settled");
+                match client
+                    .receiver
+                    .recv_timeout(remaining)
+                    .expect("bibliography response timed out")
+                {
+                    Message::Response(response) => break response,
+                    Message::Request(request)
+                        if request.method == "workspace/inlayHint/refresh" =>
+                    {
+                        client
+                            .sender
+                            .send(Message::Response(Response::new_ok(
+                                request.id,
+                                serde_json::Value::Null,
+                            )))
+                            .unwrap();
+                    }
+                    Message::Notification(notification)
+                        if notification.method == "textDocument/publishDiagnostics" => {}
+                    other => panic!("expected a bibliography response, got {other:?}"),
+                }
+            };
+            assert_eq!(response.id, RequestId::from(id));
+            // Background acquisition may supersede the snapshot after admission.
+            // A temporary cancellation must never count as a successful key set.
+            if response
+                .response_result
+                .as_ref()
+                .is_err_and(|error| error.code == lsp_server::ErrorCode::ContentModified as i32)
+            {
+                continue;
+            }
+            break response.response_result.unwrap();
+        };
         result["items"]
             .as_array()
             .unwrap()
@@ -6533,5 +6669,265 @@ fn installed_format_is_acquired_for_navigation() {
         assert_eq!(targets[0].uri, path_to_file_uri(&kernel));
         assert_eq!(targets[0].range.start.line, target_line);
     }
+    shutdown(&client, server);
+}
+
+#[test]
+fn semantic_token_delta_round_trips_the_native_response_boundary() {
+    let (server, client) = Connection::memory();
+    let thread = std::thread::spawn(move || tex_ls::lsp::serve(server).unwrap());
+    send_request(
+        &client,
+        1,
+        "initialize",
+        serde_json::json!({"initializationOptions":{"texmf":{"enabled":false}},"capabilities":{"textDocument":{"semanticTokens":{"formats":["relative"],"tokenTypes":["macro","type"],"tokenModifiers":[],"requests":{"full":{"delta":true}}}}}}),
+    );
+    let init = recv_response(&client).response_result.unwrap();
+    assert_eq!(
+        init["capabilities"]["semanticTokensProvider"]["full"],
+        serde_json::json!({"delta":true})
+    );
+    send_notification(&client, "initialized", serde_json::json!({}));
+    let uri: Uri = "untitled:semantic-delta.tex".parse().unwrap();
+    did_open(&client, &uri, 1, &"\\textbf{A}\n".repeat(20));
+    send_request(
+        &client,
+        2,
+        "textDocument/semanticTokens/full",
+        serde_json::json!({"textDocument":{"uri":uri}}),
+    );
+    let full = recv_response(&client).response_result.unwrap();
+    assert!(full["data"].as_array().unwrap().len() > 20);
+    let id = full["resultId"].as_str().unwrap();
+    send_request(
+        &client,
+        3,
+        "textDocument/semanticTokens/full/delta",
+        serde_json::json!({"textDocument":{"uri":uri},"previousResultId":id}),
+    );
+    let same = recv_response(&client).response_result.unwrap();
+    assert_eq!(same["edits"], serde_json::json!([]));
+    send_notification(
+        &client,
+        "textDocument/didClose",
+        serde_json::json!({"textDocument":{"uri":uri}}),
+    );
+    did_open(&client, &uri, 2, &"\\textbf{A}\n".repeat(20));
+    send_request(
+        &client,
+        4,
+        "textDocument/semanticTokens/full/delta",
+        serde_json::json!({"textDocument":{"uri":uri},"previousResultId":same["resultId"]}),
+    );
+    assert!(
+        recv_response(&client)
+            .response_result
+            .unwrap()
+            .get("data")
+            .is_some()
+    );
+    shutdown(&client, thread);
+}
+
+#[test]
+fn native_package_assistance_acquires_verified_sources_and_refreshes_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_dir = dir.path().join("source");
+    let installed = dir.path().join("installed");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::create_dir_all(&installed).unwrap();
+    for group in ["2025", "common"] {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/tex-ls-analysis/tests/fixtures/installed-sources")
+            .join(group);
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let entry = entry.unwrap();
+            if matches!(
+                entry.path().extension().and_then(|e| e.to_str()),
+                Some("sty" | "cls" | "clo")
+            ) {
+                std::fs::copy(entry.path(), installed.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+    let (client, server) = start_server_in_workspace(
+        Some(
+            serde_json::json!({"texmf":{"enabled":true,"explicitOnly":true,"useKpsewhich":false,"roots":[installed]}}),
+        ),
+        Some(&source_dir),
+    );
+    let path = source_dir.join("main.tex");
+    let uri = path_to_file_uri(&path);
+    let text =
+        r"\documentclass{article}\usepackage{array}\begin{document}\dfrac{1}{2}\end{document}";
+    did_open(&client, &uri, 1, text);
+    let response = |id, method: &str, params: serde_json::Value| {
+        let started = std::time::Instant::now();
+        for _ in 0..8 {
+            send_request(&client, id, method, params.clone());
+            // Full upstream fixtures need a separate bounded deadline in
+            // unoptimized builds under idle CPU/IO priority. Release latency
+            // and warm IO have dedicated performance gates.
+            let deadline = std::time::Instant::now() + Duration::from_secs(30);
+            loop {
+                let message = client
+                    .receiver
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "package assistance request {id} {method} timed out after {:?}: {error}",
+                            started.elapsed()
+                        )
+                    });
+                if let Message::Response(response) = message {
+                    assert_eq!(response.id, RequestId::from(id));
+                    match response.response_result {
+                        Ok(result) => {
+                            eprintln!("package assistance request {id}: {:?}", started.elapsed());
+                            return result;
+                        }
+                        Err(error) => assert_eq!(
+                            error.code,
+                            lsp_server::ErrorCode::ContentModified as i32,
+                            "only a superseded snapshot can request a retry"
+                        ),
+                    }
+                    break;
+                }
+            }
+        }
+        panic!("package assistance request {id} {method} did not stabilize")
+    };
+    let actions = |id| {
+        let result = response(
+            id,
+            "textDocument/codeAction",
+            serde_json::json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":text.len()}},"context":{"diagnostics":[],"only":["quickfix"]}}),
+        );
+        result
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["title"].as_str().unwrap().starts_with("Load package"))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let first = actions(50);
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        first[0]["edit"]["changes"][uri.as_str()][0]["range"]["start"]["character"],
+        r"\documentclass{article}\usepackage{array}".len()
+    );
+    let before = response(
+        51,
+        "workspace/executeCommand",
+        serde_json::json!({"command":"tex-ls.inspectAcquisition","arguments":[]}),
+    );
+    assert_eq!(actions(52), first);
+    let after = response(
+        53,
+        "workspace/executeCommand",
+        serde_json::json!({"command":"tex-ls.inspectAcquisition","arguments":[]}),
+    );
+    assert_eq!(
+        before["sourceReadAttempts"], after["sourceReadAttempts"],
+        "warm proof performs no IO"
+    );
+    assert_eq!(
+        before["compilerProbeAttempts"],
+        after["compilerProbeAttempts"]
+    );
+    // A formerly missing default-size file can shadow the installed dependency.
+    let local = source_dir.join("size10.clo");
+    std::fs::write(&local, r"\def\usepackage#1{}").unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&local), FileChangeType::Created)],
+    );
+    assert!(actions(54).is_empty());
+    std::fs::remove_file(&local).unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&local), FileChangeType::Deleted)],
+    );
+    assert_eq!(actions(55), first);
+    // Changed installed sources also retire a previous identity proof.
+    let actual = installed.join("amsgen.sty");
+    let original = std::fs::read_to_string(&actual).unwrap();
+    std::fs::write(&actual, format!("{original}\n\\def\\usepackage#1{{}}")).unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&actual), FileChangeType::Changed)],
+    );
+    assert!(actions(56).is_empty());
+    std::fs::write(&actual, original).unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&actual), FileChangeType::Changed)],
+    );
+    assert_eq!(actions(57), first);
+    let original = std::fs::read_to_string(&actual).unwrap();
+    std::fs::remove_file(&actual).unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&actual), FileChangeType::Deleted)],
+    );
+    assert!(actions(58).is_empty());
+    std::fs::write(&actual, original).unwrap();
+    did_change_watched_files(
+        &client,
+        &[(path_to_file_uri(&actual), FileChangeType::Created)],
+    );
+    assert_eq!(
+        actions(59),
+        first,
+        "an installed dependency must recover after deletion and recreation"
+    );
+    shutdown(&client, server);
+}
+
+#[test]
+fn package_assistance_finishes_when_installation_index_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let (client, server) = start_server(Some(
+        serde_json::json!({"texmf":{"enabled":true,"explicitOnly":true,"useKpsewhich":false,"roots":[dir.path()]}}),
+    ));
+    let uri = path_to_file_uri(&dir.path().join("main.tex"));
+    did_open(
+        &client,
+        &uri,
+        1,
+        r"\documentclass{article}\begin{document}\dfrac{1}{2}\end{document}",
+    );
+    let mut completed = false;
+    for id in 60..68 {
+        send_request(
+            &client,
+            id,
+            "textDocument/codeAction",
+            serde_json::json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}},"context":{"diagnostics":[],"only":["quickfix"]}}),
+        );
+        let response = loop {
+            if let Message::Response(response) = recv(&client) {
+                assert_eq!(response.id, RequestId::from(id));
+                break response;
+            }
+        };
+        match response.response_result {
+            Ok(_) => {
+                completed = true;
+                break;
+            }
+            Err(error) => assert_eq!(
+                error.code,
+                lsp_server::ErrorCode::ContentModified as i32,
+                "only a superseded snapshot can request a retry"
+            ),
+        }
+    }
+    assert!(
+        completed,
+        "an empty index must eventually return an action response"
+    );
     shutdown(&client, server);
 }

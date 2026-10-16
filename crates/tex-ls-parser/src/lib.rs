@@ -47,6 +47,31 @@ macro_rules! impl_rowan_lang {
     };
 }
 
+// Both CST languages share wrapper identity; accessors and traits stay local.
+macro_rules! ast_node {
+    ($(#[$meta:meta])* $name:ident, $kind:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        pub struct $name {
+            syntax: SyntaxNode,
+        }
+
+        impl AstNode for $name {
+            fn can_cast(kind: SyntaxKind) -> bool {
+                kind == SyntaxKind::$kind
+            }
+
+            fn cast(syntax: SyntaxNode) -> Option<Self> {
+                Self::can_cast(syntax.kind()).then_some(Self { syntax })
+            }
+
+            fn syntax(&self) -> &SyntaxNode {
+                &self.syntax
+            }
+        }
+    };
+}
+
 pub mod ast;
 pub mod bib;
 pub mod declarations;

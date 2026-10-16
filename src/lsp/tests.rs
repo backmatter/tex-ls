@@ -1,4 +1,58 @@
-use super::*;
+use crate::{
+    file_discovery::collect_lint_files,
+    formatter::{FormatStyle, WrapMode},
+    incremental::IncrementalDatabase,
+    lsp::{
+        client_requests::handle_client_response,
+        event_loop::forward_outbound,
+        inverse_search::ipc_channel,
+        messages::{Outbound, WorkerJob},
+        responses,
+        settings::{DiagnosticSettings, EditorSettings},
+        state::{Document, GlobalState},
+        synchronization::{on_notification, on_watched_files_change, request_configuration},
+        worker::{DispatchAction, decide, seed_bibliographies_with},
+    },
+    text::{PositionEncoding, TextBuffer},
+};
+use crossbeam_channel::unbounded;
+use lsp_server::{Connection, ErrorCode, Message, Notification, RequestId, Response};
+use lsp_types::{DidChangeWatchedFilesParams, FileChangeType, Uri};
+use std::{
+    collections::HashMap,
+    panic::AssertUnwindSafe,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tex_ls_protocol::convert::path_to_uri;
+
+#[cfg(unix)]
+#[test]
+fn response_serialization_failure_returns_an_error_instead_of_panicking() {
+    use std::os::unix::ffi::OsStringExt;
+    let path = PathBuf::from(std::ffi::OsString::from_vec(b"/source\xff.tex".to_vec()));
+    for diagnostic in [false, true] {
+        let (out_tx, out_rx) = crossbeam_channel::unbounded();
+        let id = RequestId::from(55);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if diagnostic {
+                responses::respond_diagnostic(id.clone(), &out_tx, || path.clone());
+            } else {
+                responses::respond(id.clone(), &out_tx, || path.clone());
+            }
+        }));
+        assert!(result.is_ok(), "serialization must complete the request");
+        let Outbound::Response(response) = out_rx.try_recv().unwrap() else {
+            panic!("one response");
+        };
+        assert_eq!(response.id, id);
+        assert_eq!(
+            response.response_result.unwrap_err().code,
+            ErrorCode::InternalError as i32
+        );
+        assert!(out_rx.try_recv().is_err());
+    }
+}
 
 #[test]
 fn bibliography_seeding_publishes_external_path_alias() {
@@ -140,6 +194,7 @@ fn state_with_editor(editor: EditorSettings) -> GlobalState {
         next_request_id: 1,
         watcher_acknowledged: false,
         artifact_watches: HashMap::new(),
+        artifact_watch_counts: HashMap::new(),
         scoped_editor_settings: HashMap::new(),
         pending_configuration: HashMap::new(),
         configuration_generation: 0,
@@ -153,6 +208,293 @@ fn file_uri_in(dir: &Path) -> Uri {
     // Go through `path_to_uri` so the URI is well-formed on Windows too,
     // where `dir.display()` yields `C:\…` (backslashes, no leading slash).
     path_to_uri(&dir.join("main.tex")).expect("file uri")
+}
+
+#[test]
+fn watched_open_compiler_artifacts_invalidate_edit_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("main.tex");
+    let paths: Vec<_> = [
+        "main.aux",
+        "main.log",
+        "main.fls",
+        "generated.tex",
+        "payload.bin",
+    ]
+    .into_iter()
+    .map(|name| dir.path().join(name))
+    .collect();
+    let mut state = state_with_editor(EditorSettings::default());
+    for path in &paths {
+        state.documents.insert(
+            path_to_uri(path).unwrap(),
+            Document {
+                text: Arc::new(TextBuffer::new("Unsaved overlay", PositionEncoding::Utf16)),
+                version: 7,
+            },
+        );
+    }
+    let (connection, _client) = Connection::memory();
+    let (jobs, received) = unbounded();
+    forward_outbound(
+        &connection,
+        &connection,
+        &mut state,
+        &jobs,
+        Outbound::WatchArtifacts {
+            source,
+            paths: paths.clone(),
+        },
+    );
+    for kind in [
+        FileChangeType::Created,
+        FileChangeType::Changed,
+        FileChangeType::Deleted,
+    ] {
+        for path in &paths {
+            let captured = state.diagnostic_stamp;
+            on_watched_files_change(
+                &connection,
+                &mut state,
+                &jobs,
+                DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: path_to_uri(path).unwrap(),
+                        kind,
+                    }],
+                },
+            );
+            assert_eq!(
+                state.diagnostic_stamp,
+                captured + 1,
+                "compiler facts use backing bytes despite an open overlay: {path:?}"
+            );
+            assert!(
+                matches!(received.try_recv().unwrap(), WorkerJob::WatchedChange { path: changed, .. } if changed == *path)
+            );
+        }
+    }
+}
+
+#[test]
+fn artifact_guard_ownership_survives_shared_scope_and_retires_replacements() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("main.tex");
+    let other = dir.path().join("other.tex");
+    let shared = dir.path().join("generated.tex");
+    let retired = dir.path().join("retired.tex");
+    let mut state = state_with_editor(EditorSettings::default());
+    for path in [&shared, &retired] {
+        state.documents.insert(
+            path_to_uri(path).unwrap(),
+            Document {
+                text: Arc::new(TextBuffer::new("Unsaved", PositionEncoding::Utf16)),
+                version: 1,
+            },
+        );
+    }
+    let (connection, _client) = Connection::memory();
+    let (jobs, received) = unbounded();
+    let replace = |state: &mut GlobalState, source: PathBuf, paths| {
+        forward_outbound(
+            &connection,
+            &connection,
+            state,
+            &jobs,
+            Outbound::WatchArtifacts { source, paths },
+        );
+    };
+    let observe = |state: &mut GlobalState, path: &Path, invalidates| {
+        let captured = state.diagnostic_stamp;
+        on_watched_files_change(
+            &connection,
+            state,
+            &jobs,
+            DidChangeWatchedFilesParams {
+                changes: vec![lsp_types::FileEvent {
+                    uri: path_to_uri(path).unwrap(),
+                    kind: FileChangeType::Changed,
+                }],
+            },
+        );
+        assert_eq!(
+            state.diagnostic_stamp != captured,
+            invalidates,
+            "ownership for {path:?}"
+        );
+        received.try_recv().unwrap();
+    };
+    replace(
+        &mut state,
+        source.clone(),
+        vec![shared.clone(), retired.clone(), shared.clone()],
+    );
+    replace(&mut state, other.clone(), vec![shared.clone()]);
+    observe(&mut state, &shared, true);
+    replace(&mut state, source.clone(), vec![shared.clone()]);
+    replace(&mut state, source.clone(), vec![shared.clone()]);
+    observe(&mut state, &retired, false);
+    replace(&mut state, source, vec![]);
+    observe(&mut state, &shared, true);
+    replace(&mut state, other, vec![]);
+    observe(&mut state, &shared, false);
+    assert!(state.artifact_watches.is_empty());
+    assert!(state.artifact_watch_counts.is_empty());
+}
+
+#[test]
+fn artifact_guard_index_retires_rename_and_removed_workspace_scopes() {
+    for rename in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.tex");
+        let artifact = dir.path().join("main.aux");
+        let mut state = state_with_editor(EditorSettings::default());
+        state.workspace_roots = vec![dir.path().to_owned()];
+        let (connection, _client) = Connection::memory();
+        let (jobs, _received) = unbounded();
+        forward_outbound(
+            &connection,
+            &connection,
+            &mut state,
+            &jobs,
+            Outbound::WatchArtifacts {
+                source: source.clone(),
+                paths: vec![artifact.clone()],
+            },
+        );
+        assert_eq!(state.artifact_watch_counts.get(&artifact), Some(&1));
+        let notification = if rename {
+            Notification::new(
+                "workspace/didRenameFiles".into(),
+                serde_json::json!({"files": [{"oldUri": path_to_uri(&source).unwrap(), "newUri": path_to_uri(&dir.path().join("renamed.tex")).unwrap()}]}),
+            )
+        } else {
+            Notification::new(
+                "workspace/didChangeWorkspaceFolders".into(),
+                serde_json::json!({"event": {"added": [], "removed": [{"uri": path_to_uri(dir.path()).unwrap(), "name": "root"}]}}),
+            )
+        };
+        on_notification(&connection, &mut state, &jobs, notification);
+        assert!(state.artifact_watches.is_empty());
+        assert!(
+            state.artifact_watch_counts.is_empty(),
+            "no orphan refs after scope removal"
+        );
+    }
+}
+
+#[test]
+fn artifact_guard_index_keeps_open_source_when_workspace_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("main.tex");
+    let closed = dir.path().join("closed.tex");
+    let artifact = dir.path().join("shared.aux");
+    let mut state = state_with_editor(EditorSettings::default());
+    state.workspace_roots = vec![dir.path().to_owned()];
+    state.documents.insert(
+        path_to_uri(&source).unwrap(),
+        Document {
+            text: Arc::new(TextBuffer::new("Open", PositionEncoding::Utf16)),
+            version: 1,
+        },
+    );
+    let (connection, _client) = Connection::memory();
+    let (jobs, _received) = unbounded();
+    for owner in [&source, &closed] {
+        forward_outbound(
+            &connection,
+            &connection,
+            &mut state,
+            &jobs,
+            Outbound::WatchArtifacts {
+                source: owner.clone(),
+                paths: vec![artifact.clone()],
+            },
+        );
+    }
+    on_notification(
+        &connection,
+        &mut state,
+        &jobs,
+        Notification::new(
+            "workspace/didChangeWorkspaceFolders".into(),
+            serde_json::json!({"event": {"added": [], "removed": [{"uri": path_to_uri(dir.path()).unwrap(), "name": "root"}]}}),
+        ),
+    );
+    assert_eq!(state.artifact_watches.len(), 1);
+    assert!(state.artifact_watches.contains_key(&source));
+    assert_eq!(state.artifact_watch_counts.get(&artifact), Some(&1));
+}
+
+#[test]
+fn watched_backing_preserves_open_edit_context_and_invalidates_closed_inputs() {
+    let dir = tempfile::tempdir().unwrap();
+    let uri = file_uri_in(dir.path());
+    let mut state = state_with_editor(EditorSettings::default());
+    state.documents.insert(
+        uri.clone(),
+        Document {
+            text: Arc::new(TextBuffer::new("Unsaved overlay", PositionEncoding::Utf16)),
+            version: 7,
+        },
+    );
+    let (connection, _client) = Connection::memory();
+    let (jobs, received) = unbounded();
+    let observe = |state: &mut GlobalState, uri: Uri, kind| {
+        on_watched_files_change(
+            &connection,
+            state,
+            &jobs,
+            DidChangeWatchedFilesParams {
+                changes: vec![lsp_types::FileEvent { uri, kind }],
+            },
+        );
+    };
+    for kind in [
+        FileChangeType::Created,
+        FileChangeType::Changed,
+        FileChangeType::Deleted,
+    ] {
+        let captured = state.diagnostic_stamp;
+        observe(&mut state, uri.clone(), kind);
+        assert_eq!(
+            state.diagnostic_stamp, captured,
+            "an authoritative overlay protects pending edits"
+        );
+        assert!(
+            matches!(received.try_recv().unwrap(), WorkerJob::WatchedChange { path, deleted, .. }
+            if path == dir.path().join("main.tex") && deleted == (kind == FileChangeType::Deleted)),
+            "backing still refreshes so close can restore current disk contents"
+        );
+    }
+    for path in ["sibling.tex", "physical-alias.tex", "new.aux"] {
+        let captured = state.diagnostic_stamp;
+        observe(
+            &mut state,
+            path_to_uri(&dir.path().join(path)).unwrap(),
+            FileChangeType::Created,
+        );
+        assert_eq!(
+            state.diagnostic_stamp,
+            captured + 1,
+            "closed and alias inputs invalidate edits before refresh"
+        );
+        received.try_recv().unwrap();
+    }
+    let config = path_to_uri(&dir.path().join("tex-ls.toml")).unwrap();
+    state.documents.insert(
+        config.clone(),
+        Document {
+            text: Arc::new(TextBuffer::new("", PositionEncoding::Utf16)),
+            version: 1,
+        },
+    );
+    let captured = state.diagnostic_stamp;
+    observe(&mut state, config, FileChangeType::Changed);
+    assert!(
+        state.diagnostic_stamp > captured,
+        "disk configuration remains authoritative"
+    );
 }
 
 #[test]
@@ -575,4 +917,236 @@ fn relative_texmf_roots_are_scoped_and_ambiguous_roots_are_rejected() {
             .with_workspace_roots(&[first.path().into(), second.path().into()])
             .is_err()
     );
+}
+
+mod propagated_cancellation {
+    use super::*;
+    use salsa::Setter;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[salsa::db]
+    trait QueryDb: salsa::Database {
+        fn pause_query(&self);
+    }
+
+    #[salsa::db]
+    #[derive(Clone)]
+    struct Database {
+        storage: salsa::Storage<Self>,
+        entered: crossbeam_channel::Sender<()>,
+        release: crossbeam_channel::Receiver<()>,
+        genuine_panic: bool,
+    }
+
+    #[salsa::db]
+    impl salsa::Database for Database {}
+
+    #[salsa::db]
+    impl QueryDb for Database {
+        fn pause_query(&self) {
+            self.entered.send(()).unwrap();
+            self.release.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(!self.genuine_panic, "fixture query panic");
+        }
+    }
+
+    #[salsa::input]
+    struct Input {
+        value: u32,
+    }
+
+    #[salsa::tracked]
+    fn query(db: &dyn QueryDb, input: Input) -> u32 {
+        let value = *input.value(db);
+        db.pause_query();
+        db.unwind_if_revision_cancelled();
+        value
+    }
+
+    fn observe_propagation(db: &Database, input: Input, observed: &AtomicBool) -> u32 {
+        let payload = std::panic::catch_unwind(AssertUnwindSafe(|| query(db, input)))
+            .expect_err("the waiting query must fail with the producer");
+        observed.store(
+            matches!(
+                payload.downcast_ref::<salsa::Cancelled>(),
+                Some(salsa::Cancelled::PropagatedPanic)
+            ),
+            Ordering::Relaxed,
+        );
+        std::panic::resume_unwind(payload)
+    }
+
+    struct QueryResponse<'a> {
+        db: &'a Database,
+        input: Input,
+        observed: &'a AtomicBool,
+    }
+
+    impl serde::Serialize for QueryResponse<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_u32(observe_propagation(self.db, self.input, self.observed))
+        }
+    }
+
+    fn response_after_query_failure(
+        pending_write: bool,
+        diagnostic: bool,
+        during_serialization: bool,
+    ) -> (Response, usize) {
+        let (entered_tx, entered_rx) = crossbeam_channel::unbounded();
+        let (release_tx, release_rx) = crossbeam_channel::unbounded();
+        let (blocked_tx, blocked_rx) = crossbeam_channel::unbounded();
+        let (cancelled_tx, cancelled_rx) = crossbeam_channel::unbounded();
+        let mut db = Database {
+            storage: salsa::Storage::new(Some(Box::new(move |event| match event.kind {
+                salsa::EventKind::WillBlockOn { .. } => {
+                    blocked_tx.send(()).unwrap();
+                }
+                salsa::EventKind::DidSetCancellationFlag => {
+                    let _ = cancelled_tx.send(());
+                }
+                _ => {}
+            }))),
+            entered: entered_tx,
+            release: release_rx,
+            genuine_panic: !pending_write,
+        };
+        let input = Input::new(&db, 1);
+        let owner_db = db.clone();
+        let owner = std::thread::spawn(move || {
+            std::panic::catch_unwind(AssertUnwindSafe(|| query(&owner_db, input)))
+                .expect_err("the query owner must cancel or panic")
+        });
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+        let waiter_db = db.clone();
+        let observed = Arc::new(AtomicBool::new(false));
+        let checks = Arc::new(AtomicUsize::new(0));
+        let waiter_observed = observed.clone();
+        let waiter_checks = checks.clone();
+        let (out_tx, out_rx) = crossbeam_channel::unbounded();
+        let id = RequestId::from(700);
+        let request_id = id.clone();
+        let waiter = std::thread::spawn(move || {
+            let check = || {
+                waiter_checks.fetch_add(1, Ordering::Relaxed);
+                salsa::Database::unwind_if_revision_cancelled(&waiter_db);
+            };
+            if during_serialization {
+                let compute = || QueryResponse {
+                    db: &waiter_db,
+                    input,
+                    observed: &waiter_observed,
+                };
+                if diagnostic {
+                    responses::respond_diagnostic_with_cancellation_check(
+                        request_id, &out_tx, check, compute,
+                    );
+                } else {
+                    responses::respond_with_cancellation_check(request_id, &out_tx, check, compute);
+                }
+            } else {
+                let compute = || observe_propagation(&waiter_db, input, &waiter_observed);
+                if diagnostic {
+                    responses::respond_diagnostic_with_cancellation_check(
+                        request_id, &out_tx, check, compute,
+                    );
+                } else {
+                    responses::respond_with_cancellation_check(request_id, &out_tx, check, compute);
+                }
+            }
+        });
+        blocked_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        let writer = if pending_write {
+            Some(std::thread::spawn(move || {
+                input.set_value(&mut db).to(2);
+            }))
+        } else {
+            drop(db);
+            None
+        };
+        if pending_write {
+            cancelled_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+        release_tx.send(()).unwrap();
+        let owner_payload = owner.join().unwrap();
+        waiter.join().unwrap();
+        if let Some(writer) = writer {
+            writer.join().unwrap();
+        }
+        // Check semantic/race premises after all handles retire, so a failing
+        // response assertion never strands a writer waiting on its snapshots.
+        if pending_write {
+            assert!(matches!(
+                owner_payload.downcast_ref::<salsa::Cancelled>(),
+                Some(salsa::Cancelled::PendingWrite)
+            ));
+        } else {
+            assert_eq!(
+                owner_payload
+                    .downcast_ref::<&'static str>()
+                    .copied()
+                    .or_else(|| owner_payload.downcast_ref::<String>().map(String::as_str)),
+                Some("fixture query panic")
+            );
+        }
+        assert!(
+            observed.load(Ordering::Relaxed),
+            "the waiter must observe actual propagated cancellation"
+        );
+        let Outbound::Response(response) = out_rx.try_recv().unwrap() else {
+            panic!("one response");
+        };
+        assert_eq!(response.id, id);
+        assert!(out_rx.try_recv().is_err(), "one terminal response");
+        (response, checks.load(Ordering::Relaxed))
+    }
+
+    #[test]
+    fn propagated_write_cancellation_requests_diagnostic_retry() {
+        let (response, checks) = response_after_query_failure(true, true, false);
+        let error = response.response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::ServerCancelled as i32);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"retriggerRequest": true}))
+        );
+        assert_eq!(checks, 1);
+    }
+
+    #[test]
+    fn propagated_write_cancellation_invalidates_regular_reads() {
+        let (response, checks) = response_after_query_failure(true, false, false);
+        let error = response.response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::ContentModified as i32);
+        assert!(error.data.is_none());
+        assert_eq!(checks, 1);
+    }
+
+    #[test]
+    fn propagated_write_cancellation_during_serialization_requests_retry() {
+        let (response, checks) = response_after_query_failure(true, true, true);
+        let error = response.response_result.unwrap_err();
+        assert_eq!(error.code, ErrorCode::ServerCancelled as i32);
+        assert_eq!(
+            error.data,
+            Some(serde_json::json!({"retriggerRequest": true}))
+        );
+        assert_eq!(checks, 1);
+    }
+
+    #[test]
+    fn propagated_genuine_query_panic_remains_an_internal_error() {
+        for diagnostic in [false, true] {
+            for during_serialization in [false, true] {
+                let (response, checks) =
+                    response_after_query_failure(false, diagnostic, during_serialization);
+                let error = response.response_result.unwrap_err();
+                assert_eq!(error.code, ErrorCode::InternalError as i32);
+                assert!(error.data.is_none());
+                assert_eq!(checks, 1);
+            }
+        }
+    }
 }

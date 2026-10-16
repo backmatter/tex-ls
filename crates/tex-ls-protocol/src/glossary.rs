@@ -1,5 +1,18 @@
 //! One glossary/acronym identity shared by navigation, hover and edit operations.
-use super::*;
+use crate::{
+    context::namespace_of,
+    convert::locations_for_ranges,
+    workspace_edits::{finalize_rename, is_valid_key},
+};
+use lsp_types::{Location, WorkspaceEdit};
+use rowan::{TextRange, TextSize};
+use smol_str::SmolStr;
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
+use tex_ls_analysis::{incremental::Analysis, name_refs, text::PositionEncoding};
+use tex_ls_parser::semantic::SemanticModel;
 
 pub fn target(model: &SemanticModel, offset: usize) -> Option<(SmolStr, TextRange)> {
     let at = TextSize::new(offset as u32);
@@ -104,14 +117,18 @@ pub fn rename(
         return None;
     }
     let sites = occurrences(snapshot, path, key);
-    let locations: Option<Vec<_>> = locations_for_ranges(
-        snapshot,
-        sites
-            .iter()
-            .map(|(path, range, _)| (path.as_path(), *range)),
-        enc,
-    )
-    .into_iter()
-    .collect();
-    finalize_rename(edits_for_locations(locations?, new_name))
+    let sites = sites
+        .into_iter()
+        .map(
+            |(path, range, definition)| tex_ls_analysis::navigation::KeyOccurrence {
+                path,
+                range,
+                key_range: range,
+                definition,
+            },
+        )
+        .collect();
+    finalize_rename(crate::workspace_edits::occurrence_edits(
+        snapshot, sites, new_name, enc,
+    ))
 }

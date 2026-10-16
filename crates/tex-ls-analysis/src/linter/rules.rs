@@ -363,7 +363,7 @@ pub(crate) fn in_reference_position(command: &SyntaxNode) -> bool {
 /// identifier keys like `\label{eq:thing_max}` and `\cite{smith2020-1}` out of
 /// scope. *All* argument groups of such a
 /// command are skipped, not just the key slot: argument attachment is greedy
-/// (arity is unknown at parse time, AGENTS.md decision #8), so index mapping is
+/// (arity is unknown at parse time), so index mapping is
 /// unreliable, and a false negative beats flagging a key.
 ///
 /// The lookup goes through [`SemanticModel::is_key_argument_command`] rather than
@@ -395,7 +395,7 @@ fn is_code_argument_command(name: &str) -> bool {
 /// The prose rules (`straight-quotes`, …) use this to stay off Lua string literals
 /// like `require("lfs")`, which are code, not quotation. Same greedy-attachment
 /// caveat as [`in_key_argument`]: *all* argument groups are skipped, since arity is
-/// unknown at parse time (AGENTS.md decision #8) and a false negative is preferred.
+/// unknown at parse time and a false negative is preferred.
 pub(crate) fn in_code_argument(tok: &crate::syntax::SyntaxToken) -> bool {
     tok.parent_ancestors().any(|node| {
         matches!(node.kind(), SyntaxKind::GROUP | SyntaxKind::OPTIONAL)
@@ -422,8 +422,8 @@ fn is_pdfmap_command(name: &str) -> bool {
 /// ([`is_pdfmap_command`]) — a `\pdfmapline` map entry, which is font-map data, not
 /// prose. `straight-quotes` uses this to stay off the `"` PostScript-transform
 /// delimiters there. Same greedy-attachment posture as [`in_key_argument`]: *all*
-/// argument groups are skipped, since arity is unknown at parse time (AGENTS.md
-/// decision #8) and a false negative is preferred.
+/// argument groups are skipped, since arity is unknown at parse time
+/// and a false negative is preferred.
 pub(crate) fn in_pdfmap_argument(tok: &crate::syntax::SyntaxToken) -> bool {
     tok.parent_ancestors().any(|node| {
         matches!(node.kind(), SyntaxKind::GROUP | SyntaxKind::OPTIONAL)
@@ -542,7 +542,7 @@ pub(crate) fn in_foreach_range(tok: &crate::syntax::SyntaxToken) -> bool {
 /// argument node:
 ///
 /// - *Attached:* the `GROUP`/`OPTIONAL`'s parent is a rule `COMMAND`
-///   (`\cline{1-3}`, `\cmidrule[0.5pt]{4-5}` — greedy attachment, decision #8).
+///   (`\cline{1-3}`, `\cmidrule[0.5pt]{4-5}` — greedy attachment).
 /// - *Detached:* a `\cmidrule(lr){2-3}` paren trim breaks greedy attachment, so
 ///   the span `GROUP` is a *sibling* of the command. Walk previous non-whitespace
 ///   siblings past at most one paren-trim `WORD`
@@ -654,7 +654,7 @@ fn is_pgfmath_expression_command(name: &str) -> bool {
 /// ([`is_pgfmath_expression_command`]). The argument group is either the command's
 /// direct child (`\pgfmathparse{y-1}`) or a *detached* sibling separated by a
 /// numeric-variant `WORD` (`\addplot3 {(y^2-1)^2}` — the `3` breaks greedy
-/// attachment, decision #8), mirroring the detached shape [`in_rule_span_argument`]
+/// attachment), mirroring the detached shape [`in_rule_span_argument`]
 /// handles for `\cmidrule(lr){2-3}`. `dash-length` uses this to stay off pgfmath
 /// subtraction, whose en-dash rewrite would corrupt a tex-ls-bearing minus.
 pub(crate) fn in_pgfmath_argument(tok: &crate::syntax::SyntaxToken) -> bool {

@@ -1,4 +1,111 @@
-use super::*;
+use crate::{
+    lsp::{
+        DynError,
+        capabilities::{
+            client_diagnostic_support, client_show_document_support, client_watched_files_support,
+        },
+        client_requests::handle_client_response,
+        inverse_search::{ipc_channel, on_inverse_search},
+        loading,
+        messages::{Outbound, WorkerJob},
+        refresh, request_ids,
+        requests::{
+            on_code_action, on_colors, on_completion, on_completion_resolve,
+            on_document_diagnostic, on_document_highlight, on_document_link, on_document_symbol,
+            on_execute_command, on_folding_range, on_formatting, on_goto_definition, on_hover,
+            on_inlay_hints, on_linked_editing, on_prepare_rename, on_range_formatting,
+            on_references, on_rename, on_selection_range, on_semantic_tokens, on_signature_help,
+            on_type_formatting, on_workspace_symbol, relint_all_open,
+        },
+        responses::{respond_unhandled, send_diagnostics},
+        settings::{EditorSettings, publish_declarations_for_request},
+        state::GlobalState,
+        synchronization::{
+            on_notification, on_watched_files_change, register_file_watchers, request_configuration,
+        },
+        task_pool::{TaskPool, read_pool_size},
+        watching,
+        worker::spawn_worker,
+    },
+    text::PositionEncoding,
+};
+use crossbeam_channel::{Sender, select, unbounded};
+use lsp_server::{Connection, ErrorCode, Message, Notification, RequestId, Response};
+use lsp_types::{
+    CodeActionRequest, CompletionRequest, CompletionResolveRequest, DefinitionRequest,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentDiagnosticRequest, DocumentFormattingRequest, DocumentHighlightRequest,
+    DocumentLinkRequest, DocumentOnTypeFormattingRequest, DocumentRangeFormattingRequest,
+    DocumentSymbolRequest, ExecuteCommandRequest, FoldingRangeRequest, HoverRequest,
+    PrepareRenameRequest, ReferencesRequest, RenameRequest, Request as _, SelectionRangeRequest,
+    SignatureHelpRequest, Uri, WorkspaceSymbolRequest,
+};
+use std::{collections::HashMap, path::Path, sync::Arc};
+use tex_ls_protocol::{
+    convert::{path_to_uri, uri_to_fs_path},
+    projects::workspace_roots,
+};
+
+#[derive(Default)]
+struct TokenDocumentLifetimes {
+    next: u64,
+    open: HashMap<String, u64>,
+}
+impl TokenDocumentLifetimes {
+    fn observe(&mut self, method: &str, uri: &str) {
+        match method {
+            "textDocument/didOpen" => {
+                self.next += 1;
+                self.open.insert(uri.into(), self.next);
+            }
+            "textDocument/didClose" => {
+                self.open.remove(uri);
+            }
+            _ => {}
+        }
+    }
+    fn capture(&self, uri: &str) -> Option<u64> {
+        self.open.get(uri).copied()
+    }
+    fn reset_uris(
+        &mut self,
+        uris: impl IntoIterator<Item = String>,
+        is_open: impl Fn(&str) -> bool,
+        store: &mut tex_ls_protocol::semantic_token_store::SemanticTokenStore,
+    ) {
+        let affected: std::collections::BTreeSet<_> = uris.into_iter().collect();
+        for uri in &affected {
+            self.open.remove(uri);
+            store.forget(uri);
+        }
+        for uri in affected {
+            if is_open(&uri) {
+                self.observe("textDocument/didOpen", &uri);
+            }
+        }
+    }
+    fn response(
+        &self,
+        store: &mut tex_ls_protocol::semantic_token_store::SemanticTokenStore,
+        method: &str,
+        uri: &str,
+        captured: Option<u64>,
+        previous: Option<&str>,
+        result: &mut serde_json::Value,
+    ) {
+        if !matches!(
+            method,
+            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/full/delta"
+        ) {
+            return;
+        }
+        if captured.is_some() && self.capture(uri) == captured {
+            store.response(method, uri, previous, result);
+        } else if self.capture(uri).is_none() {
+            store.forget(uri);
+        }
+    }
+}
 
 struct EditContext {
     stamp: u64,
@@ -28,6 +135,8 @@ pub(super) fn main_loop(
     };
     let policy = tex_ls_protocol::ResponsePolicy::new(&init_params);
     let mut response_contexts = HashMap::new();
+    let mut semantic_tokens = tex_ls_protocol::semantic_token_store::SemanticTokenStore::default();
+    let mut token_lifetimes = TokenDocumentLifetimes::default();
     let mut exited_without_shutdown = false;
     let mut lifecycle = tex_ls_protocol::lifecycle::Lifecycle::default();
     lifecycle
@@ -71,6 +180,7 @@ pub(super) fn main_loop(
         next_request_id: 1,
         watcher_acknowledged: false,
         artifact_watches: HashMap::new(),
+        artifact_watch_counts: HashMap::new(),
         scoped_editor_settings: HashMap::new(),
         pending_configuration: HashMap::new(),
         configuration_generation: 0,
@@ -112,47 +222,48 @@ pub(super) fn main_loop(
     let mut loading = loading::LoadingProgress::new(policy.supports("/window/workDoneProgress"));
     let progress_tick = crossbeam_channel::tick(std::time::Duration::from_millis(100));
     loop {
-        let roots = if state.workspace_roots.is_empty() {
-            state
-                .documents
-                .keys()
-                .filter_map(uri_to_fs_path)
-                .filter_map(|path| path.parent().map(Path::to_path_buf))
-                .collect()
-        } else {
-            state.workspace_roots.clone()
-        };
-        // Client acknowledgement does not guarantee events for editor-excluded
-        // build directories. Explicit artifact candidates always remain native-owned.
-        let artifacts = state.artifact_watches.values().flatten().cloned().collect();
-        watcher.update(
-            if state.watcher_acknowledged {
-                Vec::new()
+        if lifecycle.require_running().is_ok() {
+            let inferred_roots = state.workspace_roots.is_empty();
+            let roots = if inferred_roots {
+                state
+                    .documents
+                    .keys()
+                    .filter_map(uri_to_fs_path)
+                    .filter_map(|path| path.parent().map(Path::to_path_buf))
+                    .collect()
             } else {
-                roots
-            },
-            artifacts,
-        );
-        for message in state.config_messages.drain(..) {
-            let _ = connection
-                .sender
-                .send(Message::Notification(Notification::new(
-                    "window/showMessage".to_owned(),
-                    serde_json::json!({"type": 1, "message": message}),
-                )));
+                state.workspace_roots.clone()
+            };
+            // Client acknowledgement does not guarantee events for editor-excluded
+            // build directories. Explicit artifact candidates always remain native-owned.
+            let artifacts = state.artifact_watches.values().flatten().cloned().collect();
+            if state.watcher_acknowledged {
+                watcher.update(Vec::new(), artifacts);
+            } else if inferred_roots {
+                watcher.update_inferred(roots, artifacts);
+            } else {
+                watcher.update(roots, artifacts);
+            }
+            for message in state.config_messages.drain(..) {
+                let _ = connection
+                    .sender
+                    .send(Message::Notification(Notification::new(
+                        "window/showMessage".to_owned(),
+                        serde_json::json!({"type": 1, "message": message}),
+                    )));
+            }
+        } else {
+            watcher.update(Vec::new(), Vec::new());
         }
         select! {
             recv(progress_tick) -> _ => {
-                loading.poll(&transport);
                 if lifecycle.require_running().is_ok() {
+                    loading.poll(&transport);
                     state.refreshes.flush(&connection, &mut state.next_request_id);
                 }
             },
             recv(watcher.events) -> events => {
-                if let Ok(changes) = events {
-                    // Queued transition events are harmless: backing replacement
-                    // compares source revisions and preserves editor overlays.
-                    state.diagnostic_stamp += 1;
+                if lifecycle.require_running().is_ok() && let Ok(changes) = events {
                     on_watched_files_change(&connection, &mut state, &job_tx, DidChangeWatchedFilesParams { changes });
                 }
             }
@@ -160,6 +271,10 @@ pub(super) fn main_loop(
                 let Ok(msg) = msg else { break };
                 match msg {
                     Message::Request(mut req) => {
+                        if lifecycle.require_running().is_err() {
+                            let _ = transport.send(Message::Response(Response::new_err(req.id, ErrorCode::InvalidRequest as i32, "Session is shutting down".into())));
+                            continue;
+                        }
                         if let Some(uri) = req.params.pointer("/textDocument/uri").and_then(|value| serde_json::from_value::<Uri>(value.clone()).ok()).and_then(|uri| uri_to_fs_path(&uri)) { state.active_path = Some(uri); }
                         let Some(internal) = requests.lock().expect("request ledger").receive(req.id.clone()) else {
                             // Duplicate active wire IDs cannot identify two responses. Keep
@@ -167,17 +282,19 @@ pub(super) fn main_loop(
                             log::warn!("Ignoring duplicate active request ID {}", req.id);
                             continue;
                         };
-                        response_contexts.insert(internal.clone(), (req.method.clone(), req.params.pointer("/textDocument/uri").cloned()));
+                        let response_uri = req.params.pointer("/textDocument/uri").cloned();
+                        let token_lifetime = response_uri.as_ref().and_then(serde_json::Value::as_str).and_then(|uri| token_lifetimes.capture(uri));
+                        response_contexts.insert(internal.clone(), (req.method.clone(), response_uri, req.params.get("previousResultId").and_then(serde_json::Value::as_str).map(str::to_owned), token_lifetime));
                         req.id = internal;
-                        if lifecycle.require_running().is_err() {
-                            let _ = connection.sender.send(Message::Response(Response::new_err(req.id, ErrorCode::InvalidRequest as i32, "Session is shutting down".into())));
-                            continue;
-                        }
                         if req.method == "shutdown" {
                             lifecycle.shutdown().expect("running session");
                             let original = requests.lock().expect("request ledger").complete(&req.id).expect("shutdown request");
                             edit_contexts.clear();
                             response_contexts.clear();
+                            semantic_tokens.clear();
+                            server_requests.clear();
+                            state.pending_configuration.clear();
+                            state.config_messages.clear();
                             for id in requests.lock().expect("request ledger").drain() {
                                 edit_contexts.remove(&id);
                                 let _ = transport.send(Message::Response(Response::new_err(id, ErrorCode::RequestCanceled as i32, "Session is shutting down".into())));
@@ -200,7 +317,7 @@ pub(super) fn main_loop(
                                     let _ = connection.sender.send(Message::Response(Response::new_err(req.id, ErrorCode::InvalidParams as i32, "Invalid rename files".into())));
                                 }
                             }
-                            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/range" => on_semantic_tokens(&connection, &state, &job_tx, req),
+                            "textDocument/semanticTokens/full" | "textDocument/semanticTokens/full/delta" | "textDocument/semanticTokens/range" => on_semantic_tokens(&connection, &state, &job_tx, req),
                             "textDocument/linkedEditingRange" => on_linked_editing(&connection, &state, &job_tx, req),
                             method if method == DocumentFormattingRequest::METHOD.as_str() => {
                                 on_formatting(&connection, &mut state, &job_tx, req)
@@ -292,19 +409,29 @@ pub(super) fn main_loop(
                             continue;
                         }
                         if lifecycle.require_running().is_err() { continue; }
-                        if matches!(not.method.as_str(), "textDocument/didOpen" | "textDocument/didChange" | "textDocument/didClose" | "workspace/didChangeConfiguration" | "workspace/didChangeWatchedFiles" | "workspace/didChangeWorkspaceFolders" | "workspace/didRenameFiles") {
+                        if matches!(not.method.as_str(), "textDocument/didOpen" | "textDocument/didChange" | "textDocument/didClose" | "workspace/didChangeConfiguration" | "workspace/didChangeWorkspaceFolders" | "workspace/didRenameFiles") {
                             state.diagnostic_stamp += 1;
                         }
                         let folders_changed = not.method == "workspace/didChangeWorkspaceFolders";
+                        let token_uris = match not.method.as_str() {
+                            "textDocument/didOpen" => serde_json::from_value::<DidOpenTextDocumentParams>(not.params.clone()).ok().map(|params| vec![params.text_document.uri.as_str().to_owned()]),
+                            "textDocument/didClose" => serde_json::from_value::<DidCloseTextDocumentParams>(not.params.clone()).ok().map(|params| vec![params.text_document.uri.as_str().to_owned()]),
+                            "workspace/didRenameFiles" => tex_ls_protocol::file_operations::decode_files(&not.params).map(|files| files.into_iter().flat_map(|(old,new)| [path_to_uri(&old),path_to_uri(&new)]).flatten().map(|uri| uri.as_str().to_owned()).collect()),
+                            _ => None,
+                        };
                         let refresh_configuration = not.method == "workspace/didChangeConfiguration" && policy.supports("/workspace/configuration");
                         if refresh_configuration {
                             request_configuration(&connection, &mut state);
                         } else {
                             on_notification(&client_connection, &mut state, &job_tx, not);
+                            if let Some(uris) = token_uris {
+                                token_lifetimes.reset_uris(uris, |uri| uri.parse::<Uri>().is_ok_and(|uri| state.documents.contains_key(&uri)), &mut semantic_tokens);
+                            }
                             if folders_changed && policy.supports("/workspace/configuration") { request_configuration(&connection, &mut state); }
                         }
                     }
                     Message::Response(response) => {
+                        if lifecycle.require_running().is_err() { continue; }
                         if loading.response(&response, &transport) { continue; }
                         let Some(method) = server_requests.remove(&response.id) else { continue; };
                         handle_client_response(&connection, &mut state, &job_tx, &method, response);
@@ -313,6 +440,7 @@ pub(super) fn main_loop(
             }
             recv(response_rx) -> message => {
                 if let Ok(mut message) = message {
+                    if lifecycle.require_running().is_err() { continue; }
                     if let Message::Response(response) = &mut message {
                         let Some(original) = requests.lock().expect("request ledger").complete(&response.id) else { continue };
                         if let Some(EditContext { stamp, versions, .. }) = edit_contexts.remove(&response.id) {
@@ -322,9 +450,13 @@ pub(super) fn main_loop(
                                 tex_ls_protocol::workspace_edits::attach_versions(result, &versions);
                             }
                         }
-                        if let Some((method, uri)) = response_contexts.remove(&response.id)
+                        if let Some((method, uri, previous, token_lifetime)) = response_contexts.remove(&response.id)
                             && let Ok(result) = &mut response.response_result {
                             policy.response(&method, uri.as_ref(), result);
+                            if policy.supports("/textDocument/semanticTokens/requests/full/delta") && let Some(uri) = uri.as_ref().and_then(serde_json::Value::as_str) {
+                                if uri.parse::<Uri>().is_ok_and(|uri| state.documents.contains_key(&uri)) { token_lifetimes.response(&mut semantic_tokens, &method, uri, token_lifetime, previous.as_deref(), result); }
+                                else { semantic_tokens.forget(uri); }
+                            }
                         }
                         response.id = original;
                     }
@@ -338,6 +470,7 @@ pub(super) fn main_loop(
             }
             recv(out_rx) -> outbound => {
                 let Ok(outbound) = outbound else { continue };
+                if lifecycle.require_running().is_err() { continue; }
                 if let Outbound::ReadStarted { id } = outbound {
                     if let Some(EditContext { stamp, discovery, versions }) = edit_contexts.get_mut(&id)
                         && only_discovery_advanced(*stamp, *discovery, state.diagnostic_stamp, state.discovery_stamp)
@@ -359,10 +492,17 @@ pub(super) fn main_loop(
             }
             recv(ipc_rx) -> msg => {
                 let Ok(msg) = msg else { continue };
+                if lifecycle.require_running().is_err() {
+                    msg.responder.reject("Session is shutting down");
+                    continue;
+                }
                 on_inverse_search(&connection, &mut state, msg);
             }
         }
     }
+
+    // Stop filesystem polling before waiting for the other session workers.
+    drop(watcher);
 
     // The accept thread is parked in a blocking `accept`, which dropping a
     // channel cannot wake, and `serve` runs *in-process* in the LSP test binary —
@@ -396,7 +536,7 @@ pub(super) fn forward_outbound(
     match outbound {
         Outbound::Refresh(feature) => state.refreshes.invalidate(feature),
         Outbound::WatchArtifacts { source, paths } => {
-            state.artifact_watches.insert(source, paths);
+            state.replace_artifact_watches(source, paths);
         }
         Outbound::WorkspaceDiagnosticSettings(request) => {
             let settings = request
@@ -473,5 +613,163 @@ mod admission_tests {
         assert!(!only_discovery_advanced(5, 2, 8, 4));
         assert!(!only_discovery_advanced(5, 2, 6, 2));
         assert!(only_discovery_advanced(5, 2, 5, 2));
+    }
+}
+
+#[cfg(test)]
+mod token_lifetime_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn renamed_swapped_and_overwritten_documents_receive_fresh_token_lifetimes() {
+        let a = "file:///a.tex";
+        let b = "file:///b.tex";
+        for final_open in [vec![b], vec![a, b]] {
+            let mut lifetimes = TokenDocumentLifetimes::default();
+            let mut store = tex_ls_protocol::semantic_token_store::SemanticTokenStore::default();
+            lifetimes.observe("textDocument/didOpen", a);
+            lifetimes.observe("textDocument/didOpen", b);
+            let old_a = lifetimes.capture(a);
+            let old_b = lifetimes.capture(b);
+            let mut full = json!({"data":[0,0,1,0,0]});
+            lifetimes.response(
+                &mut store,
+                "textDocument/semanticTokens/full",
+                b,
+                old_b,
+                None,
+                &mut full,
+            );
+            let previous = full["resultId"].as_str().unwrap().to_owned();
+            lifetimes.reset_uris(
+                [a.into(), b.into(), b.into()],
+                |uri| final_open.contains(&uri),
+                &mut store,
+            );
+            assert_ne!(lifetimes.capture(b), old_b);
+            assert_eq!(lifetimes.capture(a).is_some(), final_open.contains(&a));
+            for (uri, captured) in [(a, old_a), (b, old_b)] {
+                let mut late = json!({"data":[0,0,1,0,0]});
+                lifetimes.response(
+                    &mut store,
+                    "textDocument/semanticTokens/full",
+                    uri,
+                    captured,
+                    None,
+                    &mut late,
+                );
+                assert!(late.get("resultId").is_none());
+            }
+            let mut fresh = json!({"data":[0,0,1,0,0]});
+            lifetimes.response(
+                &mut store,
+                "textDocument/semanticTokens/full/delta",
+                b,
+                lifetimes.capture(b),
+                Some(&previous),
+                &mut fresh,
+            );
+            assert!(fresh.get("data").is_some());
+            let id = fresh["resultId"].as_str().unwrap().to_owned();
+            let mut late = json!({"data":[0,0,1,0,0]});
+            lifetimes.response(
+                &mut store,
+                "textDocument/semanticTokens/full",
+                b,
+                old_b,
+                None,
+                &mut late,
+            );
+            let mut next = json!({"data":[0,0,1,0,0]});
+            lifetimes.response(
+                &mut store,
+                "textDocument/semanticTokens/full/delta",
+                b,
+                lifetimes.capture(b),
+                Some(&id),
+                &mut next,
+            );
+            assert_eq!(next["edits"], json!([]));
+        }
+    }
+
+    #[test]
+    fn closed_affected_uris_do_not_create_phantom_open_lifetimes() {
+        let mut lifetimes = TokenDocumentLifetimes::default();
+        let mut store = tex_ls_protocol::semantic_token_store::SemanticTokenStore::default();
+        lifetimes.reset_uris(["file:///closed.tex".into()], |_| false, &mut store);
+        assert!(lifetimes.capture("file:///closed.tex").is_none());
+    }
+    #[test]
+    fn delayed_tokens_do_not_restore_closed_or_reopened_baselines() {
+        let mut lifetimes = TokenDocumentLifetimes::default();
+        let mut store = tex_ls_protocol::semantic_token_store::SemanticTokenStore::default();
+        let uri = "file:///tokens.tex";
+        lifetimes.observe("textDocument/didOpen", uri);
+        let old = lifetimes.capture(uri);
+        let mut full = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full",
+            uri,
+            old,
+            None,
+            &mut full,
+        );
+        let old_id = full["resultId"].as_str().unwrap().to_owned();
+        lifetimes.observe("textDocument/didClose", uri);
+        store.forget(uri);
+        let mut late = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full",
+            uri,
+            old,
+            None,
+            &mut late,
+        );
+        assert!(late.get("resultId").is_none());
+        lifetimes.observe("textDocument/didOpen", uri);
+        let mut late_reopened = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full",
+            uri,
+            old,
+            None,
+            &mut late_reopened,
+        );
+        assert!(late_reopened.get("resultId").is_none());
+        let mut fresh = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full/delta",
+            uri,
+            lifetimes.capture(uri),
+            Some(&old_id),
+            &mut fresh,
+        );
+        assert!(fresh.get("data").is_some());
+        assert!(fresh.get("resultId").is_some());
+        let fresh_id = fresh["resultId"].as_str().unwrap().to_owned();
+        let mut retired = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full",
+            uri,
+            old,
+            None,
+            &mut retired,
+        );
+        let mut next = json!({"data":[0,0,1,0,0]});
+        lifetimes.response(
+            &mut store,
+            "textDocument/semanticTokens/full/delta",
+            uri,
+            lifetimes.capture(uri),
+            Some(&fresh_id),
+            &mut next,
+        );
+        assert_eq!(next["edits"], json!([]));
     }
 }

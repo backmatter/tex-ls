@@ -7,10 +7,8 @@
 //! directive-shaped `.dtx` prose requires knowing which construct or boundary
 //! the author intended.
 
-use std::path::PathBuf;
-
-use crate::directives::DirectiveOutcome;
 use crate::linter::diagnostic::Diagnostic;
+use crate::linter::suppression_meta::{self, Carrier};
 
 use super::{Example, Rule, RuleContext};
 
@@ -39,39 +37,9 @@ impl Rule for InertSuppression {
     }
 
     fn check_file(&self, ctx: &RuleContext<'_>, sink: &mut Vec<Diagnostic>) {
-        for located in ctx
-            .suppressions
-            .directives()
-            .iter()
-            .filter(|located| located.outcome != DirectiveOutcome::Honored)
-        {
-            let message = match located.outcome {
-                DirectiveOutcome::Honored => continue,
-                DirectiveOutcome::DanglingSkip => {
-                    "`skip` has no following construct, so this directive does nothing"
-                }
-                DirectiveOutcome::UnmatchedOn => {
-                    "`on` has no matching `off`, so this directive closes no region"
-                }
-                DirectiveOutcome::UnclosedOff => {
-                    "`off` reaches the end of the file without a matching `on`"
-                }
-                DirectiveOutcome::Unsupported => {
-                    "this directive is on a `.dtx` documentation line, where `%` is \
-                     typeset prose rather than a comment"
-                }
-            };
-            sink.push(Diagnostic {
-                rule: self.id(),
-                severity: self.default_severity(),
-                path: PathBuf::new(),
-                start: usize::from(located.range.start()),
-                end: usize::from(located.range.end()),
-                message: message.to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-        }
+        sink.extend(ctx.suppressions.directives().iter().filter_map(|located| {
+            suppression_meta::inert(located, Carrier::Latex, self.default_severity())
+        }));
     }
 }
 

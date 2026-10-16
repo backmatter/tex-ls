@@ -3,7 +3,7 @@ use crate::bib::{
     ast,
     syntax::{SyntaxKind as Kind, SyntaxNode as Node},
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use unicode_normalization::UnicodeNormalization;
 
 const MONTHS: &[(&str, &str)] = &[
@@ -22,14 +22,73 @@ const MONTHS: &[(&str, &str)] = &[
 ];
 const LIMIT: usize = 65_536;
 
-struct Expansion<'a> {
-    root: &'a Node,
+struct Expansion {
+    entries: rowan::SyntaxNodeChildren<crate::bib::syntax::BibLang>,
+    definitions: HashMap<String, Option<Node>>,
+    remaining_roots: Vec<Node>,
+    ambiguous: HashSet<String>,
     visiting: HashSet<String>,
     steps: usize,
+    #[cfg(test)]
+    scanned_entries: usize,
+    #[cfg(test)]
+    source_copied_bytes: usize,
 }
-impl Expansion<'_> {
+impl Expansion {
+    fn new(root: &Node) -> Self {
+        Self {
+            entries: root.children(),
+            definitions: HashMap::new(),
+            remaining_roots: Vec::new(),
+            ambiguous: HashSet::new(),
+            visiting: HashSet::new(),
+            steps: 0,
+            #[cfg(test)]
+            scanned_entries: 0,
+            #[cfg(test)]
+            source_copied_bytes: 0,
+        }
+    }
+
+    fn definition(&mut self, key: &str) -> Option<Node> {
+        if let Some(value) = self.definitions.get(key) {
+            return value.clone();
+        }
+        // Scan only the unexplored suffix. Keeping the first definition also
+        // preserves the behavior of malformed or duplicate string declarations.
+        loop {
+            for node in self.entries.by_ref() {
+                #[cfg(test)]
+                {
+                    self.scanned_entries += 1;
+                }
+                if node.kind() != Kind::STRING_ENTRY {
+                    continue;
+                }
+                let Some((name, _)) = ast::string_def_name(&node) else {
+                    continue;
+                };
+                let name = name.to_ascii_lowercase();
+                let matches = name == key;
+                let value = self.definitions.entry(name).or_insert_with(|| {
+                    ast::fields(&node)
+                        .next()
+                        .and_then(|field| ast::field_value(&field))
+                });
+                if matches {
+                    return value.clone();
+                }
+            }
+            let root = self.remaining_roots.pop()?;
+            self.entries = root.children();
+        }
+    }
+
     fn string(&mut self, key: &str) -> String {
         let key = key.to_lowercase();
+        if self.ambiguous.contains(&key) {
+            return format!("{key} [ambiguous string]");
+        }
         if self.steps >= 4096 {
             return format!("{key} [expansion limit]");
         }
@@ -37,15 +96,7 @@ impl Expansion<'_> {
         if self.visiting.len() >= 128 || !self.visiting.insert(key.clone()) {
             return format!("{key} [cyclic string]");
         }
-        let value = self
-            .root
-            .children()
-            .filter(|node| node.kind() == Kind::STRING_ENTRY)
-            .find(|node| {
-                ast::string_def_name(node).is_some_and(|(name, _)| name.eq_ignore_ascii_case(&key))
-            })
-            .and_then(|node| ast::fields(&node).next())
-            .and_then(|field| ast::field_value(&field));
+        let value = self.definition(&key);
         let result = if let Some(value) = value {
             self.value(&value)
         } else if let Some((_, month)) = MONTHS.iter().find(|(name, _)| *name == key) {
@@ -59,12 +110,23 @@ impl Expansion<'_> {
     fn value(&mut self, value: &Node) -> String {
         let mut out = String::new();
         for piece in value.children() {
-            let raw = piece.text().to_string();
-            let text = if piece.kind() == Kind::LITERAL
+            let macro_word = piece.kind() == Kind::LITERAL
                 && piece
                     .first_token()
-                    .is_some_and(|token| token.kind() == Kind::WORD)
+                    .is_some_and(|token| token.kind() == Kind::WORD);
+            // Literal stripping removes at most two ASCII delimiter bytes. A
+            // larger source piece cannot fit, even if both delimiters disappear.
+            // Macro identifiers may resolve to short values and retain expansion.
+            if !macro_word && usize::from(piece.text_range().len()) > LIMIT - out.len() + 2 {
+                out.push_str(" [expansion limit]");
+                break;
+            }
+            let raw = piece.text().to_string();
+            #[cfg(test)]
             {
+                self.source_copied_bytes += raw.len();
+            }
+            let text = if macro_word {
                 self.string(&raw)
             } else {
                 raw.strip_prefix('{')
@@ -76,6 +138,10 @@ impl Expansion<'_> {
                     .unwrap_or(&raw)
                     .into()
             };
+            #[cfg(test)]
+            if !macro_word {
+                self.source_copied_bytes += text.len();
+            }
             if out.len() + text.len() > LIMIT {
                 out.push_str(" [expansion limit]");
                 break;
@@ -87,20 +153,19 @@ impl Expansion<'_> {
 }
 
 pub fn expanded(root: &Node, key: &str) -> String {
-    Expansion {
-        root,
-        visiting: HashSet::new(),
-        steps: 0,
-    }
-    .string(key)
+    Expansion::new(root).string(key)
+}
+pub fn expanded_roots(roots: &[Node], ambiguous: HashSet<String>, key: &str) -> String {
+    let Some(root) = roots.first() else {
+        return format!("{key} [unresolved string]");
+    };
+    let mut expansion = Expansion::new(root);
+    expansion.remaining_roots = roots[1..].iter().rev().cloned().collect();
+    expansion.ambiguous = ambiguous;
+    expansion.string(key)
 }
 pub fn value(root: &Node, value: &Node) -> String {
-    Expansion {
-        root,
-        visiting: HashSet::new(),
-        steps: 0,
-    }
-    .value(value)
+    Expansion::new(root).value(value)
 }
 
 /// Decode a curated TeX text surface, preserving unknown commands visibly.
@@ -398,8 +463,7 @@ pub fn entry(entry_type: &str, key: &str, node: &Node) -> String {
 
 pub fn documentation(root: &Node, offset: usize) -> Option<(rowan::TextRange, String)> {
     use crate::bib::semantic::{FieldCategory, RequiredField, builtin};
-    let token = root
-        .token_at_offset(rowan::TextSize::from(offset as u32))
+    let token = tex_ls_parser::syntax::token_at_offset(root, rowan::TextSize::from(offset as u32))
         .right_biased()?;
     for node in token.parent_ancestors() {
         if node.kind() == Kind::FIELD_NAME {
@@ -508,6 +572,148 @@ pub fn search_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn literal_value(source: &str) -> (Node, Node) {
+        let parsed = crate::bib::parse(source);
+        let root = parsed.syntax();
+        let entry = root
+            .children()
+            .find(|node| node.kind() == Kind::ENTRY)
+            .unwrap();
+        let field = ast::fields(&entry).next().unwrap();
+        let value = ast::field_value(&field).unwrap();
+        (root, value)
+    }
+
+    // Independent previous literal projection, including malformed unclosed bodies.
+    fn previous_literal_value(value: &Node) -> String {
+        let mut out = String::new();
+        for piece in value.children() {
+            let raw = piece.text().to_string();
+            let text = raw
+                .strip_prefix('{')
+                .and_then(|text| text.strip_suffix('}'))
+                .or_else(|| {
+                    raw.strip_prefix('"')
+                        .and_then(|text| text.strip_suffix('"'))
+                })
+                .unwrap_or(&raw);
+            if out.len() + text.len() > LIMIT {
+                out.push_str(" [expansion limit]");
+                break;
+            }
+            out.push_str(text);
+        }
+        out
+    }
+
+    #[test]
+    fn oversized_literals_do_not_copy_discarded_source() {
+        for (open, close, end) in [
+            ("{", "}", "}"),
+            ("\"", "\"", "}"),
+            ("{", "", ""),
+            ("\"", "", ""),
+            ("{", "", "}"),
+            ("\"", "", "}"),
+        ] {
+            let source = format!("@misc{{k,title={open}{}{close}{end}", "😀".repeat(262_144));
+            let (root, value) = literal_value(&source);
+            let expected = previous_literal_value(&value);
+            assert_eq!(expected, " [expansion limit]");
+            let mut expansion = Expansion::new(&root);
+            assert_eq!(expansion.value(&value), expected);
+            assert_eq!(
+                expansion.source_copied_bytes, 0,
+                "oversized literal bytes were copied before being discarded"
+            );
+        }
+    }
+
+    #[test]
+    fn literal_expansion_keeps_previous_byte_limit_and_projection() {
+        let payloads = [
+            "x".repeat(LIMIT - 4),
+            "x".repeat(LIMIT - 3),
+            "x".repeat(LIMIT - 1),
+            "x".repeat(LIMIT),
+            "x".repeat(LIMIT + 1),
+            "😀".repeat(LIMIT / 4),
+            format!("{}x", "😀".repeat(LIMIT / 4)),
+            "{nested} \\TeX 😀".into(),
+            String::new(),
+        ];
+        for payload in payloads {
+            for (open, close, end) in [
+                ("{", "}", "}"),
+                ("\"", "\"", "}"),
+                ("{", "", ""),
+                ("\"", "", ""),
+                ("{", "", "}"),
+                ("\"", "", "}"),
+            ] {
+                for prefix in ["", "{head} # "] {
+                    let source = format!("@misc{{k,title={prefix}{open}{payload}{close}{end}");
+                    let (root, value) = literal_value(&source);
+                    let expected = previous_literal_value(&value);
+                    let mut expansion = Expansion::new(&root);
+                    assert_eq!(
+                        expansion.value(&value),
+                        expected,
+                        "{open:?}/{close:?}/{prefix:?}"
+                    );
+                    assert!(
+                        expansion.source_copied_bytes <= 2 * (LIMIT + 2 * value.children().count()),
+                        "literal source copies must remain bounded by the byte budget"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_macro_word_can_still_resolve_to_a_small_value() {
+        let name = "x".repeat(1_048_576);
+        let source = format!("@string{{{name}={{tiny}}}}\n@misc{{k,title={name}}}");
+        let (root, value) = literal_value(&source);
+        assert_eq!(Expansion::new(&root).value(&value), "tiny");
+    }
+
+    #[test]
+    fn repeated_late_string_references_scan_definitions_once() {
+        let mut source = String::new();
+        for i in 0..2048 {
+            source.push_str(&format!("@string{{unused{i}={{ignored}}}}\n"));
+        }
+        source.push_str("@string{target={X}}\n@preamble{");
+        source.push_str(&vec!["target"; 256].join(" # "));
+        source.push('}');
+        let root = crate::bib::parse(&source).syntax();
+        let value = root
+            .children()
+            .find(|node| node.kind() == Kind::PREAMBLE_ENTRY)
+            .unwrap()
+            .children()
+            .find(|node| node.kind() == Kind::VALUE)
+            .unwrap();
+        let mut expansion = Expansion::new(&root);
+        assert_eq!(expansion.value(&value), "X".repeat(256));
+        assert!(
+            expansion.scanned_entries <= root.children().count(),
+            "{} definition visits",
+            expansion.scanned_entries
+        );
+    }
+
+    #[test]
+    fn string_lookup_preserves_first_definition_and_case_matching() {
+        let root = crate::bib::parse(
+            "@string{Mixed={first}} @string{mixed={second}} @string{Å={upper}} @string{å={lower}}",
+        )
+        .syntax();
+        assert_eq!(expanded(&root, "MIXED"), "first");
+        assert_eq!(expanded(&root, "Å"), "lower");
+    }
     #[test]
     fn dates_and_adversarial_expansion_are_bounded_and_visible() {
         assert_eq!(date("2024-2-9/2024-3"), "2024-02-09/2024-03");

@@ -1,0 +1,88 @@
+{
+  "initialize": {
+    "capabilities": {
+      "textDocument": {
+        "semanticTokens": {
+          "formats": [
+            "relative"
+          ],
+          "tokenTypes": [
+            "macro",
+            "type"
+          ],
+          "tokenModifiers": [],
+          "requests": {
+            "full": {
+              "delta": true
+            }
+          }
+        }
+      }
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex",
+          "languageId": "latex",
+          "version": 0,
+          "text": "\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full/delta",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex"
+        },
+        "previousResultId": "1:1"
+      },
+      "expected": {
+        "resultId": "1:2",
+        "edits": []
+      }
+    },
+    {
+      "method": "textDocument/didClose",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex"
+        }
+      }
+    },
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n\\textbf{A}\n"
+        }
+      }
+    },
+    {
+      "method": "textDocument/semanticTokens/full/delta",
+      "request": true,
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-semantic-delta/main.tex"
+        },
+        "previousResultId": "1:2"
+      }
+    }
+  ]
+}

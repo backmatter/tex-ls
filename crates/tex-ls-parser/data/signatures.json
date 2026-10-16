@@ -245,9 +245,9 @@
     "filecontents": { "args": [{ "kind": "opt", "content": "keyval" }, "req"], "verbatimBody": true, "block": true },
     "filecontents*": { "args": [{ "kind": "opt", "content": "keyval" }, "req"], "verbatimBody": true, "block": true },
 
-    "macro": { "args": ["req"], "block": true, "verbatimArg": true },
-    "function": { "args": ["req"], "block": true, "verbatimArg": true },
-    "variable": { "args": ["req"], "block": true, "verbatimArg": true },
+    "macro": { "args": ["opt", "req"], "block": true, "verbatimArg": true },
+    "function": { "args": ["opt", "req"], "block": true, "verbatimArg": true },
+    "variable": { "args": ["opt", "req"], "block": true, "verbatimArg": true },
     "environment": { "args": ["req"], "block": true },
     "macrocode": { "code": true, "block": true },
     "macrocode*": { "code": true, "block": true },

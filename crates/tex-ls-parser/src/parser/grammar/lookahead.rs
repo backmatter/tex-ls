@@ -84,7 +84,7 @@ impl Parser<'_> {
     /// corpus files still have unbalanced opener/`\fi` counts. An opener that
     /// does not pair is therefore ordinary macro code: it stays a plain
     /// `COMMAND` with **no diagnostic**, exactly as a gated `$`/`\[`/`\begin`
-    /// does (`AGENTS.md` decision #1). Does not consume.
+    /// does. Does not consume.
     ///
     /// The anchors mirror the math gates — an unbalanced `}`, an `\end` not owed
     /// to an intervening `\begin`, a paragraph break, the macrocode chunk end,

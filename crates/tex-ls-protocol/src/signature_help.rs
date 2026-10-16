@@ -9,8 +9,8 @@
 //! highlight shows the delimiter kind. The lookup tiers scope-first then
 //! built-in then CWL, like hover.
 //!
-//! **Active parameter.** The parser attaches trailing groups greedily
-//! (AGENTS.md decision #8), and authored optionals may be omitted, so the
+//! **Active parameter.** The parser attaches trailing groups greedily,
+//! and authored optionals may be omitted, so the
 //! cursor's argument node is *aligned* against the signature's slots rather
 //! than counted: each source `GROUP`/`OPTIONAL` consumes the next slot of its
 //! own bracket kind, skipping over omitted optional slots but never over a
@@ -22,15 +22,28 @@
 //! Like hover, the read runs off the snapshot's cached parse when the tracked
 //! source belongs to the captured project. Cancellation propagates to the host.
 
-use super::*;
-use crate::hover::{arg_summary, lookup_command, lookup_environment, provenance_label};
+use crate::presentation::signatures::{arg_summary, provenance_label};
 use lsp_types::{
-    Documentation, ParameterInformation, ParameterInformationLabel, SignatureHelp,
+    Documentation, ParameterInformation, ParameterInformationLabel, Position, SignatureHelp,
     SignatureInformation,
 };
-use tex_ls_parser::ast::{command_name, environment_name};
-use tex_ls_parser::semantic::signature::{ArgKind, ArgSpec, match_arg_slot_index};
-use tex_ls_parser::syntax::{SyntaxKind, SyntaxToken};
+use rowan::TextSize;
+use std::path::Path;
+#[cfg(test)]
+use tex_ls_analysis::text::LineIndex;
+use tex_ls_analysis::{
+    hover::{lookup_command, lookup_environment},
+    incremental::Analysis,
+    text::PositionEncoding,
+};
+use tex_ls_parser::{
+    ast::{command_name, environment_name},
+    semantic::{
+        SignatureDb,
+        signature::{ArgKind, ArgSpec, match_arg_slot_index},
+    },
+    syntax::{SyntaxKind, SyntaxNode, SyntaxToken},
+};
 
 /// Describe the argument using the snapshot's package-aware signature scope.
 pub fn compute_signature_help(
@@ -44,8 +57,7 @@ pub fn compute_signature_help(
     let offset = idx.offset_at(position.line, position.character);
     let root = snapshot.parsed_tree(file);
     let at = TextSize::new(offset as u32);
-    if root
-        .token_at_offset(at)
+    if tex_ls_parser::syntax::token_at_offset(&root, at)
         .right_biased()
         .is_some_and(|token| {
             token.text_range().contains(at)
@@ -55,8 +67,7 @@ pub fn compute_signature_help(
         return None;
     }
     let scope = snapshot.editor_signatures(file);
-    if let Some(owner) = root
-        .token_at_offset(TextSize::new(offset as u32))
+    if let Some(owner) = tex_ls_parser::syntax::token_at_offset(&root, TextSize::new(offset as u32))
         .right_biased()
         .and_then(|token| {
             token
@@ -200,13 +211,9 @@ struct ArgTarget {
 /// bodies (single tokens, never a `GROUP`) all fail the parent check.
 fn argument_target_at(root: &SyntaxNode, offset: usize) -> Option<ArgTarget> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
 
-    for token in [left, right].into_iter().flatten() {
+    for token in tokens {
         if tex_ls_parser::semantic::context::in_token_list(&token) {
             continue;
         }

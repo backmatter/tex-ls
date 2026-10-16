@@ -39,7 +39,7 @@
 //!
 //! The command table lives here, not in `data/signatures.json`: "a space before
 //! this command is wrong" is a lint judgment, not the structural arity/verbatim
-//! fact the signature DB carries (AGENTS.md core decision #2).
+//! fact the signature DB carries.
 
 use std::path::PathBuf;
 
@@ -168,7 +168,7 @@ impl Rule for SpaceBeforeCommand {
 /// included) is a break: same-line whitespace, a newline, or end of input
 /// (paragraph/document end). Keeps the zero-width `\index`/`\label` fix from
 /// deleting a load-bearing interword space when visible content abuts the group.
-/// The command node greedily includes its argument group (decision #8), so its
+/// The command node greedily includes its argument group, so its
 /// last token is the closing `}` and `next_token()` walks to the token past it
 /// (trailing trivia floats as a sibling, so it is what `next_token()` returns).
 fn followed_by_break(command: &SyntaxNode) -> bool {
@@ -183,28 +183,17 @@ mod tests {
     use super::*;
     use crate::linter::diagnostic::Applicability;
     use crate::linter::fix::apply_fixes;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if SpaceBeforeCommand.interests().contains(&el.kind()) {
-                SpaceBeforeCommand.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if SpaceBeforeCommand.interests().contains(&el.kind()) {
+                    SpaceBeforeCommand.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

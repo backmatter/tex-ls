@@ -31,65 +31,27 @@ To tidy up indentation and spacing, right-click your document, choose
 
 ## Syntax colors
 
-tex-ls distinguishes commands, names and references, resource paths, math
-structure, comments, literal content, and ordinary text. Your theme chooses their
-colors. A reference color describes its purpose; Go to Definition works when the
-target can be resolved.
-
-Numbers in prose, math, and BibTeX dates use ordinary text color. Numeric settings,
-such as dimensions or counter values, have a separate role. `\texttt{file.tex}` is
-printed text. `\input{file.tex}` is a resource path. Literal commands and protected
-bodies keep their contents separate from active TeX syntax. Unfinished inline
-verbatim remains literal through the end of its line.
-
+tex-ls distinguishes commands, references, resource paths, math structure,
+comments, literal content, and ordinary text. Your theme chooses their colors.
 Headings and `\textbf` mark prose as bold; emphasis marks it as italic. Nested
-commands and references retain their own colors. The server distinguishes these
-contexts more precisely than the fallback grammar. Enable semantic highlighting
-if your theme disables it:
+commands and references retain their own colors.
+
+Enable semantic highlighting if your theme disables it:
 
 ```json
 "editor.semanticHighlighting.enabled": true
 ```
 
 Themes can customize `texText`, `texLiteral`, `texPath`, and `texMath` with
-`editor.semanticTokenColorCustomizations`. Ordinary and literal text use the
-theme's neutral embedded-content color when it has no specific rule for those
-purposes. This lets semantic tokens replace a fallback grammar's string or
-comment color. Themes can still choose a separate color for literal content.
-The extension supplies font-only defaults for `texBold`, `texItalic`, and
-`declaration`. Ordinary text clears inherited bold and italic from the fallback
-grammar; source typography modifiers then combine without changing its color.
-Use language-qualified semantic selectors, such as `texText:latex` or
-`*.texBold:latex`, to override these font defaults. The default excluded `comment`
-environment uses comment styling.
-`alltt` preserves literal spacing while its commands and braces remain active.
-`\detokenize` keeps command-looking text literal, with normal comments and macro
-parameter substitution inside definitions.
-`\string` makes only its next token literal; following group contents remain active.
+`editor.semanticTokenColorCustomizations`. The extension supplies font defaults
+for `texBold`, `texItalic`, and `declaration`. Use language-qualified selectors,
+such as `texText:latex` or `*.texBold:latex`, to override them.
 
-Python listings and minted bodies distinguish keywords, function names, comments,
-and ordinary code. Explicit C, C++, JavaScript, TypeScript, JSON, CSS, and HTML
-headers can use VS Code's embedded language grammar. Unfinished foreign strings
-and comments stop at the LaTeX closing delimiter. Foreign text before a same-line
-closer can use neutral styling. This integration supplies colors; foreign
-completion and diagnostics require a separate language tool.
-
-Literal listing escape settings expose real TeX references inside code. Minted
-escapes stay inactive in Python strings and ordinary comments. Listings escapes
-also execute inside strings and comments. Minted shortcuts, Fancyvrb short verbs,
-and custom excluded comments protect command-looking text from navigation and
-rename. Literal Fancyvrb command/group characters can activate real TeX commands.
-The formatter preserves the listing's authored layout, including its TeX islands.
-
-Macro-built language names, dynamic settings, and unsupported foreign lexical
-profiles retain a protected fallback. tex-ls does not execute TeX to guess them.
-Settings and listing declarations inside conditionals also keep affected code
-protected. Dynamic option keys cannot leave earlier TeX escapes active by accident.
-Literal percent, dollar, and at-sign catcodes and known lexical switches respect
-groups; unknown conditional assignments do not invent active references.
-Copied or inspected command names remain navigable. Their following groups keep
-the surrounding text or math mode and receive no reference, path, option, or
-typography role from that name. Real commands inside those groups remain active.
+Python listings and minted bodies have built-in highlighting. Explicit C, C++,
+JavaScript, TypeScript, JSON, CSS, and HTML headers can use VS Code's embedded
+language grammars. Completion and diagnostics for embedded languages require a
+separate language tool. Dynamic listing settings and unsupported languages keep
+literal styling because tex-ls does not execute TeX to infer their meaning.
 
 ## Useful commands
 

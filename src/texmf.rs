@@ -5,9 +5,8 @@
 //! This is the one place tex-ls looks past the document's own directory into the
 //! wider TeX installation. It is deliberately fenced off from the formatter: the
 //! index never feeds `scope_signatures`/`DiskPackageSource`, so `tex-ls format`
-//! output depends only on the input and the shipped data, never on what is installed
-//! (the "deterministic, rule-based formatting" tenet — see `AGENTS.md`). Reading
-//! `.sty`/`.cls`/`.dtx` filenames off disk is not typesetting and runs no TeX engine.
+//! output depends only on the input and the shipped data, never on what is installed.
+//! Reading `.sty`/`.cls`/`.dtx` filenames off disk is not typesetting and runs no TeX engine.
 //!
 //! Two halves, per the design split:
 //! - **Root discovery is delegated.** Reproducing kpathsea's `texmf.cnf` resolution
@@ -37,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// The `texmf` editor settings: how the language server discovers the installed TeX
 /// tree for *LSP-only* package resolution (document links, hover, go-to-definition,
 /// and installed-set completion). This never feeds the formatter — `tex-ls format`
-/// stays hermetic regardless of what is installed (see `AGENTS.md`).
+/// stays hermetic regardless of what is installed.
 ///
 /// Where an installation lives is a fact about the *machine*, not the project, so
 /// these settings come from the editor (`initializationOptions` or
@@ -73,7 +72,8 @@ impl Default for TexmfConfig {
 
 /// File extensions the index tracks: package/class sources and their literate `.dtx`.
 const INDEXED_EXTS: &[&str] = &[
-    "sty", "cls", "dtx", "tex", "ltx", "def", "lco", "bib", "bibtex", "bst", "bbx", "cbx", "lbx",
+    "sty", "cls", "clo", "dtx", "tex", "ltx", "def", "lco", "bib", "bibtex", "bst", "bbx", "cbx",
+    "lbx",
 ];
 
 /// The `kpsewhich` variables naming the standard content trees, most-specific first
@@ -98,6 +98,8 @@ struct IndexState {
     roots: Option<Vec<PathBuf>>,
     fingerprint: Option<String>,
     discovery_issues: Vec<String>,
+    watch_epoch: u64,
+    forced_pending: bool,
 }
 impl From<TexmfConfig> for InstalledPackages {
     fn from(config: TexmfConfig) -> Self {
@@ -143,7 +145,62 @@ impl InstalledPackages {
             let this = self.clone();
             std::thread::spawn(move || this.refresh());
         }
-        state.index.clone()
+        if state.forced_pending {
+            None
+        } else {
+            state.index.clone()
+        }
+    }
+
+    /// Cached installation ownership, independent of source discovery excludes.
+    pub(crate) fn contains_source_path(&self, path: &Path) -> bool {
+        if !self.config.enabled
+            || !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(has_indexed_ext)
+        {
+            return false;
+        }
+        let state = self.state.lock().expect("installation state");
+        self.config
+            .roots
+            .iter()
+            .chain(state.roots.iter().flatten())
+            .any(|root| path.starts_with(root))
+            || path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    state
+                        .index
+                        .as_ref()
+                        .and_then(|index| index.by_name.get(name))
+                        .is_some_and(|selected| selected == path)
+                })
+    }
+
+    /// Invalidate filename selection after a watched installation mutation.
+    /// This caller only consults cached state; enumeration stays in the background.
+    pub(crate) fn watched_source_change(&self, path: &Path, deleted: bool) -> bool {
+        if !self.contains_source_path(path) {
+            return false;
+        }
+        let mut state = self.state.lock().expect("installation state");
+        let selected = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| state.index.as_ref()?.by_name.get(name))
+            .is_some_and(|selected| selected == path);
+        if !deleted && selected {
+            return false;
+        }
+        state.watch_epoch += 1;
+        state.forced_pending = true;
+        state.checked = None;
+        drop(state);
+        let _ = self.ready_index();
+        true
     }
 
     pub fn generation(&self) -> u64 {
@@ -159,9 +216,14 @@ impl InstalledPackages {
     }
 
     fn refresh(&self) {
-        let (roots, mut issues) = {
+        let (roots, mut issues, watch_epoch, forced) = {
             let state = self.state.lock().expect("installation state");
-            (state.roots.clone(), state.discovery_issues.clone())
+            (
+                state.roots.clone(),
+                state.discovery_issues.clone(),
+                state.watch_epoch,
+                state.forced_pending,
+            )
         };
         let roots = roots.unwrap_or_else(|| {
             let discovered = discover_roots(&self.config, &mut issues);
@@ -198,14 +260,24 @@ impl InstalledPackages {
         // additional directories outside the discovered installation.
         if self.config.explicit_only {
             let mut state = self.state.lock().expect("installation state");
-            if state.fingerprint.as_ref() == Some(&fingerprint) {
+            if !forced
+                && state.watch_epoch == watch_epoch
+                && state.fingerprint.as_ref() == Some(&fingerprint)
+            {
                 state.checked = Some(Instant::now());
                 state.checking = false;
                 return;
             }
         }
-        let (installed, cache_miss) = load_or_build(&roots, &fingerprint);
-        let installed_cache = cache_miss.then(|| installed.by_name.clone());
+        let (installed, cache_miss) = if forced {
+            (build_from_roots(&roots), true)
+        } else {
+            load_or_build(&roots, &fingerprint)
+        };
+        // Watch-triggered generations bypass persistent caches in both
+        // directions. A superseded watched enumeration cannot leave a cache
+        // entry for a generation that this session refused to publish.
+        let installed_cache = (cache_miss && !forced).then(|| installed.by_name.clone());
         let mut files = if self.config.explicit_only {
             HashMap::new()
         } else {
@@ -227,10 +299,24 @@ impl InstalledPackages {
             return;
         }
         // Cache only the installed part, excluding process-local TEXINPUTS.
+        {
+            let mut state = self.state.lock().expect("installation state");
+            if state.watch_epoch != watch_epoch {
+                state.checked = None;
+                state.checking = false;
+                return;
+            }
+        }
         if let Some(cache) = &installed_cache {
             save_cache(&fingerprint, cache);
         }
         let mut state = self.state.lock().expect("installation state");
+        if state.watch_epoch != watch_epoch {
+            state.checked = None;
+            state.checking = false;
+            return;
+        }
+        state.forced_pending = false;
         if state.index.as_deref() != Some(&index) {
             state.index = Some(Arc::new(index));
             state.generation += 1;
@@ -276,6 +362,42 @@ fn load_or_build(roots: &[PathBuf], fingerprint: &str) -> (TexmfIndex, bool) {
     (build_from_roots(roots), true)
 }
 
+/// Decode native path output, removing only the tool's trailing line endings.
+/// Unix tools return native bytes; other hosts must supply valid UTF8.
+pub(crate) fn native_path_output(bytes: &[u8]) -> Option<std::ffi::OsString> {
+    let end = bytes
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\r' | b'\n'))?
+        + 1;
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Some(std::ffi::OsString::from_vec(bytes[..end].to_vec()))
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(&bytes[..end]).ok().map(Into::into)
+    }
+}
+
+fn expanded_roots(value: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> {
+    std::env::split_paths(value).map(|path| {
+        let text = path.as_os_str();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::{OsStrExt, OsStringExt};
+            if let Some(root) = text.as_bytes().strip_prefix(b"!!") {
+                return PathBuf::from(std::ffi::OsString::from_vec(root.to_vec()));
+            }
+        }
+        #[cfg(not(unix))]
+        if let Some(root) = text.to_str().and_then(|text| text.strip_prefix("!!")) {
+            return PathBuf::from(root);
+        }
+        path
+    })
+}
+
 /// Plain TEXINPUTS elements search one directory; a trailing `//` explicitly
 /// enables recursion. Other Kpathsea expansion is left to the installed tool.
 fn texinput_files(value: &std::ffi::OsStr) -> HashMap<String, PathBuf> {
@@ -285,8 +407,8 @@ fn texinput_files(value: &std::ffi::OsStr) -> HashMap<String, PathBuf> {
         if text.is_empty() || text.starts_with('~') || text.contains(['{', '}', '$', '!']) {
             continue;
         }
-        if let Some(root) = text.strip_suffix("//") {
-            walk_root(Path::new(root), &mut files);
+        if entry.as_os_str().as_encoded_bytes().ends_with(b"//") {
+            walk_root(&entry, &mut files);
         } else if let Ok(entries) = std::fs::read_dir(&entry) {
             let mut paths: Vec<_> = entries
                 .filter_map(Result::ok)
@@ -329,15 +451,14 @@ fn discover_roots(config: &TexmfConfig, issues: &mut Vec<String>) -> Vec<PathBuf
     if config.use_kpsewhich && !config.explicit_only {
         let issue_count = issues.len();
         if let Some(texmf) = kpsewhich_var("TEXMF", issues) {
-            match bounded_output(
-                Command::new("kpsewhich").arg(format!("--expand-braces={}", texmf.display())),
-            ) {
+            let mut argument = std::ffi::OsString::from("--expand-braces=");
+            argument.push(texmf.as_os_str());
+            match bounded_output(Command::new("kpsewhich").arg(argument)) {
                 Ok(output) if output.status.success() => {
-                    let expanded = String::from_utf8_lossy(&output.stdout)
-                        .trim()
-                        .replace('!', "");
-                    for path in std::env::split_paths(&expanded) {
-                        push(&mut roots, path);
+                    if let Some(expanded) = native_path_output(&output.stdout) {
+                        for path in expanded_roots(&expanded) {
+                            push(&mut roots, path);
+                        }
                     }
                 }
                 Err(error) => issues.push(format!(
@@ -380,8 +501,7 @@ fn kpsewhich_var(var: &str, issues: &mut Vec<String>) -> Option<PathBuf> {
     if !output.status.success() {
         return None;
     }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    native_path_output(&output.stdout).map(PathBuf::from)
 }
 
 /// Best-effort default TEXMF locations for when no `kpsewhich` is on `PATH`. Not
@@ -622,6 +742,64 @@ mod tests {
     }
 
     #[test]
+    fn watched_installation_mutations_withhold_stale_indexes_until_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("amstest.sty");
+        std::fs::write(&source, "original").unwrap();
+        let installed = InstalledPackages::from(TexmfConfig {
+            roots: vec![dir.path().to_owned()],
+            explicit_only: true,
+            use_kpsewhich: false,
+            ..Default::default()
+        });
+        let first = installed.index();
+        assert_eq!(first.by_name.get("amstest.sty"), Some(&source));
+        // Keep refresh under test control rather than racing a spawned worker.
+        installed.state.lock().unwrap().checking = true;
+        assert!(!installed.watched_source_change(&source, false));
+        assert!(
+            installed.ready_index().is_some(),
+            "content changes retain filename selection"
+        );
+        assert!(!installed.watched_source_change(&dir.path().join("other.pdf"), true));
+        assert!(
+            !installed
+                .watched_source_change(&dir.path().parent().unwrap().join("outside.sty"), true)
+        );
+        std::fs::remove_file(&source).unwrap();
+        assert!(installed.watched_source_change(&source, true));
+        assert!(
+            installed.ready_index().is_none(),
+            "deletion hides the old complete index"
+        );
+        installed.refresh();
+        assert!(
+            !installed
+                .ready_index()
+                .unwrap()
+                .by_name
+                .contains_key("amstest.sty")
+        );
+        std::fs::write(&source, "restored").unwrap();
+        installed.state.lock().unwrap().checking = true;
+        assert!(installed.watched_source_change(&source, false));
+        assert!(
+            installed.ready_index().is_none(),
+            "recreation must not use the cached miss"
+        );
+        installed.refresh();
+        assert_eq!(
+            installed.ready_index().unwrap().by_name.get("amstest.sty"),
+            Some(&source)
+        );
+        // Ordinary periodic checks continue serving the complete index.
+        let mut state = installed.state.lock().unwrap();
+        state.checking = true;
+        drop(state);
+        assert!(installed.ready_index().is_some());
+    }
+
+    #[test]
     fn index_includes_format_and_bibliography_sources() {
         let dir = tempfile::tempdir().unwrap();
         for name in [
@@ -737,6 +915,54 @@ use tex_ls_analysis::project::texmf::TexmfIndex;
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+    #[test]
+    fn native_path_output_preserves_spaces_and_only_trims_line_endings() {
+        assert_eq!(
+            native_path_output(b"  root path  \r\n"),
+            Some("  root path  ".into())
+        );
+        assert_eq!(native_path_output("α/β\n".as_bytes()), Some("α/β".into()));
+        assert_eq!(native_path_output(b"\r\n"), None);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn native_path_output_rejects_invalid_utf8() {
+        assert_eq!(native_path_output(b"root\xff\n"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expanded_roots_preserve_native_bytes_spaces_and_internal_markers() {
+        use std::os::unix::ffi::OsStrExt;
+        let value = native_path_output(b"!!/texmf\xff:/root!name:/ spaced root \n").unwrap();
+        assert_eq!(
+            expanded_roots(&value).collect::<Vec<_>>(),
+            vec![
+                PathBuf::from(std::ffi::OsStr::from_bytes(b"/texmf\xff")),
+                PathBuf::from("/root!name"),
+                PathBuf::from("/ spaced root "),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_texinputs_preserves_non_utf8_root_bytes() {
+        use std::os::unix::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"texmf\xff".to_vec()));
+        let source = root.join("nested/exact.sty");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, "").unwrap();
+        let mut recursive = root.as_os_str().to_os_string();
+        recursive.push("//");
+        let files = texinput_files(&recursive);
+        assert_eq!(files.get("exact.sty"), Some(&source));
+    }
+
     #[test]
     fn texinputs_distinguishes_plain_and_recursive_elements() {
         let dir = tempfile::tempdir().unwrap();

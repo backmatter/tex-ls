@@ -5,7 +5,7 @@
 //! **LSP-only, like [`super::texmf`].** The `.aux` is a project-local build
 //! artifact read to enrich hover and document symbols with the numbers the last
 //! compile assigned; it must never feed the formatter or linter (the formatter's
-//! output is a pure function of the input — see AGENTS.md, "Non-goals").
+//! output is a pure function of the input).
 //!
 //! A dedicated line-oriented scanner, deliberately **not** the LaTeX parser: aux
 //! files are machine-generated under `\makeatletter`, so their commands
@@ -13,11 +13,10 @@
 //! catcode-faithful lexer treats as a non-letter outside `\makeatletter` regions.
 //! A small brace matcher over the raw text is simpler and immune to that.
 //!
-//! Number extraction mirrors texlab (`crates/base-db/src/semantics/auxiliary.rs`):
-//! from `\newlabel{key}{{num}{page}…}`'s second argument, take the first
-//! top-level `{…}` whose content starts with text (skipping `\caption@xref`-style
-//! command groups and empty groups) and strip any remaining braces, so
-//! ntheorem's `{1.{1}}` yields `1.1`.
+//! Number extraction reads only the first tuple field in
+//! `\newlabel{key}{{num}{page}…}`. Empty or dynamic numbers stay absent;
+//! page and name fields cannot replace them. Literal nested braces flatten,
+//! so ntheorem's `{1.{1}}` yields `1.1`.
 
 use std::collections::HashMap;
 
@@ -28,6 +27,9 @@ use smol_str::SmolStr;
 pub struct AuxData {
     /// `\newlabel{key}{{num}…}`: label key → resolved number (`"1.2"`).
     pub labels: HashMap<SmolStr, String>,
+    /// Standard second and third `\newlabel` fields, when literal.
+    pub pages: HashMap<SmolStr, String>,
+    pub names: HashMap<SmolStr, String>,
     /// `\@writefile{toc}{\contentsline …}` entries, in document order.
     pub toc: Vec<TocEntry>,
 }
@@ -92,12 +94,47 @@ fn newlabel(text: &str, at: usize, out: &mut ParsedAux) -> Option<usize> {
     let (key, at) = group(text, at)?;
     let (value, end) = group(text, at)?;
     let key = key.trim();
+    // A later tuple replaces these facts even when its fields are empty or
+    // dynamic. Retaining the earlier literal would show stale build metadata.
+    out.data.labels.remove(key);
+    out.data.pages.remove(key);
+    out.data.names.remove(key);
     if !key.is_empty()
         && let Some(number) = extract_number(value)
     {
         out.data.labels.insert(SmolStr::new(key), number);
     }
+    // Page and name fields have fixed positions in the standard newlabel
+    // tuple. Never scan forward from an empty/dynamic field into another one.
+    if !key.is_empty()
+        && let Some((_, after_number)) = group(value, 0)
+        && let Some((page, after_page)) = group(value, after_number)
+    {
+        if let Some(page) = literal_hint_text(page) {
+            out.data.pages.insert(key.into(), page);
+        }
+        if let Some((name, _)) = group(value, after_page)
+            && let Some(name) = literal_hint_text(name)
+        {
+            out.data.names.insert(key.into(), name);
+        }
+    }
     Some(end)
+}
+
+fn literal_hint_text(text: &str) -> Option<String> {
+    if text
+        .chars()
+        .any(|ch| ch.is_control() || matches!(ch, '\\' | '%' | '#'))
+    {
+        return None;
+    }
+    let text = text
+        .chars()
+        .filter(|ch| !matches!(ch, '{' | '}'))
+        .collect::<String>();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 /// `\@writefile{toc}{\contentsline {level}{\numberline {num}Title}{page}…}`:
@@ -177,23 +214,11 @@ fn group(text: &str, at: usize) -> Option<(&str, usize)> {
     None
 }
 
-/// The resolved number inside `\newlabel`'s second argument: the first
-/// top-level group whose content starts with text (not a command or another
-/// group), with any nested braces stripped (`1.{1}` → `1.1`).
+/// The number occupies the first tuple field. A missing or dynamic number
+/// must not borrow the page, name, or anchor from a later tuple field.
 fn extract_number(value: &str) -> Option<String> {
-    let mut at = 0;
-    while let Some((content, end)) = group(value, at) {
-        let t = content.trim();
-        if !t.is_empty() && !t.starts_with('\\') && !t.starts_with('{') {
-            let number: String = t.chars().filter(|&c| c != '{' && c != '}').collect();
-            let number = number.trim().to_owned();
-            if !number.is_empty() {
-                return Some(number);
-            }
-        }
-        at = end;
-    }
-    None
+    let (content, _) = group(value, 0)?;
+    literal_hint_text(content)
 }
 
 /// Split a `\contentsline` heading group into its `\numberline{…}` number (if
@@ -215,5 +240,63 @@ fn split_numberline(heading: &str) -> (Option<String>, &str) {
             ((!number.is_empty()).then_some(number), &heading[end..])
         }
         None => (None, heading),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn literal_page_and_name_fields_use_fixed_tuple_positions() {
+        let parsed = parse_aux(r"\newlabel{a}{{1}{iv}{A {title}}{section.1}{}}");
+        assert_eq!(parsed.data.pages.get("a").map(String::as_str), Some("iv"));
+        assert_eq!(
+            parsed.data.names.get("a").map(String::as_str),
+            Some("A title")
+        );
+        let parsed = parse_aux(
+            r"\newlabel{b}{{2}{}{Name}{anchor}{}}\newlabel{c}{{3}{\thepage}{\macro}{anchor}{}}",
+        );
+        assert!(!parsed.data.pages.contains_key("b"));
+        assert_eq!(parsed.data.names.get("b").map(String::as_str), Some("Name"));
+        assert!(!parsed.data.pages.contains_key("c"));
+        assert!(!parsed.data.names.contains_key("c"));
+    }
+
+    #[test]
+    fn later_empty_or_dynamic_fields_retire_previous_hint_text() {
+        for replacement in [r"{{2}{}{}}", r"{{2}{\thepage}{\macro}}", r"{{2}}"] {
+            let parsed = parse_aux(&format!(
+                r"\newlabel{{a}}{{{{1}}{{iv}}{{Old title}}}}\newlabel{{a}}{replacement}"
+            ));
+            assert!(!parsed.data.pages.contains_key("a"), "{replacement}");
+            assert!(!parsed.data.names.contains_key("a"), "{replacement}");
+        }
+        for replacement in ["{}", "{{}{}}", r"{{\dynamic}{\thepage}{\macro}}"] {
+            let parsed = parse_aux(&format!(
+                r"\newlabel{{a}}{{{{1}}{{iv}}{{Old title}}}}\newlabel{{a}}{replacement}"
+            ));
+            assert!(!parsed.data.labels.contains_key("a"), "{replacement}");
+            assert!(!parsed.data.pages.contains_key("a"), "{replacement}");
+            assert!(!parsed.data.names.contains_key("a"), "{replacement}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod number_tuple_tests {
+    use super::*;
+    #[test]
+    fn missing_numbers_do_not_use_page_name_or_anchor_fields() {
+        for number in ["", r"\dynamic", r"1\relax"] {
+            let parsed = parse_aux(&format!(
+                r"\newlabel{{a}}{{{{{number}}}{{15}}{{Title}}{{anchor}}}}"
+            ));
+            assert!(!parsed.data.labels.contains_key("a"), "{number}");
+            assert_eq!(parsed.data.pages.get("a").map(String::as_str), Some("15"));
+        }
+        let parsed = parse_aux(r"\newlabel{a}{{1.{2}}{15}{Title}{anchor}}");
+        assert_eq!(parsed.data.labels.get("a").map(String::as_str), Some("1.2"));
     }
 }

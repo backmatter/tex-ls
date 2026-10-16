@@ -16,6 +16,16 @@ Set `TEX_LS_BENCH_ASSERT=1` for reparse/keystroke regression assertions and
 `TEX_LS_MEMORY_ASSERT=1` for retained-history limits. Fetch optional document inputs
 with `bash benches/documents/download.sh`.
 
+The memory workload waits for acquisition to settle after each document open and
+before measuring retained allocations. One 30-second deadline covers status
+requests and polling; all pending counts must stay zero, installation loading
+must stop, and the complete acquisition status including read/probe counters
+must remain unchanged for 250 milliseconds. The 10,000-edit query histories keep
+their feature barriers without a quiet wait per edit. Only diagnostic cancellations
+with `retriggerRequest: true` retry; other protocol errors, malformed acquisition
+status, and settle timeouts fail the gate. The client contract tests run with
+`cargo test --test lsp_memory_client`.
+
 ## Native LSP workloads
 
 ```sh
@@ -52,6 +62,12 @@ CPU and read counters cover the whole process, including fallback watching and
 background jobs. Other hosts report those counters as unavailable.
 OS caches are not flushed. Downloaded sources include provenance, but omit assets
 needed only for typesetting.
+
+Each RPC request shares a 30-second deadline across notifications and retries.
+Acquisition status polling uses the same deadline as its settle wait. A changed
+revision may retry; diagnostic cancellation retries only when the server supplies
+`retriggerRequest: true`. Other errors fail the workload. Run
+`python3 scripts/test_benchmark_lsp_rpc.py` to check this client contract.
 
 For before/after comparisons, pass the executable as the first positional argument
 and alternate binaries under the same machine conditions. Keep raw output with the comparison.

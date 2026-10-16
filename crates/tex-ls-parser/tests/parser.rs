@@ -642,7 +642,7 @@ fn blank_line_before_comment_still_breaks_math() {
     assert!(!out.contains("DISPLAY_MATH"), "{out}");
 }
 
-// --- leading comment-bind (AGENTS.md #9) ---------------------------------
+// --- leading comment-bind ---------------------------------
 
 #[test]
 fn comment_binds_leading_into_command() {
@@ -693,7 +693,7 @@ fn comment_after_blank_line_still_binds() {
     // comment `///`/`//!` as continuing across the gap). LaTeX's single catcode-14
     // `%` has no such intent marker, and attaching `%a` would wrongly glue a
     // license/copyright header into the construct, so we stop at the blank line.
-    // See AGENTS.md #9 and `Parser::binding_run`.
+    // See `Parser::binding_run`.
     insta::assert_snapshot!(tree("%a\n\n%b\n\\foo"));
 }
 
@@ -763,7 +763,7 @@ fn braced_only_verbatim_command_without_brace_lexes_normally() {
 #[test]
 fn delimiter_verbatim_command_is_opaque() {
     // The `VERB` body attaches *into* the command (a child, like any greedy
-    // argument — decision #8), not as a stranded sibling.
+    // argument), not as a stranded sibling.
     insta::assert_snapshot!(tree(r"\lstinline|x_$y$|"));
 }
 
@@ -2453,7 +2453,7 @@ fn both_closer_spellings_coexist() {
     );
 }
 
-// --- declared environments (`tex-ls.toml`; AGENTS.md decision #12) ----------
+// --- declared environments (`tex-ls.toml`) ----------
 
 /// Resolve a declaration block, written here as JSON: the TOML surface is the
 /// CLI's and is pinned in `config.rs`, since `toml` is a dependency of the root
@@ -2911,7 +2911,7 @@ fn a_foreach_and_its_terminated_body_are_one_statement() {
 
 #[test]
 fn a_bound_comment_run_lands_inside_its_statement() {
-    // An own-line `%` run binds forward into the next construct (decision #9);
+    // An own-line `%` run binds forward into the next construct;
     // the statement owns the construct, so it owns the bound run too.
     let input = "\\begin{tikzpicture}\n% the anchor\n\\node at (0,0) {A};\n\\end{tikzpicture}\n";
     assert_eq!(statements(input), ["% the anchor\n\\node at (0,0) {A};"]);
@@ -2956,7 +2956,7 @@ fn a_demoted_begin_stays_statement_content() {
 #[test]
 fn a_declared_statement_environment_wraps_like_the_entry_it_copies() {
     // `like = "tikzpicture"` copies the curated entry wholesale, statementBody
-    // included, so a declared picture wraps with no code change (decision #12).
+    // included, so a declared picture wraps with no code change.
     let input = "\\begin{mypic}\n\\draw (0,0);\n\\end{mypic}\n";
     let count = |parsed: &tex_ls_parser::parser::Parse| {
         parsed
@@ -3043,15 +3043,39 @@ fn expl3_arity_blank_line_in_a_group_commits_the_prefix() {
 
 #[test]
 fn expl3_arity_head_inside_math_stays_greedy() {
-    // The scan refuses in-math heads outright: an N slot facing the enclosing
-    // math's closer would swallow it into the head and leave the math
-    // unclosed (`xo-grid.dtx`'s `\cs_set_nopar:Npn \]{…}` inside the `\[…\]`
-    // the previous definition opened). `expl3_commands` asserting a clean
-    // parse is the real pin — the swallowed closer surfaced as an error.
+    // The scan refuses in-math heads outright. Use a real math opener and
+    // closer: a literal N-name spelling \[ must not create the enclosing math.
+    // The definition's literal \] name likewise cannot consume its real closer.
     let cmds = expl3_commands(
-        "\\ExplSyntaxOn\n\\cs_set_nopar:Npn \\[{\\begin{displaymath}}\n\\cs_set_nopar:Npn \\]{\\end{displaymath}}\n\\ExplSyntaxOff\n",
+        "\\ExplSyntaxOn\n\\[\n\\cs_set_nopar:Npn \\]{\\end{displaymath}}\n\\]\n\\ExplSyntaxOff\n",
     );
     assert!(cmds.contains(&"\\cs_set_nopar:Npn".to_string()));
+    let parsed = parse("\\ExplSyntaxOn\n\\[\n\\cs_set_nopar:Npn \\]{x}\n\\]\n\\ExplSyntaxOff\n");
+    assert_eq!(
+        parsed
+            .syntax()
+            .descendants()
+            .filter(|node| node.kind() == SyntaxKind::DISPLAY_MATH)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn expl3_literal_delimiter_names_do_not_create_math() {
+    let input = "\\ExplSyntaxOn\n\\cs_set_nopar:Npn \\[{\\begin{displaymath}}\n\\cs_set_nopar:Npn \\]{\\end{displaymath}}\n\\ExplSyntaxOff\n";
+    let parsed = parse(input);
+    assert_eq!(parsed.syntax().to_string(), input);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert!(
+        !parsed
+            .syntax()
+            .descendants()
+            .any(|node| node.kind() == SyntaxKind::DISPLAY_MATH)
+    );
+    let sites = tex_ls_parser::semantic::scan_definition_sites(&parsed.syntax());
+    assert!(sites.iter().any(|site| site.name == "["));
+    assert!(sites.iter().any(|site| site.name == "]"));
 }
 
 #[test]

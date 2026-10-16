@@ -1,5 +1,8 @@
 //! Negotiated, delayed loading progress with acknowledged token creation.
-use super::*;
+use crossbeam_channel::Sender;
+#[cfg(test)]
+use crossbeam_channel::unbounded;
+use lsp_server::{Message, Notification, Request, RequestId, Response};
 
 pub(super) struct LoadingProgress {
     enabled: bool,

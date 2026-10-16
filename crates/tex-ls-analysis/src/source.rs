@@ -17,7 +17,7 @@ pub enum FileKind {
     CodeTex,
     /// A `.sty` package source.
     Sty,
-    /// A `.cls` class source.
+    /// A `.cls` class source or `.clo` class-option source.
     Cls,
     /// A `.dtx` docstrip literate source (interleaved documentation + code).
     Dtx,
@@ -106,7 +106,7 @@ pub fn lint_file_kind(path: &Path) -> Option<FileKind> {
         .any(|alias| ext.eq_ignore_ascii_case(alias))
     {
         Some(FileKind::Sty)
-    } else if ext.eq_ignore_ascii_case("cls") {
+    } else if ext.eq_ignore_ascii_case("cls") || ext.eq_ignore_ascii_case("clo") {
         Some(FileKind::Cls)
     } else if ext.eq_ignore_ascii_case("dtx") {
         Some(FileKind::Dtx)
@@ -154,6 +154,34 @@ pub fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod normalization_tests {
     use super::*;
+
+    #[test]
+    fn class_option_sources_preserve_internal_definitions_and_uses() {
+        use crate::incremental::IncrementalDatabase;
+        let source = r"\def\@custom#1{#1}\@custom{x}";
+        for extension in ["clo", "CLO"] {
+            let mut db = IncrementalDatabase::default();
+            let file = db.apply_change(
+                &PathBuf::from(format!("/class/size10.{extension}")),
+                source,
+                None,
+            );
+            assert_eq!(db.parsed_tree(file).text().to_string(), source);
+            assert!(db.parse_diagnostics(file).is_empty());
+            assert!(
+                db.definition_sites(file)
+                    .iter()
+                    .any(|site| site.name == "@custom")
+            );
+            assert_eq!(db.name_occurrences(file).commands("@custom").len(), 2);
+        }
+        let mut db = IncrementalDatabase::default();
+        let file = db.apply_change(Path::new("/class/document.tex"), source, None);
+        assert!(
+            db.name_occurrences(file).commands("@custom").is_empty(),
+            "ordinary document flavor remains unchanged"
+        );
+    }
 
     #[test]
     fn lexical_parents_preserve_relative_identity_and_stop_at_root() {

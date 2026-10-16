@@ -112,6 +112,7 @@ mod tests {
         bib.insert(PathBuf::from(BIB), keys.iter().map(SmolStr::new).collect());
         ResolvedCitations::build(
             &[CiteFileFacts {
+                case_sensitive: Some(false),
                 path: PathBuf::from(DOC),
                 bib_targets: vec![BibTarget::Path(PathBuf::from(BIB))],
                 manual_keys: Vec::new(),

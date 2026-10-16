@@ -139,7 +139,7 @@ fn empty_env_config_counts_as_unset() {
 // `--config`/`--no-config` are declared `global = true`, so clap accepts them on
 // any subcommand. A subcommand that resolves config but ignores them answers
 // under a config the user explicitly turned off — and since `[environments]`
-// reaches the *parser* (`AGENTS.md` decision #12), for `parse` that means
+// reaches the *parser*, for `parse` that means
 // dumping a tree no other subcommand would produce.
 
 /// A declaration that visibly changes the tree: `\bea … \eea` becomes an

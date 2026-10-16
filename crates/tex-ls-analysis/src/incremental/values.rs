@@ -25,11 +25,16 @@ impl FileLabelContexts {
 pub enum QueryKind {
     RootGraphics,
     FileModes,
+    FileRoles,
+    InstalledSourceIdentity,
+    GlossarySearchFields,
     FileOperands,
     FileLabelContexts,
     ParsedDocument,
     /// A file's per-file label/reference model (`semantic_model`).
     SemanticModel,
+    /// Sorted item/closing-environment boundaries for source-derived bibliography cards.
+    ManualBibBodyEnds,
     DefinitionSites,
     NameOccurrences,
     Outline,
@@ -88,6 +93,8 @@ pub enum QueryKind {
     /// A `.tex` file's bibliography-resource targets + `\nocite{*}` flag
     /// (`file_cite_facts`) — the per-file citation firewall.
     FileCiteFacts,
+    /// Bibliography-resource targets without building manual citation facts.
+    FileBibliographyTargets,
     /// The cross-file citation resolution (`crate::project::resolved_citations`);
     /// a project-level query, not keyed on a single file.
     ResolvedCitations,

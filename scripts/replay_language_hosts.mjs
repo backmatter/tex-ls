@@ -1,7 +1,7 @@
 // Compare the native LSP process and a real WASM instance using identical events.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve, dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,12 +10,30 @@ import { performance } from 'node:perf_hooks';
 const [binary, bindings, transcript, output] = process.argv.slice(2);
 if (!output) throw new Error('Usage: node scripts/replay_language_hosts.mjs BINARY BINDINGS TRANSCRIPT OUTPUT');
 const { LanguageSession } = createRequire(import.meta.url)(resolve(bindings));
-let fixture = JSON.parse(readFileSync(transcript, 'utf8'));
+// Source identity fixtures must retain their original bytes. References avoid
+// copying complete upstream sources into protocol transcripts.
+function fixtureContents(value) {
+  if (Array.isArray(value)) return value.map(fixtureContents);
+  if (value && typeof value === 'object') {
+    if (Object.keys(value).length === 1 && typeof value.sourceFixture === 'string') {
+      return readFileSync(resolve(dirname(transcript), value.sourceFixture), 'utf8');
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => [key, fixtureContents(child)]));
+  }
+  return value;
+}
+let fixture = fixtureContents(JSON.parse(readFileSync(transcript, 'utf8')));
 let project;
 if (Object.hasOwn(fixture, 'nativeConfig')) {
   project = mkdtempSync(join(dirname(resolve(output)), 'settings-project-'));
   writeFileSync(join(project, 'tex-ls.toml'), fixture.nativeConfig);
   fixture = JSON.parse(JSON.stringify(fixture).replaceAll('file:///architecture-settings', pathToFileURL(project).href).replaceAll('/architecture-settings', project));
+}
+for (const [name, contents] of Object.entries(fixture.files ?? {})) {
+  if (!project) throw new Error('Disk fixture requires nativeConfig');
+  const path = join(project, name);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, contents);
 }
 const events = Array.isArray(fixture) ? fixture : fixture.events;
 const child = spawn(resolve(binary), ['lsp'], { stdio: ['pipe', 'pipe', 'inherit'] });
@@ -98,7 +116,10 @@ try {
       const path = join(project, name);
       const existed = existsSync(path);
       if (contents === null) rmSync(path, { force: true });
-      else writeFileSync(path, contents);
+      else {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, contents);
+      }
       changes.push({ uri: pathToFileURL(path).href, type: contents === null ? 3 : existed ? 2 : 1 });
     }
     // Match explicit browser input publication with an ordered native watch event.
@@ -115,6 +136,8 @@ try {
     if (event.expectedNonEmpty) {
       assert.ok(Array.isArray(wasm) && wasm.length > 0, `${event.method}: expected nonempty results`);
     }
+    if (event.expectedActionTitle) assert.ok(wasm.some(action => action.title === event.expectedActionTitle), event.method);
+    if (event.excludedActionTitle) assert.ok(wasm.every(action => action.title !== event.excludedActionTitle), event.method);
     const nativeStart = performance.now();
     if (event.embeddedOnly) {
       // Explicit browser observations correspond to disk acquisition in native.

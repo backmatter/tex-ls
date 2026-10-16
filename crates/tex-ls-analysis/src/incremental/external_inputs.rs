@@ -37,6 +37,72 @@ impl Database {
 }
 
 impl IncrementalDatabase {
+    /// Retire file observations outside a host-proved live scope when history
+    /// exceeds twice the scope plus 256 cells. The slack amortizes reconstruction
+    /// during target edits while bounding abandoned observations. Include every
+    /// current resolution candidate, alias origin/target, directory and pending
+    /// read in `keep`; generic observation batches otherwise retain merge semantics.
+    /// Reconstruction invalidates file acquisitions from the old storage lifetime.
+    pub fn retain_file_observations(
+        &mut self,
+        project: ProjectId,
+        keep: &std::collections::BTreeSet<PathBuf>,
+    ) -> Result<bool, ChangeError> {
+        let db = &mut self.read.inner;
+        if !db.projects.contains_key(&project) {
+            return Err(ChangeError::ProjectRemoved);
+        }
+        let keep: std::collections::BTreeSet<_> =
+            keep.iter().map(|path| normalize_path(path)).collect();
+        let input = db.project(project);
+        let limit = keep.len().saturating_mul(2).saturating_add(256);
+        if input.locations(db).len() <= limit {
+            return Ok(false);
+        }
+        let mut catalog = input.locations(db).clone();
+        catalog.retain(|path, _| keep.contains(path));
+        if catalog.len() == input.locations(db).len() {
+            return Ok(false);
+        }
+        input
+            .set_locations(db)
+            .with_durability(salsa::Durability::MEDIUM)
+            .to(catalog);
+        db.rebuild(&Default::default(), None);
+        Ok(true)
+    }
+
+    /// Publish the complete compiler-artifact scope owned by a host. Unlike
+    /// `apply_external_inputs`, this retires observations omitted from the batch.
+    /// Old snapshots keep their observations; the writer releases retired cells
+    /// and cached payloads by rebuilding storage once when the scope shrinks.
+    pub fn replace_compiler_inputs(
+        &mut self,
+        token: AcquisitionToken,
+        artifacts: Vec<(PathBuf, Observation<CompilerArtifact>)>,
+    ) -> Result<(), ChangeError> {
+        let paths: std::collections::BTreeSet<_> = artifacts
+            .iter()
+            .map(|(path, _)| normalize_path(path))
+            .collect();
+        // Use the same generation checks and last-value semantics as a merge.
+        // A rejected batch must not retire any previously published observation.
+        self.apply_external_inputs(token, ExternalInputs::Compiler(artifacts))?;
+        let db = &mut self.read.inner;
+        let project = db.project(token.project);
+        if project
+            .compiler(db)
+            .keys()
+            .any(|path| !paths.contains(path))
+        {
+            let mut catalog = project.compiler(db).clone();
+            catalog.retain(|path, _| paths.contains(path));
+            project.set_compiler(db).to(catalog);
+            db.rebuild(&Default::default(), None);
+        }
+        Ok(())
+    }
+
     /// Reserve a refresh in one independent input category. A later reservation
     /// supersedes earlier work even if that work finishes first.
     pub fn begin_external_refresh(
@@ -254,9 +320,11 @@ impl Analysis {
                 continue;
             };
             let mut components = relative.components();
-            if let Some(name) = components.next() {
+            if let Some(name) = components.next()
+                && let Some(name) = name.as_os_str().to_str()
+            {
                 entries.insert(
-                    name.as_os_str().to_string_lossy().into_owned(),
+                    name.to_owned(),
                     if components.next().is_some() {
                         LocationKind::Directory
                     } else {
@@ -303,18 +371,38 @@ impl Analysis {
                     .entry(key.clone())
                     .or_insert_with(|| number.clone());
             }
+            for (key, page) in &artifact.parsed.data.pages {
+                result
+                    .pages
+                    .entry(key.clone())
+                    .or_insert_with(|| page.clone());
+            }
+            for (key, name) in &artifact.parsed.data.names {
+                result
+                    .names
+                    .entry(key.clone())
+                    .or_insert_with(|| name.clone());
+            }
             result.toc.extend(artifact.parsed.data.toc.iter().cloned());
-            let base = path.parent().unwrap_or(Path::new(""));
-            pending.extend(
-                artifact
-                    .parsed
-                    .inputs
-                    .iter()
-                    .rev()
-                    .map(|target| base.join(target)),
-            );
+            if let Some(inputs) = &artifact.resolved_aux_inputs {
+                pending.extend(inputs.iter().rev().cloned());
+            } else {
+                let base = path.parent().unwrap_or(Path::new(""));
+                pending.extend(
+                    artifact
+                        .parsed
+                        .inputs
+                        .iter()
+                        .rev()
+                        .map(|target| base.join(target)),
+                );
+            }
         }
-        (!result.labels.is_empty() || !result.toc.is_empty()).then_some(result)
+        (!result.labels.is_empty()
+            || !result.pages.is_empty()
+            || !result.names.is_empty()
+            || !result.toc.is_empty())
+        .then_some(result)
     }
 }
 
@@ -485,4 +573,200 @@ pub(in crate::incremental) fn resolve_candidates(
         },
     };
     FileResolution { target, needs }
+}
+
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_memberships_preserve_bytes_without_lossy_completion_names() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut db = IncrementalDatabase::default();
+        let root = Path::new("/project");
+        let invalid = root.join(std::ffi::OsString::from_vec(b"bad\xff.tex".to_vec()));
+        let invalid_directory = root.join(std::ffi::OsString::from_vec(b"dir\xfe".to_vec()));
+        let child = invalid_directory.join("child.tex");
+        let valid = root.join("valid\u{fffd}.tex");
+        for path in [&invalid, &child, &valid] {
+            db.apply_change(path, "text", None);
+        }
+        let snapshot = db.snapshot();
+        assert!(snapshot.lookup_file(&invalid).is_some());
+        assert!(snapshot.lookup_file(&child).is_some());
+        assert_eq!(
+            snapshot.read_dir(root),
+            vec![("valid\u{fffd}.tex".into(), false)]
+        );
+    }
+
+    #[test]
+    fn file_observation_retirement_preserves_live_facts_and_bounds_history() {
+        let mut db = IncrementalDatabase::default();
+        let project = db.project_id();
+        let source = Path::new("/p/main.tex");
+        db.apply_change(source, "$alphabet$", None);
+        let source_id = db.snapshot().lookup_file(source).unwrap();
+        let version = db.snapshot().source_version(source_id);
+        let absent = PathBuf::from("/p/missing.bib");
+        let failed = PathBuf::from("/p/failed.bib");
+        let alias = PathBuf::from("/p/link.bib");
+        let actual = PathBuf::from("/installed/library.bib");
+        let keep = [
+            source.to_owned(),
+            absent.clone(),
+            failed.clone(),
+            alias.clone(),
+            actual.clone(),
+        ]
+        .into_iter()
+        .collect();
+        let rebuilds = db.read.inner.rebuild_count;
+        let mut retirements = 0;
+        for generation in 0..1024 {
+            let old_target = PathBuf::from(format!("/p/old-{generation}.bib"));
+            let token = db
+                .begin_external_refresh(project, ExternalInputKind::Files)
+                .unwrap();
+            db.apply_external_inputs(
+                token,
+                ExternalInputs::Files(FileInputs {
+                    locations: vec![
+                        (
+                            old_target.clone(),
+                            LocationObservation {
+                                kind: Observation::Absent,
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            absent.clone(),
+                            LocationObservation {
+                                kind: Observation::Absent,
+                                ..Default::default()
+                            },
+                        ),
+                        (
+                            failed.clone(),
+                            LocationObservation {
+                                kind: Observation::Error("permission denied".into()),
+                                ..Default::default()
+                            },
+                        ),
+                    ],
+                    file_resolution: vec![
+                        (old_target, Observation::Absent),
+                        (alias.clone(), Observation::Present(actual.clone())),
+                    ],
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+            let stale = db
+                .begin_external_refresh(project, ExternalInputKind::Files)
+                .unwrap();
+            if db.retain_file_observations(project, &keep).unwrap() {
+                retirements += 1;
+                assert_eq!(
+                    db.apply_external_inputs(stale, ExternalInputs::Files(Default::default())),
+                    Err(ChangeError::StaleRevision)
+                );
+            }
+            let catalog = db.read.inner.project(project).locations(&db.read.inner);
+            assert!(catalog.len() <= keep.len() * 2 + 256);
+            let snapshot = db.snapshot();
+            assert_eq!(snapshot.source_version(source_id), version);
+            assert_eq!(snapshot.location_kind(&absent), Observation::Absent);
+            assert_eq!(
+                snapshot.location_kind(&failed),
+                Observation::Error("permission denied".into())
+            );
+            assert_eq!(snapshot.file_alias(&alias), Some(actual.as_path()));
+        }
+        assert!(
+            retirements > 0 && retirements < 8,
+            "reconstruction must be amortized"
+        );
+        assert_eq!(db.read.inner.rebuild_count, rebuilds + retirements);
+        assert_eq!(
+            db.retain_file_observations(ProjectId::new(), &keep),
+            Err(ChangeError::ProjectRemoved)
+        );
+    }
+
+    #[test]
+    fn authoritative_compiler_scope_retires_payloads_without_changing_merge_semantics() {
+        use crate::external::{CompilerArtifact, ExternalInputKind, ExternalInputs, Observation};
+        let mut db = IncrementalDatabase::default();
+        let project = db.project_id();
+        let source = Path::new("/p/main.tex");
+        db.apply_change(source, "\\label{live}", None);
+        let keep = Path::new("/p/main.aux");
+        let retired = Path::new("/p/retired.aux");
+        let artifact = |path: &Path, number: &str| {
+            Observation::Present(CompilerArtifact::from_text(
+                path,
+                &format!("\\newlabel{{live}}{{{{{number}}}{{1}}}}"),
+                path.display().to_string(),
+            ))
+        };
+        let token = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        db.apply_external_inputs(
+            token,
+            ExternalInputs::Compiler(vec![
+                (keep.into(), artifact(keep, "1")),
+                (retired.into(), artifact(retired, "2")),
+            ]),
+        )
+        .unwrap();
+        let old = db.snapshot();
+        let input = db.read.inner.project(project).compiler(&db.read.inner)[retired];
+        let payload = Arc::downgrade(input.artifact(&db.read.inner));
+        assert!(old.compiler_artifact(retired).is_some());
+        // Salsa publication waits for readers. Release this snapshot before a
+        // writer update; the live writer still owns the retired payload.
+        drop(old);
+        assert!(payload.upgrade().is_some());
+        let stale = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        let fresh = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        let rebuilds = db.read.inner.rebuild_count;
+        assert!(db.replace_compiler_inputs(stale, vec![]).is_err());
+        assert!(db.snapshot().compiler_artifact(retired).is_some());
+        db.replace_compiler_inputs(fresh, vec![("/p/./main.aux".into(), artifact(keep, "3"))])
+            .unwrap();
+        assert_eq!(db.read.inner.rebuild_count, rebuilds + 1);
+        assert!(db.snapshot().compiler_artifact(retired).is_none());
+        assert!(
+            payload.upgrade().is_none(),
+            "retired Salsa cells must release their payloads"
+        );
+        assert!(db.snapshot().lookup_file(source).is_some());
+        let fresh = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        db.replace_compiler_inputs(fresh, vec![(keep.into(), artifact(keep, "3"))])
+            .unwrap();
+        assert_eq!(db.read.inner.rebuild_count, rebuilds + 1);
+        let fresh = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        db.apply_external_inputs(
+            fresh,
+            ExternalInputs::Compiler(vec![(retired.into(), Observation::Absent)]),
+        )
+        .unwrap();
+        assert!(db.snapshot().compiler_artifact(keep).is_some());
+        let fresh = db
+            .begin_external_refresh(project, ExternalInputKind::Compiler)
+            .unwrap();
+        db.replace_compiler_inputs(fresh, vec![]).unwrap();
+        assert_eq!(db.snapshot().compiler_artifacts().count(), 0);
+        assert_eq!(db.read.inner.rebuild_count, rebuilds + 2);
+    }
 }

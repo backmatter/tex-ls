@@ -157,7 +157,7 @@ impl Parser<'_> {
     }
 
     /// A base atom with any tightly-bound `^`/`_` scripts — the one sanctioned
-    /// Pratt site (`AGENTS.md`, decision #3). Sub/superscripts are postfix with a
+    /// Pratt site. Sub/superscripts are postfix with a
     /// single-atom right operand, so this is a base atom followed by a postfix
     /// loop, not full precedence climbing.
     ///
@@ -406,8 +406,7 @@ impl Parser<'_> {
         self.argument_group(ArgumentDomain::Math);
     }
 
-    /// A `\left<delim> … \right<delim>` matched delimiter pair (`AGENTS.md`,
-    /// decision #3: the one precedence-climbing site — here just balanced
+    /// A `\left<delim> … \right<delim>` matched delimiter pair, with balanced
     /// matching by *count*, which is exactly how TeX pairs them, so a mismatched
     /// `\left( … \right]` still nests correctly). The `\left`/`\right` control
     /// words and their delimiter tokens are direct children (mirroring how `$` /

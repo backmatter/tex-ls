@@ -23,6 +23,10 @@ fn command_sig(args: Vec<ArgSpec>) -> CommandSig {
 /// Read a literal name in a braced group, rejecting expansion and parameter text.
 fn literal_name(command: &SyntaxNode, index: usize) -> Option<(SmolStr, TextRange)> {
     let (range, text) = nth_group_inner(command, index)?;
+    literal_name_text(&text, range)
+}
+
+fn literal_name_text(text: &str, range: TextRange) -> Option<(SmolStr, TextRange)> {
     let name = text.trim();
     if name.is_empty()
         || name
@@ -112,29 +116,10 @@ pub fn extra_declarations(command: &SyntaxNode) -> Vec<EditorDeclaration> {
             named_site(command, name, span, DefSiteKind::Environment)
         }
         _ => {
-            let Some((base, arguments)) = name.split_once(':') else {
+            let Some((arguments, copy)) = crate::parser::reader_facts::expl3_definition_args(&name)
+            else {
                 return Vec::new();
             };
-            if !matches!(
-                base,
-                "cs_new"
-                    | "cs_set"
-                    | "cs_gset"
-                    | "cs_new_protected"
-                    | "cs_set_protected"
-                    | "cs_gset_protected"
-                    | "cs_new_nopar"
-                    | "cs_set_nopar"
-                    | "cs_gset_nopar"
-                    | "cs_new_protected_nopar"
-                    | "cs_set_protected_nopar"
-                    | "cs_gset_protected_nopar"
-                    | "cs_new_eq"
-                    | "cs_set_eq"
-                    | "cs_gset_eq"
-            ) {
-                return Vec::new();
-            }
             let site = if arguments.starts_with('c') {
                 let Some((name, range)) = literal_name(command, 0) else {
                     return Vec::new();
@@ -148,7 +133,7 @@ pub fn extra_declarations(command: &SyntaxNode) -> Vec<EditorDeclaration> {
             } else {
                 return Vec::new();
             };
-            if base.ends_with("_eq") {
+            if copy {
                 if arguments.ends_with('c') {
                     let after = if arguments.starts_with('c') {
                         nth_group(command, 0).map(|group| group.text_range().end())
@@ -254,7 +239,7 @@ pub fn editor_declarations_with_operands(
     operands: &crate::semantic::context::PrimitiveOperandContexts,
 ) -> Vec<EditorDeclaration> {
     let mut declarations = Vec::new();
-    let mut listing_overrides = HashSet::new();
+    let mut declaration_overrides = HashSet::new();
     let contexts = crate::semantic::context::TokenListContexts::new(root);
     for command in root
         .descendants()
@@ -266,7 +251,7 @@ pub fn editor_declarations_with_operands(
             continue;
         };
         let extra = extra_declarations(&command);
-        if listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides) {
+        if declaration_overridden(&command, &name, &extra, &mut declaration_overrides) {
             continue;
         }
         if !extra.is_empty() {
@@ -353,8 +338,9 @@ pub fn editor_declarations_with_operands(
                 signatures.insert_command(site.name, command_sig(latex2e_args(arity, optional)));
             }
         }
-        apply_verbatim_flags(&mut signatures, &bodies);
-        apply_verbatim_env_flags(&mut signatures, &env_bodies, &bodies);
+        let verbatim_helpers = verbatim_helper_names(&bodies);
+        apply_verbatim_flags(&mut signatures, &verbatim_helpers);
+        apply_verbatim_env_flags(&mut signatures, &env_bodies, &verbatim_helpers);
         if name.starts_with("newmint")
             && ordinary_definition_site(&command).is_none()
             && let Some(generated) = minted_name(&name, &command)

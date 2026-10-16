@@ -12,19 +12,20 @@ use super::*;
 /// disagree with the tree's).
 ///
 /// `text` is an `Arc<SourceText>` shared with the tracked input and the live editor
-/// buffer, so storing a base costs a refcount bump rather than a copy.
+/// buffer. The immutable context and declaration snapshot are shared across
+/// successful splices too, rather than copying their full-file maps per edit.
 #[derive(Debug, Clone)]
 pub struct PrevParse {
     pub text: Arc<SourceText>,
     pub green: rowan::GreenNode,
     pub errors: Vec<SyntaxError>,
-    pub ctx: ParseCtx,
+    pub ctx: Arc<ParseCtx>,
     pub config: LexConfig,
     /// The *parse-facing* half of the declarations this base was parsed under
     /// (`parse_declarations`), not the whole block. Storing the whole block
     /// would make `is_current` reject a base over a
     /// `[commands]` edit that provably could not have changed the tree.
-    pub declared: ResolvedDeclarations,
+    pub declared: Arc<ResolvedDeclarations>,
 }
 
 impl PrevParse {
@@ -37,7 +38,7 @@ impl PrevParse {
         declared: &ResolvedDeclarations,
     ) -> bool {
         self.config == config
-            && &self.declared == declared
+            && self.declared.as_ref() == declared
             // `ptr_eq` is the free half: the language server hands the query the
             // same allocation it wrote. The content compare behind it is what makes
             // the guard correct for an equal-but-distinct text (a disk re-read).
@@ -53,7 +54,7 @@ impl PrevParse {
             &self.text,
             &self.green,
             &self.errors,
-            &self.ctx,
+            self.ctx.as_ref(),
             self.config,
             declared,
         )

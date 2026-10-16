@@ -33,11 +33,10 @@ pub struct FixOutcome {
 /// are considered in source order (by their first edit) and applied
 /// **atomically**: a fix lands with all of its edits or not at all. A fix is
 /// dropped (counted in [`FixOutcome::skipped_conflicts`]) when it is malformed
-/// (no edits, a backwards or out-of-bounds span, or internally overlapping
+/// (no edits, a backwards, out-of-bounds, or non-UTF-8-boundary span, or internally overlapping
 /// edits) or when any of its edits overlaps an edit of an already-accepted fix,
 /// so the output stays well-formed. Adjacent edits do not conflict. Accepted
-/// edits are spliced right-to-left so earlier byte offsets remain valid as
-/// later ones are rewritten.
+/// edits are copied with untouched source slices into one output buffer.
 ///
 /// A **cross-file** fix — any edit with [`Edit::path`] `Some` — is skipped here
 /// (counted in `skipped_conflicts`): a single source cannot honor it. Use
@@ -71,9 +70,11 @@ pub fn apply_fixes(source: &str, fixes: &[Fix], include_unsafe: bool) -> FixOutc
         // whole fix here too — `apply_fixes_multi` is the path that honors it.
         let malformed = edits.is_empty()
             || edits.iter().any(|e| e.path.is_some())
-            || edits
-                .iter()
-                .any(|e| e.start > e.end || e.end > source.len())
+            || edits.iter().any(|e| {
+                e.start > e.end
+                    || !source.is_char_boundary(e.start)
+                    || !source.is_char_boundary(e.end)
+            })
             || edits.windows(2).any(|pair| pair[1].start < pair[0].end);
         if malformed || edits.iter().any(|e| overlaps(&occupied, e.start, e.end)) {
             skipped_conflicts += 1;
@@ -87,18 +88,30 @@ pub fn apply_fixes(source: &str, fixes: &[Fix], include_unsafe: bool) -> FixOutc
         applied += 1;
     }
 
-    // Apply right-to-left so each splice leaves earlier offsets untouched.
     accepted.sort_by_key(|e| (e.start, e.end));
-    let mut output = source.to_string();
-    for edit in accepted.iter().rev() {
-        output.replace_range(edit.start..edit.end, &edit.content);
-    }
+    let output = rewrite(source, &accepted);
 
     FixOutcome {
         output,
         applied,
         skipped_conflicts,
     }
+}
+
+/// Accepted edits are ordered, disjoint and on UTF-8 boundaries. Copy each
+/// untouched byte once, preserving the stable order of same-position inserts.
+fn rewrite(source: &str, edits: &[&Edit]) -> String {
+    let removed: usize = edits.iter().map(|e| e.end - e.start).sum();
+    let inserted: usize = edits.iter().map(|e| e.content.len()).sum();
+    let mut output = String::with_capacity(source.len() - removed + inserted);
+    let mut cursor = 0;
+    for edit in edits {
+        output.push_str(&source[cursor..edit.start]);
+        output.push_str(&edit.content);
+        cursor = edit.end;
+    }
+    output.push_str(&source[cursor..]);
+    output
 }
 
 /// Whether `start..end` overlaps any claimed range. Ranges merely touching at a
@@ -133,12 +146,12 @@ pub struct MultiFixOutcome {
 /// **atomically across files**: a fix lands with all of its edits in all of
 /// their files, or not at all. A fix is dropped (counted in
 /// [`MultiFixOutcome::skipped_conflicts`]) when it is malformed (no edits, a
-/// backwards or out-of-bounds span, an edit whose resolved file is missing from
+/// backwards, out-of-bounds, or non-UTF-8-boundary span, an edit whose resolved file is missing from
 /// `sources`, or two same-file edits that overlap each other) or when any of its
 /// edits overlaps an edit of an already-accepted fix in the same file. The
 /// first-wins order is deterministic: fixes sort by their lexicographically
-/// smallest resolved `(path, start, end)`. Accepted edits are spliced
-/// right-to-left within each file so earlier offsets stay valid.
+/// smallest resolved `(path, start, end)`. Each touched file is rewritten once
+/// from its original source slices and accepted replacements.
 pub fn apply_fixes_multi(
     sources: &HashMap<PathBuf, String>,
     fixes: &[(PathBuf, &Fix)],
@@ -183,9 +196,11 @@ pub fn apply_fixes_multi(
 
         let malformed = resolved.is_empty()
             || resolved.iter().any(|(p, e)| {
-                sources
-                    .get(p)
-                    .is_none_or(|src| e.start > e.end || e.end > src.len())
+                sources.get(p).is_none_or(|src| {
+                    e.start > e.end
+                        || !src.is_char_boundary(e.start)
+                        || !src.is_char_boundary(e.end)
+                })
             })
             || resolved
                 .windows(2)
@@ -208,7 +223,7 @@ pub fn apply_fixes_multi(
         applied += 1;
     }
 
-    // Splice each touched file right-to-left so earlier offsets stay valid.
+    // Copy each touched file once rather than repeatedly moving its suffix.
     let mut by_file: HashMap<PathBuf, Vec<&Edit>> = HashMap::new();
     for (p, e) in accepted {
         by_file.entry(p).or_default().push(e);
@@ -216,10 +231,7 @@ pub fn apply_fixes_multi(
     let mut outputs = HashMap::new();
     for (path, mut edits) in by_file {
         edits.sort_by_key(|e| (e.start, e.end));
-        let mut text = sources[&path].clone();
-        for edit in edits.iter().rev() {
-            text.replace_range(edit.start..edit.end, &edit.content);
-        }
+        let text = rewrite(&sources[&path], &edits);
         outputs.insert(path, text);
     }
 
@@ -237,6 +249,69 @@ mod tests {
 
     fn safe(start: usize, end: usize, content: &str) -> Fix {
         Fix::safe(start, end, content, "test")
+    }
+
+    #[test]
+    fn unicode_splitting_fixes_are_rejected_atomically() {
+        let source = "a😀b";
+        let malformed = Fix::safe_edits(
+            vec![Edit::new(0, 1, "A"), Edit::new(2, 3, "X")],
+            "invalid UTF-8 range",
+        );
+        let out = apply_fixes(source, std::slice::from_ref(&malformed), false);
+        assert_eq!(out.output, source);
+        assert_eq!((out.applied, out.skipped_conflicts), (0, 1));
+        let a = PathBuf::from("a.tex");
+        let b = PathBuf::from("b.tex");
+        let sources = HashMap::from([(a.clone(), "abc".into()), (b.clone(), source.into())]);
+        let malformed = Fix::safe_edits(
+            vec![Edit::new(0, 1, "A"), Edit::in_file(b, 2, 3, "X")],
+            "invalid foreign UTF-8 range",
+        );
+        let out = apply_fixes_multi(&sources, &[(a, &malformed)], false);
+        assert!(out.outputs.is_empty());
+        assert_eq!((out.applied, out.skipped_conflicts), (0, 1));
+    }
+
+    #[test]
+    fn insertions_at_replacement_endpoints_keep_stable_order() {
+        let fixes = [
+            safe(0, 0, "first"),
+            safe(0, 0, "second"),
+            safe(0, 1, "😀"),
+            safe(1, 1, "after"),
+        ];
+        let out = apply_fixes("ab", &fixes, false);
+        assert_eq!(out.output, "firstsecond😀afterb");
+        assert_eq!((out.applied, out.skipped_conflicts), (4, 0));
+    }
+
+    #[test]
+    fn many_unicode_edits_preserve_untouched_bytes() {
+        let line = "é{😀}xyz\r\n";
+        let source = line.repeat(4096);
+        let fixes: Vec<_> = (0..4096)
+            .map(|index| {
+                let base = index * line.len();
+                Fix::safe_edits(
+                    vec![
+                        Edit::new(base + 2, base + 3, ""),
+                        Edit::new(base + 7, base + 8, ""),
+                    ],
+                    "remove braces",
+                )
+            })
+            .collect();
+        let expected = "é😀xyz\r\n".repeat(4096);
+        let out = apply_fixes(&source, &fixes, false);
+        assert_eq!(out.output, expected);
+        assert_eq!((out.applied, out.skipped_conflicts), (4096, 0));
+        let path = PathBuf::from("main.tex");
+        let sources = HashMap::from([(path.clone(), source)]);
+        let fixes: Vec<_> = fixes.iter().map(|fix| (path.clone(), fix)).collect();
+        let out = apply_fixes_multi(&sources, &fixes, false);
+        assert_eq!(out.outputs[&path], expected);
+        assert_eq!((out.applied, out.skipped_conflicts), (4096, 0));
     }
 
     #[test]

@@ -60,7 +60,7 @@ impl Parser<'_> {
     }
 
     /// Scan the contiguous trivia run starting at `from`, classifying each token
-    /// so the blank-line and leading-comment-bind rules (AGENTS.md #9) can be
+    /// so the blank-line and leading-comment-bind rules can be
     /// decided from one walk instead of five near-identical ones. `WHITESPACE`,
     /// `DOC_MARGIN`, and `GUARD` float (a `.dtx` margin neither counts as a
     /// newline nor resets the run, so a margin-only line `%\n%\n` still reads as a
@@ -194,14 +194,14 @@ impl Parser<'_> {
     ///
     /// Returns `None` when the run has no own-line comment, a blank line separates
     /// the comment from the construct, or the next non-trivia token is not a
-    /// documentable construct. Mirrors rust-analyzer's `n_attached_trivias`
-    /// (AGENTS.md #9): comments bind forward to the item they annotate, a blank
+    /// documentable construct. Mirrors rust-analyzer's `n_attached_trivias`:
+    /// comments bind forward to the item they annotate, a blank
     /// line breaks the bind, and a same-line trailing comment never binds.
     ///
     /// One deliberate divergence: RA peeks *past* a blank line and keeps attaching
     /// when the next comment is an outer doc comment (`///`/`//!`). LaTeX's single
     /// `%` carries no such intent marker, so we always stop at the blank line (only
-    /// the maximal blank-line-free suffix binds). See AGENTS.md #9;
+    /// the maximal blank-line-free suffix binds).
     /// `comment_after_blank_line_still_binds` (`tests/parser.rs`) pins the divergence.
     pub(super) fn binding_run(&self, from: usize) -> Option<(usize, usize, SyntaxKind)> {
         let s = self.scan_trivia(from, CommentMode::Skip);

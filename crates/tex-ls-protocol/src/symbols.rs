@@ -1,7 +1,22 @@
 //! Symbol conversion from an analysis snapshot.
-use super::*;
-use tex_ls_analysis::bib::outline::BibSymbolKind;
-use tex_ls_analysis::text::line_index::PositionCursor;
+use crate::{
+    context::document_aux,
+    convert::{lsp_range, lsp_range_with_cursor, path_to_uri},
+    presentation,
+};
+use lsp_types::{
+    DocumentSymbol, Location, SymbolKind, Uri, WorkspaceSymbol, WorkspaceSymbolResponse,
+};
+use rowan::TextRange;
+use std::path::{Path, PathBuf};
+use tex_ls_analysis::{
+    bib::outline::{BibOutlineItem, BibSymbolKind, outline as bib_outline},
+    incremental::Analysis,
+    project::aux::AuxData,
+    source::FileKind,
+    text::{LineIndex, PositionEncoding, line_index::PositionCursor},
+};
+use tex_ls_parser::semantic::{OutlineItem, OutlineSymbol};
 
 /// Convert the source outline and supplied last-build numbers to LSP symbols.
 pub fn compute_symbols(

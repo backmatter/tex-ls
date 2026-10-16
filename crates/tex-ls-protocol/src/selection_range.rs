@@ -14,7 +14,6 @@
 
 use lsp_types::{Position, SelectionRange};
 use rowan::TextRange;
-
 use tex_ls_analysis::text::LineIndex;
 use tex_ls_parser::syntax::SyntaxNode;
 

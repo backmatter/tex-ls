@@ -32,6 +32,7 @@ pub mod encoding_hints;
 pub mod inert_suppression;
 pub mod missing_required_field;
 pub mod title_capitalization;
+pub mod undefined_entry;
 pub mod undefined_string;
 pub mod unknown_field;
 pub mod unused_entry;
@@ -45,6 +46,7 @@ pub use encoding_hints::EncodingHints;
 pub use inert_suppression::InertSuppression;
 pub use missing_required_field::MissingRequiredField;
 pub use title_capitalization::TitleCapitalization;
+pub use undefined_entry::UndefinedEntry;
 pub use undefined_string::UndefinedString;
 pub use unknown_field::UnknownField;
 pub use unused_entry::UnusedEntry;
@@ -149,6 +151,7 @@ pub fn all_rules() -> Vec<Box<dyn BibRule>> {
         Box::new(UnusedString),
         Box::new(UnusedEntry),
         Box::new(UndefinedString),
+        Box::new(UndefinedEntry),
         Box::new(TitleCapitalization),
         Box::new(EncodingHints),
     ]
@@ -166,6 +169,7 @@ pub const ALL_BIB_RULE_IDS: &[&str] = &[
     "unused-string",
     "unused-entry",
     "undefined-string",
+    "undefined-entry",
     "title-capitalization",
     "encoding-hints",
 ];

@@ -41,12 +41,21 @@ class Client:
         self.process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode() + data)
         self.process.stdin.flush()
 
-    def request(self, method, params):
+    def request(self, method, params, *, deadline=None):
+        deadline = min(time.monotonic() + 30, deadline) if deadline is not None else time.monotonic() + 30
         for _ in range(20):
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"Request timed out: {method}")
             self.next_id += 1
             self.send(method, params, id=self.next_id)
             while True:
-                message = self.messages.get(timeout=30)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError(f"Request timed out: {method}")
+                try:
+                    message = self.messages.get(timeout=remaining)
+                except queue.Empty as error:
+                    raise TimeoutError(f"Request timed out: {method}") from error
                 if "method" in message:
                     if "id" in message:
                         self.send(id=message["id"], result=None)
@@ -54,9 +63,11 @@ class Client:
                 if message.get("id") == self.next_id:
                     break
             error = message.get("error", {})
+            data = error.get("data")
             diagnostic_retry = (method in {"textDocument/diagnostic", "workspace/diagnostic"}
                                 and error.get("code") == -32802
-                                and (error.get("data") or {}).get("retriggerRequest") is not False)
+                                and isinstance(data, dict)
+                                and data.get("retriggerRequest") is True)
             if error.get("code") == -32801 or diagnostic_retry:
                 continue  # A source write cancelled this captured revision.
             if "error" in message:
@@ -64,15 +75,15 @@ class Client:
             return message["result"]
         raise RuntimeError("Request repeatedly superseded")
 
-    def status(self):
-        return self.request("workspace/executeCommand", {"command": "tex-ls.inspectAcquisition", "arguments": []})
+    def status(self, *, deadline=None):
+        return self.request("workspace/executeCommand", {"command": "tex-ls.inspectAcquisition", "arguments": []}, deadline=deadline)
 
     def ready(self, quiet_seconds=0):
         deadline = time.monotonic() + 30
         quiet_since = None
         last_status = None
         while time.monotonic() < deadline:
-            status = self.status()
+            status = self.status(deadline=deadline)
             idle = (status["pendingReads"] == 0
                     and status["pendingFileAcquisitions"] == 0
                     and status["pendingCompilerAcquisitions"] == 0
@@ -85,7 +96,7 @@ class Client:
             else:
                 quiet_since = None
             last_status = status
-            time.sleep(0.01)
+            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
         raise TimeoutError("Acquisition did not settle")
 
     def close(self):

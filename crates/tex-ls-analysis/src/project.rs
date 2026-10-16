@@ -8,6 +8,7 @@ pub mod aux;
 pub mod citations;
 pub mod graph;
 pub mod include;
+pub mod installed_source;
 pub mod labels;
 pub mod options;
 pub mod package;

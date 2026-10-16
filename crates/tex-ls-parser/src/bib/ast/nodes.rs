@@ -1,38 +1,11 @@
 //! Typed [`AstNode`] wrappers over the BibTeX CST, with syntactic
 //! accessors. The bib analog of [`crate::ast::nodes`]. Purely syntactic: they know
-//! nothing about what a field or entry *means* (AGENTS.md decisions #2, #10).
+//! nothing about what a field or entry *means*.
 
 use rowan::{NodeOrToken, TextRange};
 
 use super::{AstNode, child, children};
 use crate::bib::syntax::{SyntaxKind, SyntaxNode};
-
-/// Declares a newtype wrapper over a `SyntaxNode` of exactly one bib `SyntaxKind`,
-/// implementing [`AstNode`]. Only the identity is generated; accessors are
-/// hand-written. The bib analog of `crate::ast::nodes::ast_node!`.
-macro_rules! ast_node {
-    ($(#[$meta:meta])* $name:ident, $kind:ident) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-        pub struct $name {
-            syntax: SyntaxNode,
-        }
-
-        impl AstNode for $name {
-            fn can_cast(kind: SyntaxKind) -> bool {
-                kind == SyntaxKind::$kind
-            }
-
-            fn cast(syntax: SyntaxNode) -> Option<Self> {
-                Self::can_cast(syntax.kind()).then_some(Self { syntax })
-            }
-
-            fn syntax(&self) -> &SyntaxNode {
-                &self.syntax
-            }
-        }
-    };
-}
 
 ast_node!(
     /// A regular bibliographic entry: `@type{ key, fields }`.

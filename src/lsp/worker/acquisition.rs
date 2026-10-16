@@ -1,6 +1,153 @@
-use super::*;
+use crate::{
+    config::BuildConfig,
+    file_discovery::ExcludeFilter,
+    lsp::{
+        file_acquisition,
+        messages::Outbound,
+        services,
+        worker::{Worker, bibliography_requests},
+    },
+    texmf::InstalledPackages,
+    text::PositionEncoding,
+};
+use lsp_types::Position;
+use std::{path::Path, sync::Arc};
+use tex_ls_analysis::{completion::CompletionContext, incremental::ProjectId};
+use tex_ls_protocol::convert::file_kind_for;
+
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static ACQUISITION_PREFIX_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ACQUISITION_PREFIX_SOURCE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ACQUISITION_PREFIX_COMPARE_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static ACQUISITION_PREFIX_OUTPUT_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct AcquisitionKey {
+    prefix: Arc<str>,
+    suffix: String,
+}
+
+impl PartialEq for AcquisitionKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.suffix == other.suffix
+            && (Arc::ptr_eq(&self.prefix, &other.prefix)
+                || exact_prefix_equal(&self.prefix, &other.prefix))
+    }
+}
+impl Eq for AcquisitionKey {}
+
+#[cfg(test)]
+impl std::fmt::Display for AcquisitionKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}{}", self.prefix, self.suffix)
+    }
+}
+
+fn exact_prefix_equal(left: &str, right: &str) -> bool {
+    #[cfg(test)]
+    ACQUISITION_PREFIX_COMPARE_BYTES.with(|count| count.set(count.get() + left.len()));
+    left == right
+}
+
+fn source_has_control(text: &str) -> bool {
+    #[cfg(test)]
+    ACQUISITION_PREFIX_SOURCE_BYTES.with(|count| count.set(count.get() + text.len()));
+    text.contains('\\')
+}
 
 impl Worker {
+    pub(super) fn project_acquisition_prefix(
+        &mut self,
+        snapshot: &tex_ls_analysis::incremental::Analysis,
+    ) -> Arc<str> {
+        let project = snapshot.project_id();
+        let revision = snapshot.revision();
+        if let Some((cached_revision, prefix)) = self.acquisition_project_prefixes.get(&project)
+            && *cached_revision == revision
+        {
+            return prefix.clone();
+        }
+        #[cfg(test)]
+        ACQUISITION_PREFIX_BUILDS.with(|count| count.set(count.get() + 1));
+        let references: Vec<_> = snapshot
+            .project_members()
+            .iter()
+            .filter(|m| m.kind.is_latex())
+            .map(|member| {
+                (
+                    &member.path,
+                    source_has_control(snapshot.file_text(member.file)),
+                    snapshot
+                        .file_discovery_references(member.file)
+                        .iter()
+                        .map(|r| &r.candidates)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let prefix = format!("{references:?}");
+        #[cfg(test)]
+        ACQUISITION_PREFIX_OUTPUT_BYTES.with(|count| count.set(count.get() + prefix.len()));
+        // Reuse the canonical allocation when a broad writer revision changed
+        // without changing the acquisition projection. Existing per-path keys
+        // then keep their constant-time pointer comparison.
+        let prefix = self
+            .acquisition_project_prefixes
+            .get(&project)
+            .filter(|(_, previous)| exact_prefix_equal(previous, &prefix))
+            .map_or_else(
+                || Arc::<str>::from(prefix),
+                |(_, previous)| previous.clone(),
+            );
+        self.acquisition_project_prefixes
+            .insert(project, (revision, prefix.clone()));
+        prefix
+    }
+}
+
+impl Worker {
+    pub(super) fn file_acquisition_key(
+        &mut self,
+        path: &Path,
+        completion: Option<(Position, PositionEncoding)>,
+        installed: &InstalledPackages,
+    ) -> AcquisitionKey {
+        let snapshot = self.snapshot_for(path);
+        let prefix = self.project_acquisition_prefix(&snapshot);
+        let context = completion.and_then(|(position, enc)| {
+            let file = snapshot.lookup_file(path)?;
+            if !file_kind_for(path).is_latex() {
+                return None;
+            }
+            let offset = snapshot
+                .file_line_index(file, enc)
+                .offset_at(position.line, position.character);
+            // Acquisition runs before the warm-key comparison. Reuse revision
+            // facts so ordinary argument cursors do not rescan the whole source.
+            let context = tex_ls_analysis::completion::classify_context_with_roles(
+                &snapshot.parsed_tree(file),
+                offset,
+                snapshot.declarations_for(path),
+                || snapshot.file_roles(file),
+            );
+            match context {
+                CompletionContext::FilePath { prefix, .. }
+                | CompletionContext::PackageName { prefix, .. } => Some(prefix),
+                _ => None,
+            }
+        });
+        AcquisitionKey {
+            prefix,
+            suffix: format!(
+                "{context:?}{:?}{}",
+                installed.config(),
+                installed.generation()
+            ),
+        }
+    }
+
     /// Walk the active file's directory once for `.tex`/`.bib` siblings, reading
     /// and upserting any not already tracked, so the cross-file resolvers see the
     /// whole project. Returns whether the member set grew.
@@ -25,49 +172,7 @@ impl Worker {
             self.loading_indexes.push(installed.clone());
             let _ = self.out_tx.send(Outbound::Loading(true));
         }
-        let key = {
-            let snapshot = self.snapshot_for(path);
-            let references: Vec<_> = snapshot
-                .project_members()
-                .iter()
-                .filter(|m| m.kind.is_latex())
-                .map(|member| {
-                    (
-                        &member.path,
-                        snapshot.file_text(member.file).contains('\\'),
-                        snapshot
-                            .file_discovery_references(member.file)
-                            .iter()
-                            .map(|r| &r.candidates)
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .collect();
-            let context = completion.and_then(|(position, enc)| {
-                let file = snapshot.lookup_file(path)?;
-                if !file_kind_for(path).is_latex() {
-                    return None;
-                }
-                let offset = snapshot
-                    .file_line_index(file, enc)
-                    .offset_at(position.line, position.character);
-                let context = tex_ls_analysis::completion::classify_context_with_declarations(
-                    &snapshot.parsed_tree(file),
-                    offset,
-                    snapshot.declarations_for(path),
-                );
-                match context {
-                    CompletionContext::FilePath { prefix, .. }
-                    | CompletionContext::PackageName { prefix, .. } => Some(prefix),
-                    _ => None,
-                }
-            });
-            format!(
-                "{references:?}{context:?}{:?}{}",
-                installed.config(),
-                installed.generation()
-            )
-        };
+        let key = self.file_acquisition_key(path, completion, installed);
         if self.acquisition_keys.get(&(project, path.to_owned())) == Some(&key)
             && self.pending_scans.get(&project).is_none_or(Vec::is_empty)
             && self
@@ -99,8 +204,33 @@ impl Worker {
                 })
                 .map(|(_, path)| path.clone())
                 .collect();
+            let revived: Vec<_> = if changed {
+                index
+                    .by_name
+                    .iter()
+                    .filter(|(name, selected)| {
+                        snapshot.texmf().by_name.get(*name) != Some(*selected)
+                            && snapshot.lookup_file(selected).is_none()
+                            && matches!(
+                                snapshot.location_kind(selected),
+                                Observation::Absent | Observation::Error(_)
+                            )
+                    })
+                    .map(|(_, selected)| selected.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             drop(snapshot);
             if changed {
+                self.extra_sources
+                    .entry(project)
+                    .or_default()
+                    .extend(revived.iter().cloned());
+                self.extra_locations
+                    .entry(project)
+                    .or_default()
+                    .extend(revived);
                 // Previously loaded installed sources also need re-observation;
                 // replacing the name index alone leaves stale backing files alive.
                 self.extra_sources
@@ -299,14 +429,92 @@ impl Worker {
         if tex_ls_analysis::source::lint_file_kind(path).is_none() {
             return false;
         }
+        // File creation/deletion can change installed filename selection before
+        // its periodic refresh. Requests must await the watched generation.
+        for (_, installed) in self.discovery_anchors.values() {
+            installed.watched_source_change(path, deleted);
+        }
+        // Installed sources can belong to several workspace roots while their
+        // physical path lies outside every root. Refresh each owning project.
+        let owners: std::collections::BTreeSet<_> = self
+            .projects
+            .projects()
+            .filter(|project| {
+                if self.source_version_at(*project, path).is_some() {
+                    return true;
+                }
+                // Deletion removes source membership, but a live preamble
+                // retains its failed location observation. A later watch event
+                // must refresh that project only while the installation still
+                // selects this exact path.
+                self.db.snapshot_for(*project).is_ok_and(|snapshot| {
+                    matches!(
+                        snapshot.location_kind(path),
+                        tex_ls_analysis::external::Observation::Absent
+                            | tex_ls_analysis::external::Observation::Error(_)
+                    ) && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            snapshot
+                                .texmf()
+                                .by_name
+                                .get(name)
+                                .is_some_and(|p| p == path)
+                        })
+                })
+            })
+            .collect();
+        if !owners.is_empty() {
+            let mut removed = false;
+            for project in owners {
+                removed |= self.refresh_backing(project, path, deleted);
+            }
+            return removed;
+        }
         let project = self.project_for(path);
-        let tracked = self.source_version_at(project, path).is_some();
         let in_seeded_dir = path
             .parent()
             .is_some_and(|dir| self.seeded_dirs.contains(&(project, dir.to_path_buf())));
-        if !tracked && !in_seeded_dir && self.projects.root_for(path).is_none() {
+        if !in_seeded_dir && self.projects.root_for(path).is_none() {
             return false;
         }
         self.refresh_backing(project, path, deleted)
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn exact_key_equality_preserves_native_suffixes_and_distinct_allocations() {
+        for prefix in ["[]", "[(\"/p/é😀.tex\", true, [])]"] {
+            let canonical: Arc<str> = Arc::from(prefix);
+            for suffix in ["Noneconfig0", "Some(\"input\")config0", "Noneconfig1"] {
+                let key = AcquisitionKey {
+                    prefix: canonical.clone(),
+                    suffix: suffix.into(),
+                };
+                let shared = key.clone();
+                let independently_allocated = AcquisitionKey {
+                    prefix: Arc::from(prefix),
+                    suffix: suffix.into(),
+                };
+                assert_eq!(key, shared);
+                assert_eq!(key, independently_allocated);
+                assert_eq!(key.to_string(), format!("{prefix}{suffix}"));
+                let changed_suffix = AcquisitionKey {
+                    prefix: canonical.clone(),
+                    suffix: format!("{suffix}different"),
+                };
+                assert_ne!(key, changed_suffix);
+                let changed_prefix = AcquisitionKey {
+                    prefix: Arc::from(format!("{prefix}different")),
+                    suffix: suffix.into(),
+                };
+                assert_ne!(key, changed_prefix);
+            }
+        }
     }
 }

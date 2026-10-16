@@ -1,4 +1,29 @@
-use super::*;
+use crate::{
+    lsp::{
+        messages::WorkerJob,
+        requests::relint_all_open,
+        responses::send_diagnostics,
+        settings::EditorSettings,
+        state::{Document, GlobalState},
+    },
+    text::TextBuffer,
+};
+use crossbeam_channel::Sender;
+use lsp_server::{Connection, Message, Notification, Request, RequestId};
+use lsp_types::{
+    DidChangeConfigurationNotification, DidChangeConfigurationParams,
+    DidChangeTextDocumentNotification, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesNotification, DidChangeWatchedFilesParams,
+    DidChangeWatchedFilesRegistrationOptions, DidCloseTextDocumentNotification,
+    DidCloseTextDocumentParams, DidOpenTextDocumentNotification, DidOpenTextDocumentParams,
+    FileChangeType, FileSystemWatcher, GlobPattern, Notification as _, Registration,
+    RegistrationParams, RegistrationRequest, Request as _,
+};
+use std::{path::PathBuf, sync::Arc};
+use tex_ls_protocol::{
+    convert::{file_kind_for, path_to_uri, uri_to_fs_path, uri_to_path},
+    synchronization::apply_content_changes,
+};
 
 /// Route a notification: edits and lifecycle to the worker, config inline.
 pub(super) fn on_notification(
@@ -20,7 +45,7 @@ pub(super) fn on_notification(
                     .collect();
                 for (old, _) in &files {
                     state.declarations.remove(old);
-                    state.artifact_watches.remove(old);
+                    state.replace_artifact_watches(old.clone(), Vec::new());
                     if !state.supports_pull_diagnostics
                         && let Some(uri) = path_to_uri(old)
                     {
@@ -55,14 +80,23 @@ pub(super) fn on_notification(
             );
             state.workspace_roots.sort();
             state.workspace_roots.dedup();
-            state.artifact_watches.retain(|source, _| {
-                !removed.iter().any(|root| source.starts_with(root))
-                    || state
-                        .workspace_roots
-                        .iter()
-                        .any(|root| source.starts_with(root))
-                    || path_to_uri(source).is_some_and(|uri| state.documents.contains_key(&uri))
-            });
+            let retired: Vec<_> = state
+                .artifact_watches
+                .keys()
+                .filter(|source| {
+                    removed.iter().any(|root| source.starts_with(root))
+                        && !state
+                            .workspace_roots
+                            .iter()
+                            .any(|root| source.starts_with(root))
+                        && !path_to_uri(source)
+                            .is_some_and(|uri| state.documents.contains_key(&uri))
+                })
+                .cloned()
+                .collect();
+            for source in retired {
+                state.replace_artifact_watches(source, Vec::new());
+            }
             state
                 .scoped_editor_settings
                 .retain(|root, _| state.workspace_roots.contains(root));
@@ -209,7 +243,7 @@ pub(super) fn on_notification(
 pub(super) const WATCHED_FILES_REGISTRATION_ID: &str = "tex-ls-watched-files";
 
 /// Dynamically register file watchers for the project's on-disk leaves
-/// (`**/*.{tex,bib,bibtex,sty,cls,dtx,ins,def,lco,aux,log,fls}`) and the config file (`tex-ls.toml`), so out-of-editor edits to
+/// (`**/*.{tex,bib,bibtex,sty,cls,clo,dtx,ins,def,lco,aux,log,fls}`) and the config file (`tex-ls.toml`), so out-of-editor edits to
 /// non-open includes reanalyze open documents. Called once right after the initialize
 /// handshake. A no-op when the client lacks
 /// `didChangeWatchedFiles.dynamicRegistration` (native watching owns the scope). The
@@ -222,7 +256,7 @@ pub(super) fn register_file_watchers(connection: &Connection, state: &mut Global
         watchers: vec![
             FileSystemWatcher {
                 glob_pattern: GlobPattern::Pattern(
-                    "**/*.{tex,bib,bibtex,sty,cls,dtx,ins,def,lco,aux,log,fls}".to_owned(),
+                    "**/*.{tex,bib,bibtex,sty,cls,clo,dtx,ins,def,lco,aux,log,fls}".to_owned(),
                 ),
                 kind: None,
             },
@@ -261,6 +295,19 @@ pub(super) fn on_watched_files_change(
     job_tx: &Sender<WorkerJob>,
     params: DidChangeWatchedFilesParams,
 ) {
+    // Backing refreshes cannot change the effective bytes of an open overlay.
+    // In particular, the fallback watcher's initial Created observation must not
+    // reject an edit computed for that overlay. Other paths (including physical
+    // aliases), acquired compiler artifacts and configuration changes invalidate edits immediately,
+    // before the asynchronous refresh can complete.
+    if params.changes.iter().any(|event| {
+        let path = uri_to_path(&event.uri);
+        path.file_name().is_some_and(|name| name == "tex-ls.toml")
+            || state.artifact_watch_counts.contains_key(&path)
+            || !state.documents.contains_key(&event.uri)
+    }) {
+        state.diagnostic_stamp += 1;
+    }
     let mut config_changed = false;
     for event in params.changes {
         let path = uri_to_path(&event.uri);

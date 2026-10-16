@@ -240,9 +240,96 @@ pub(crate) fn contexts<'a>(
     include_components(db, project).contexts.get(root)
 }
 
+/// Inclusion roots without materializing the component's label contents.
+pub(crate) fn candidate_roots<'a>(
+    db: &'a dyn IncrementalDb,
+    project: ProjectInput,
+    path: &Path,
+) -> &'a [PathBuf] {
+    include_components(db, project)
+        .roots
+        .get(path)
+        .map_or(&[], Vec::as_slice)
+}
+
+pub(crate) fn is_closed(db: &dyn IncrementalDb, project: ProjectInput, path: &Path) -> bool {
+    let views = include_components(db, project);
+    views
+        .component_of
+        .get(path)
+        .is_some_and(|&id| views.closed[id])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acquisition_scope_matches_labels_without_building_label_semantics() {
+        use crate::incremental::{IncrementalDatabase, QueryKind};
+        let files = [
+            ("/p/a.tex", r"\begin{document}\input{shared}\end{document}"),
+            ("/p/b.tex", r"\begin{document}\input{shared}\end{document}"),
+            ("/p/shared.tex", r"\label{shared}\input{leaf}"),
+            ("/p/leaf.tex", r"\ref{shared}"),
+            ("/p/cycle-a.tex", r"\input{cycle-b}"),
+            ("/p/cycle-b.tex", r"\input{cycle-a}"),
+            (
+                "/p/dynamic.tex",
+                r"\begin{document}\input{\name}\end{document}",
+            ),
+            ("/p/missing.tex", r"\input{absent}"),
+            ("/p/fragment.tex", r"\label{fragment}"),
+            ("/p/package.cls", r"\def\internal#1{#1}"),
+        ];
+        let mut db = IncrementalDatabase::default();
+        for (path, text) in files {
+            db.apply_change(Path::new(path), text, None);
+        }
+        let verify = |db: &IncrementalDatabase| {
+            db.clear_query_log();
+            let snapshot = db.snapshot();
+            let paths: Vec<_> = files
+                .iter()
+                .map(|(path, _)| Path::new(path))
+                .chain([Path::new("/p/unknown.tex")])
+                .collect();
+            let scopes: Vec<_> = paths
+                .iter()
+                .map(|path| {
+                    if let Some(file) = snapshot.lookup_file(path) {
+                        snapshot.file_discovery_references(file);
+                    }
+                    (
+                        snapshot.document_roots(path).to_vec(),
+                        snapshot.document_scope_is_closed(path),
+                    )
+                })
+                .collect();
+            assert!(db.query_log().iter().all(|entry| !matches!(
+                entry.kind,
+                QueryKind::ResolvedLabels
+                    | QueryKind::ComponentLabels
+                    | QueryKind::SemanticModel
+                    | QueryKind::FileLabels
+                    | QueryKind::FileRefs
+            )));
+            let labels = snapshot.resolve_labels();
+            for (path, (roots, closed)) in paths.iter().zip(scopes) {
+                assert_eq!(roots, labels.candidate_roots(path), "{path:?}");
+                assert_eq!(closed, labels.is_closed(path), "{path:?}");
+            }
+        };
+        verify(&db);
+        db.apply_change(
+            Path::new("/p/b.tex"),
+            r"\begin{document}\end{document}",
+            None,
+        );
+        verify(&db);
+        db.apply_change(Path::new("/p/leaf.tex"), r"\input{absent}", None);
+        verify(&db);
+    }
     use crate::project::{
         graph::FileFacts,
         include::{IncludeEdgeKey, IncludeKind, IncludeTarget},

@@ -52,3 +52,20 @@ fn biblatex_examples_has_no_undefined_string_uses() {
         "unexpected undefined @string uses (every macro is defined in-file or a month): {undefined:?}"
     );
 }
+
+#[test]
+fn preamble_macros_count_as_uses_with_exact_ranges() {
+    let source = "@string{prefix={X}}\n@preamble{prefix # {suffix} # missing # 2020}\n";
+    let parsed = parse(source);
+    assert!(parsed.errors.is_empty());
+    assert_eq!(parsed.syntax().to_string(), source);
+    let model = Model::build(&parsed.syntax());
+    let undefined: Vec<_> = model.undefined_string_uses().collect();
+    assert_eq!(undefined.len(), 1);
+    assert_eq!(undefined[0].name, "missing");
+    assert_eq!(
+        &source[usize::from(undefined[0].range.start())..usize::from(undefined[0].range.end())],
+        "missing"
+    );
+    assert_eq!(model.unused_string_defs().count(), 0);
+}

@@ -19,7 +19,7 @@
 //!
 //! The table lives here, not in `data/signatures.json`: "this primitive is
 //! discouraged in LaTeX" is a lint judgment, not the structural arity/verbatim
-//! fact the signature DB carries (AGENTS.md core decision #2).
+//! fact the signature DB carries.
 
 use std::path::PathBuf;
 
@@ -207,28 +207,17 @@ impl Rule for PrimitiveCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if PrimitiveCommand.interests().contains(&el.kind()) {
-                PrimitiveCommand.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if PrimitiveCommand.interests().contains(&el.kind()) {
+                    PrimitiveCommand.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

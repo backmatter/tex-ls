@@ -273,7 +273,7 @@ fn opens_here(tok: &SyntaxToken, text: &str, offset: usize) -> bool {
 /// assignment form (`\mathchardef\mdash="2D`, no brace group) as well. Since word
 /// characters glue, `="2D` lexes as one `WORD`, so the hex run and its boundary are
 /// always in-token. A false negative (a quoted all-hex acronym like `"CAFE"` loses
-/// its opening-quote finding) is the safe direction (AGENTS.md linter posture): no
+/// its opening-quote finding) is the safe direction: no
 /// fix means no corruption.
 fn is_hex_constant(after: &str) -> bool {
     let run = after
@@ -292,31 +292,20 @@ mod tests {
     use super::*;
     use crate::linter::diagnostic::Applicability;
     use crate::linter::fix::apply_fixes;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        let mut visitor = StraightQuotes.stream().expect("a stream visitor");
-        for el in root.descendants_with_tokens() {
-            visitor.visit(&el, &ctx, &mut out);
-        }
-        visitor.finish(&ctx, &mut out);
-        // The driver sorts findings by position; do the same so the tests read in
-        // document order even when a deferred flush lands last.
-        out.sort_by_key(|d| (d.start, d.end));
-        out
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            let mut visitor = StraightQuotes.stream().expect("a stream visitor");
+            for el in root.descendants_with_tokens() {
+                visitor.visit(&el, ctx, &mut out);
+            }
+            visitor.finish(ctx, &mut out);
+            // The driver sorts findings by position; do the same so the tests read in
+            // document order even when a deferred flush lands last.
+            out.sort_by_key(|d| (d.start, d.end));
+            out
+        })
     }
 
     /// The `(start, end, content)` triples of a finding's fix, in edit order.

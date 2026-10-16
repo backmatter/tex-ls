@@ -6,10 +6,8 @@
 //! `@comment` body. It offers no fix because the intended entry, region boundary,
 //! or formatting policy must come from the author.
 
-use std::path::PathBuf;
-
-use crate::directives::DirectiveOutcome;
 use crate::linter::diagnostic::Diagnostic;
+use crate::linter::suppression_meta::{self, Carrier};
 
 use super::{BibRule, BibRuleContext, Example};
 
@@ -38,39 +36,9 @@ impl BibRule for InertSuppression {
     }
 
     fn check_file(&self, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
-        for located in ctx
-            .suppressions
-            .directives()
-            .iter()
-            .filter(|located| located.outcome != DirectiveOutcome::Honored)
-        {
-            let message = match located.outcome {
-                DirectiveOutcome::Honored => continue,
-                DirectiveOutcome::DanglingSkip => {
-                    "`skip` has no following entry, so this directive does nothing"
-                }
-                DirectiveOutcome::UnmatchedOn => {
-                    "`on` has no matching `off`, so this directive closes no region"
-                }
-                DirectiveOutcome::UnclosedOff => {
-                    "`off` reaches the end of the file without a matching `on`"
-                }
-                DirectiveOutcome::Unsupported => {
-                    "the BibTeX formatter does not support format suppression, so this \
-                     directive does nothing"
-                }
-            };
-            sink.push(Diagnostic {
-                rule: self.id(),
-                severity: self.default_severity(),
-                path: PathBuf::new(),
-                start: usize::from(located.range.start()),
-                end: usize::from(located.range.end()),
-                message: message.to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-        }
+        sink.extend(ctx.suppressions.directives().iter().filter_map(|located| {
+            suppression_meta::inert(located, Carrier::Bibtex, self.default_severity())
+        }));
     }
 }
 

@@ -33,7 +33,7 @@ pub(super) fn spans_multiple_lines(node: &SyntaxNode) -> bool {
 /// tokens are line-oriented column-0 facts (a `%` or `%<…>` recognized at line
 /// start only), so any relayout that merges or re-indents their lines silently
 /// turns them into ordinary comments on the next parse. Always false outside
-/// the `.dtx` lexer mode (only it emits these kinds), which is why `cx.is_dtx`
+/// the `.dtx` lexer mode (only it emits these kinds), which is why `cx.source.is_dtx`
 /// short-circuits it — the same gate [`doc_margin_opens_line`] carries, and not
 /// merely an optimization at this size. This is a *match guard* on most of
 /// [`lower_node`]'s relayout arms, so it runs for every group, environment, and
@@ -41,7 +41,7 @@ pub(super) fn spans_multiple_lines(node: &SyntaxNode) -> bool {
 /// level. Ungated it was ~52% of the run on `{{{…}}}` nested 4000 deep, and made
 /// lowering quadratic in nesting depth for every file, `.dtx` or not.
 pub(super) fn contains_doc_margin(node: &SyntaxNode, cx: LowerCtx<'_>) -> bool {
-    if !cx.is_dtx || cx.in_dtx_doc_region {
+    if !cx.source.is_dtx || cx.in_dtx_doc_region {
         return false;
     }
     node.descendants_with_tokens()
@@ -208,7 +208,7 @@ pub(super) fn line_is_command_only(
         match element {
             SyntaxElement::Token(t) if t.kind() == SyntaxKind::NEWLINE => break,
             SyntaxElement::Token(t) if t.kind() == SyntaxKind::COMMENT => break,
-            SyntaxElement::Token(t) if cx.is_dtx && t.kind() == SyntaxKind::DOC_MARGIN => {
+            SyntaxElement::Token(t) if cx.source.is_dtx && t.kind() == SyntaxKind::DOC_MARGIN => {
                 continue;
             }
             SyntaxElement::Token(t) if t.kind() == SyntaxKind::WHITESPACE => continue,
@@ -260,7 +260,7 @@ pub(super) fn next_nontrivia_is_label(
 
 pub(super) fn is_section_label_framing(element: &SyntaxElement, cx: LowerCtx<'_>) -> bool {
     is_collapsible_trivia_element(element)
-        || matches!(element, SyntaxElement::Token(token) if cx.is_dtx && token.kind() == SyntaxKind::DOC_MARGIN)
+        || matches!(element, SyntaxElement::Token(token) if cx.source.is_dtx && token.kind() == SyntaxKind::DOC_MARGIN)
 }
 
 /// Whether `elements[idx]` is in a label run immediately after a sectioning

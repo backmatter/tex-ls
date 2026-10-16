@@ -7,7 +7,7 @@ arity** — exactly the bulk tier tex-ls wants *underneath* its hand-curated
 ``data/signatures.json`` (see ``src/semantic/signature.rs`` module docs). This script
 ingests them into the *same* JSON schema.
 
-What it extracts (deliberately minimal — see AGENTS.md decision #2 and the plan):
+What it extracts, limited to static metadata:
 
 * command/environment **names**, and
 * **argument shapes**: each top-level ``{…}`` → ``"req"``, ``[…]`` → ``"opt"``, and

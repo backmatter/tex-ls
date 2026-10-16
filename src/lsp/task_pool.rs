@@ -9,9 +9,8 @@
 //! whatever channels they capture (the LSP `out_tx`/`done_tx`), so the pool
 //! needs no result channel of its own — just [`Spawner::spawn`].
 
-use std::thread::JoinHandle;
-
 use crossbeam_channel::{Receiver, Sender};
+use std::thread::JoinHandle;
 
 /// A boxed unit of work to run on a worker thread.
 type Job = Box<dyn FnOnce() + Send + 'static>;

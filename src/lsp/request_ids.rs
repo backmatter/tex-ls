@@ -1,6 +1,7 @@
 //! Map transport IDs to per-request identities so a late result cannot complete
 //! a newer request that reused the same wire ID after cancellation.
-use super::*;
+use lsp_server::RequestId;
+use std::{collections::HashMap, sync::Arc};
 #[derive(Default)]
 pub(super) struct RequestIds {
     next: u64,

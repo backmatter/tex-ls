@@ -32,7 +32,7 @@
 //!
 //! The macro table lives here, not in `data/signatures.json`: "this logo swallows
 //! a following space" is a lint judgment, not the structural arity/verbatim fact
-//! the signature DB carries (AGENTS.md core decision #2).
+//! the signature DB carries.
 
 use std::path::PathBuf;
 
@@ -177,28 +177,17 @@ mod tests {
     use super::*;
     use crate::linter::diagnostic::Applicability;
     use crate::linter::fix::apply_fixes;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if SwallowedSpace.interests().contains(&el.kind()) {
-                SwallowedSpace.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if SwallowedSpace.interests().contains(&el.kind()) {
+                    SwallowedSpace.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

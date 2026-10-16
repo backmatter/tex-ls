@@ -192,7 +192,7 @@ fn adjacent_sibling_command(command: &SyntaxNode) -> Option<SyntaxNode> {
 }
 
 /// Whether `kind` is trivia (whitespace/newline/comment); the fixed trivia set
-/// of AGENTS.md decision #9, as in the sibling rule-local copies.
+/// shared with the sibling rule-local copies.
 fn is_trivia(kind: SyntaxKind) -> bool {
     matches!(
         kind,

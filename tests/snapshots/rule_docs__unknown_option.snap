@@ -4,7 +4,7 @@ expression: render_rule_doc(rule.as_ref())
 ---
 ## `unknown-option`
 
-Report package options absent from a loaded local package's `\DeclareOption` declarations. The rule skips installed packages, class options, and `key=value` options. A default handler, key-value processor, option forwarding, or `\input` makes the package's declared set incomplete and disables the check. No fix is offered because removing or renaming an option changes the requested behavior.
+Report options on active package loads, excluding stored token lists and local load-command overrides. Options are checked against a loaded local package's `\DeclareOption` declarations. The rule skips installed packages, class options, and `key=value` options. A default handler, key-value processor, option forwarding, or `\input` makes the package's declared set incomplete and disables the check. No fix is offered because removing or renaming an option changes the requested behavior.
 
 This rule is **enabled by default**.
 

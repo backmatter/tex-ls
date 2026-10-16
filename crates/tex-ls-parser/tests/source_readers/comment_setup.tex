@@ -1,0 +1,8 @@
+\def\comment{\@bsphack
+  \let\do\@makeother\dospecials\catcode`\^^M\active
+  \let\verbatim@startline\relax
+  \let\verbatim@addtoline\@gobble
+  \let\verbatim@processline\relax
+  \let\verbatim@finish\relax
+  \verbatim@}
+\let\endcomment=\@esphack

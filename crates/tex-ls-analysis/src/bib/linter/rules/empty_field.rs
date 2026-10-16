@@ -136,28 +136,17 @@ fn delimited_is_empty(node: &SyntaxNode) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bib::parse;
-    use crate::bib::semantic::Model;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = parse(src).syntax();
-        let model = Model::build(&root);
-        let ctx = BibRuleContext {
-            project: None,
-            path: std::path::Path::new("x.bib"),
-            root: &root,
-            source: src,
-            model: &model,
-            db: crate::bib::semantic::builtin(),
-            suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),
-        };
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if EmptyField.interests().contains(&el.kind()) {
-                EmptyField.check(&el, &ctx, &mut out);
+        crate::bib::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if EmptyField.interests().contains(&el.kind()) {
+                    EmptyField.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

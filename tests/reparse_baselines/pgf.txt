@@ -1,8 +1,8 @@
 pgf	corpus	files=414	bytes=7464252
-pgf	word-typing	spliced=3546/4245	token=3470	verbatim=76	math=0	region=0	files=324
-pgf	word-deleting	spliced=3496/4245	token=3400	verbatim=96	math=0	region=0	files=324
-pgf	protected-typing	spliced=1635/1660	token=0	verbatim=1635	math=0	region=0	files=119
-pgf	math-word-typing	spliced=340/375	token=340	verbatim=0	math=0	region=0	files=31
-pgf	math-shape-typing	spliced=385/460	token=0	verbatim=0	math=385	region=0	files=38
-pgf	hazard-single	spliced=2575/6624	token=2186	verbatim=386	math=3	region=0	files=414
-pgf	hazard-chain	spliced=172/2070	token=133	verbatim=39	math=0	region=0	files=414
+pgf	word-typing	spliced=2830/4235	token=2770	verbatim=60	math=0	region=0	files=324
+pgf	word-deleting	spliced=2785/4235	token=2725	verbatim=60	math=0	region=0	files=324
+pgf	protected-typing	spliced=1180/1670	token=0	verbatim=1180	math=0	region=0	files=120
+pgf	math-word-typing	spliced=240/375	token=240	verbatim=0	math=0	region=0	files=31
+pgf	math-shape-typing	spliced=230/460	token=0	verbatim=0	math=230	region=0	files=38
+pgf	hazard-single	spliced=1363/6624	token=1096	verbatim=265	math=2	region=0	files=414
+pgf	hazard-chain	spliced=118/2070	token=89	verbatim=29	math=0	region=0	files=414

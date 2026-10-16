@@ -274,8 +274,10 @@ pub struct EnvironmentSig {
     /// braced form, the argument may be delimited `\verb`-style
     /// (`\begin{macro}+\@@_compile_{:+`), chosen precisely when the name holds
     /// unbalanced braces. The lexer captures that delimited form as one opaque
-    /// `VERB` token; the braced form lexes normally. Curated only — a wrong
-    /// grant swallows real text, so the CWL/user tiers never set it.
+    /// `VERB` token; the braced form keeps its braces around opaque raw content,
+    /// including multiline documentation names. Only curated profiles can
+    /// establish it; arbitrary CWL/source argument specifications cannot.
+    /// Explicit project aliases may inherit a curated profile.
     pub verbatim_arg: bool,
     /// `true` for math environments (`equation`, `align`, …).
     pub math: bool,
@@ -700,7 +702,7 @@ impl SignatureDb {
 /// Scanned-first matches TeX scoping intuition: a locally (re)defined command
 /// shadows a built-in of the same name. (We do not yet model *where* a definition
 /// becomes visible — a whole-file union — which is sound for the formatter's arity
-/// needs; lexical/conditional visibility is out of scope, per AGENTS.md #1.)
+/// needs; lexical/conditional visibility is out of scope.)
 #[derive(Debug, Clone, Copy)]
 pub struct Signatures<'a> {
     user: &'a SignatureDb,
@@ -1615,9 +1617,22 @@ mod tests {
             assert_eq!(cmd.args.len(), 1, "{name} arity");
             assert!(cmd.args[0].required, "{name} arg is mandatory");
         }
-        for name in ["macro", "environment"] {
+        for name in ["macro", "function", "variable", "environment"] {
             let env = db.environment(name).unwrap_or_else(|| panic!("{name} env"));
-            assert_eq!(env.args.len(), 1, "{name} arity");
+            if name == "environment" {
+                assert_eq!(env.args.len(), 1, "{name} arity");
+                assert!(!env.verbatim_arg);
+            } else {
+                assert_eq!(env.args.len(), 2, "{name} arity");
+                assert_eq!(env.args[0].kind, ArgKind::Bracket);
+                assert!(!env.args[0].required);
+                assert_eq!(env.args[0].content, ContentKind::Opaque);
+                assert_eq!(env.args[0].domain, super::ArgumentDomain::Unknown);
+                assert!(env.verbatim_arg);
+            }
+            let name_arg = env.args.last().unwrap();
+            assert_eq!(name_arg.kind, ArgKind::Brace);
+            assert!(name_arg.required);
             assert!(env.block(), "{name} is a block env");
             assert!(env.reflow(), "{name} body reflows as prose");
             assert!(!env.code, "{name} is not a code env");

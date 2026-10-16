@@ -1,4 +1,22 @@
-use super::*;
+use crate::{
+    config::BuildConfig,
+    declarations::ResolvedDeclarations,
+    file_discovery::ExcludeFilter,
+    formatter::{FormatStyle, WrapMode, sentence::SentenceLanguage},
+    linter::RuleSelection,
+    lsp::{messages::WorkerJob, state::GlobalState},
+    texmf::InstalledPackages,
+};
+use crossbeam_channel::Sender;
+use lsp_server::Request;
+use lsp_types::Uri;
+use serde::Deserialize;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::SystemTime,
+};
+use tex_ls_protocol::convert::{uri_to_fs_path, uri_to_path};
 
 /// Settings supplied by the editor, as `initializationOptions` at startup or via
 /// `workspace/didChangeConfiguration`. The width knobs are a fallback beneath a
@@ -152,12 +170,23 @@ pub(super) struct ResolvedSettings {
     /// only by label hover and document symbols (resolved numbers), never the
     /// formatter — so it cannot affect `tex-ls format` output.
     pub(super) build: BuildConfig,
-    /// The project's resolved declarations (`AGENTS.md` decision #12), the one
+    /// The project's resolved declarations, the one
     /// non-text input to the parse. Held behind an `Arc` because every dispatch
     /// site clones the settings and the value is identical (and usually empty)
     /// across a workspace. Reaches the worker's salsa input via
     /// [`WorkerJob::Declarations`].
     pub(super) declarations: Arc<ResolvedDeclarations>,
+}
+
+impl ResolvedSettings {
+    pub(super) fn format_style(&self, tab_size: u32) -> FormatStyle {
+        let mut style = self.style;
+        if !self.indent_width_configured && tab_size > 0 {
+            style.indent_width = tab_size as usize;
+        }
+        style.wrap = self.wrap_override.unwrap_or_default();
+        style
+    }
 }
 
 /// The cheap part of a config file's identity. Modification time catches an

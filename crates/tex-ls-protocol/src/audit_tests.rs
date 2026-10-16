@@ -1,6 +1,33 @@
-use super::*;
+use crate::{
+    actions::compute_code_actions,
+    capabilities,
+    completion::{
+        cite_completion_items, compute_bib_completion, compute_completion, compute_tex_completion,
+        glossary_completion_items, resolve as completion_resolve,
+    },
+    convert::{byte_range_to_lsp, file_kind_for, lsp_range, path_to_uri},
+    diagnostic_store, formatting, hover,
+    navigation::{
+        compute_document_highlight, compute_goto_definition, compute_linked_editing,
+        compute_prepare_rename, compute_rename,
+    },
+    response_policy::ResponsePolicy,
+    semantic_tokens, signature_help, source_cards,
+    symbols::{self, compute_bib_symbol_response, compute_bib_symbols},
+};
+use lsp_types::{CodeActionKind, CodeActionResponse, Position, Range, TextEdit};
+use rowan::{TextRange, TextSize};
 use serde_json::json;
-use tex_ls_analysis::incremental::IncrementalDatabase;
+use std::path::{Path, PathBuf};
+use tex_ls_analysis::{
+    incremental::IncrementalDatabase,
+    linter::RuleSelection,
+    project::texmf::TexmfIndex,
+    source::FileKind,
+    text::{LineIndex, PositionEncoding, TextBuffer},
+};
+use tex_ls_formatter::formatter::{FormatStyle, SentenceOptions};
+use tex_ls_parser::declarations::ResolvedDeclarations;
 fn database(text: &str) -> (IncrementalDatabase, PathBuf) {
     let mut db = IncrementalDatabase::default();
     let path = PathBuf::from(fixture_path!("/audit/main.tex"));
@@ -760,7 +787,8 @@ fn manual_cards_use_unicode_key_identity_and_refuse_duplicate_definitions() {
     let (mut db, path) = database(
         "\\begin{thebibliography}{9}\n\\bibitem{Écho} Unicode title.\n\\end{thebibliography}\n",
     );
-    assert!(source_cards::manual(&db.snapshot(), &path, "écho").is_some());
+    assert!(source_cards::manual(&db.snapshot(), &path, "Écho").is_some());
+    assert!(source_cards::manual(&db.snapshot(), &path, "écho").is_none());
     db.apply_change(&path, "\\begin{thebibliography}{9}\n\\bibitem{same} First.\n\\bibitem{same} Second.\n\\end{thebibliography}\n", None);
     assert!(source_cards::manual(&db.snapshot(), &path, "same").is_none());
 }
@@ -2118,4 +2146,400 @@ fn alias_signatures_follow_source_order_and_do_not_guess_forward_targets() {
         None,
     );
     assert_editor_command(&db, &path, "audicopy", 1);
+}
+
+#[test]
+fn wide_file_late_command_features_preserve_unicode_positions() {
+    for newline in ["\n", "\r\n"] {
+        let source = format!(
+            "{}\\newcommand{{\\latecmd}}[1]{{#1}}{newline}é😀 \\latecmd{{value}}{newline}",
+            format!("plain prose{newline}{newline}").repeat(1024),
+        );
+        let (db, path) = database(&source);
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(&path).unwrap();
+        assert!(snapshot.parsed_tree(file).children_with_tokens().count() >= 1024);
+        assert_editor_command(&db, &path, "latecmd", 1);
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = snapshot.file_line_index(file, encoding);
+            let start = source.rfind("\\latecmd").unwrap();
+            let (line, character) = index.position(start + 2);
+            let links =
+                compute_goto_definition(&snapshot, &path, Position::new(line, character), encoding);
+            assert_eq!(links.len(), 1);
+            assert_eq!(
+                links[0].origin_selection_range,
+                Some(lsp_range(
+                    &index,
+                    TextRange::new(
+                        TextSize::from(start as u32),
+                        TextSize::from((start + 8) as u32)
+                    )
+                ))
+            );
+            let hover =
+                hover::compute_hover(&snapshot, &path, encoding, Position::new(line, character))
+                    .unwrap();
+            assert_eq!(
+                hover.range,
+                Some(lsp_range(
+                    &index,
+                    TextRange::new(
+                        TextSize::from(start as u32),
+                        TextSize::from((start + 8) as u32)
+                    )
+                ))
+            );
+        }
+    }
+}
+
+#[test]
+fn bibliography_dependency_navigation_rename_and_indirect_usage_agree() {
+    let (mut db, tex) = database("\\documentclass{article}\\cite{child}\\bibliography{refs}");
+    let bib = tex.with_file_name("refs.bib");
+    let source = "@inproceedings{child,author={A},title={Paper},crossref={parent}}\n@proceedings{parent,title={Collected},year=2020}";
+    db.apply_change(&bib, source, None);
+    for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let snapshot = db.snapshot();
+        let index = snapshot.file_line_index(snapshot.lookup_file(&bib).unwrap(), enc);
+        let (line, character) = index.position(source.find("{parent}").unwrap() + 2);
+        let pos = Position::new(line, character);
+        let links = compute_goto_definition(&snapshot, &bib, pos, enc);
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target_selection_range.start.line, 1);
+        let completion =
+            compute_bib_completion(&snapshot, &bib, source.find("{parent}").unwrap() + 2);
+        assert!(completion.iter().any(|item| item.label == "parent"));
+        let edit = compute_rename(&snapshot, &bib, pos, "renamed", enc).unwrap();
+        let edits = &edit.changes.unwrap()[&path_to_uri(&bib).unwrap()];
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].new_text, "renamed");
+        let findings = snapshot.bib_lint_findings(snapshot.lookup_file(&bib).unwrap());
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| matches!(finding.rule, "unused-entry" | "missing-required-field")),
+            "{findings:?}"
+        );
+    }
+    // A string expression cannot be renamed by guessing its expansion.
+    db.apply_change(
+        &bib,
+        "@string{p={parent}}@misc{child,crossref=p}@misc{parent}",
+        None,
+    );
+    let snapshot = db.snapshot();
+    let src = "@string{p={parent}}@misc{child,crossref=p}@misc{parent}";
+    let index = LineIndex::with_encoding(src, PositionEncoding::Utf16);
+    let (line, character) = index.position(src.rfind("parent").unwrap() + 2);
+    assert!(
+        compute_rename(
+            &snapshot,
+            &bib,
+            Position::new(line, character),
+            "renamed",
+            PositionEncoding::Utf16
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn biber_distinct_key_case_is_consistent_across_editor_features() {
+    let (mut db, tex) = database(
+        "\\documentclass{article}\\usepackage[backend=biber]{biblatex}\\addbibresource{refs.bib}\\cite{Key,key}",
+    );
+    let bib = tex.with_file_name("refs.bib");
+    let source = "@misc{Key,title={Upper}}\n@misc{key,title={Lower}}";
+    db.apply_change(&bib, source, None);
+    let snapshot = db.snapshot();
+    let findings = snapshot.bib_lint_findings(snapshot.lookup_file(&bib).unwrap());
+    assert!(
+        !findings
+            .iter()
+            .any(|finding| finding.rule == "duplicate-key"),
+        "{findings:?}"
+    );
+    let items = cite_completion_items(&snapshot, snapshot.resolve_citations(), &tex);
+    assert!(items.iter().any(|item| item.label == "Key"));
+    assert!(items.iter().any(|item| item.label == "key"));
+    let occurrences = snapshot.citation_occurrences(&tex, &["key".into()]);
+    assert_eq!(occurrences.iter().filter(|site| site.definition).count(), 1);
+    assert_eq!(occurrences.len(), 2);
+    assert_eq!(
+        snapshot
+            .citation_definition(&tex, "key")
+            .unwrap()
+            .1
+            .title
+            .as_deref(),
+        Some("Lower")
+    );
+    let edit = compute_rename(
+        &snapshot,
+        &bib,
+        Position::new(1, 7),
+        "lower",
+        PositionEncoding::Utf16,
+    )
+    .unwrap();
+    assert_eq!(
+        edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
+        2
+    );
+    drop(snapshot);
+    db.apply_change(&bib, "@misc{Key,title={Upper}}", None);
+    let snapshot = db.snapshot();
+    assert!(snapshot.citation_definition(&tex, "key").is_none());
+    assert!(
+        snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+}
+
+#[test]
+fn bibliography_strings_navigate_and_rename_across_loaded_resources() {
+    let (mut db, tex) = database("\\documentclass{article}\\bibliography{defs,refs}\\cite{child}");
+    let defs = tex.with_file_name("defs.bib");
+    let bib = tex.with_file_name("refs.bib");
+    db.apply_change(&defs, "@string{publisher={Press}}", None);
+    let source = "@misc{child,title={Paper},publisher=publisher}";
+    db.apply_change(&bib, source, None);
+    let snapshot = db.snapshot();
+    let at = source.rfind("publisher").unwrap() + 2;
+    let pos = Position::new(0, at as u32);
+    let links = compute_goto_definition(&snapshot, &bib, pos, PositionEncoding::Utf16);
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].target_uri, path_to_uri(&defs).unwrap());
+    let edit = compute_rename(&snapshot, &bib, pos, "press", PositionEncoding::Utf16).unwrap();
+    assert_eq!(edit.changes.unwrap().len(), 2);
+    for path in [&defs, &bib] {
+        assert!(
+            !snapshot
+                .bib_lint_findings(snapshot.lookup_file(path).unwrap())
+                .iter()
+                .any(|finding| matches!(finding.rule, "undefined-string" | "unused-string"))
+        );
+    }
+}
+
+#[test]
+fn bibliography_aliases_and_manual_case_do_not_produce_false_diagnostics() {
+    let (mut db, tex) = database(
+        "\\documentclass{article}\\usepackage{biblatex}\\addbibresource{refs.bib}\\cite{alternate}\\bibitem{Manual}\\bibitem{manual}",
+    );
+    let bib = tex.with_file_name("refs.bib");
+    db.apply_change(&bib, "@misc{real,title={Paper},ids={alternate}}", None);
+    let snapshot = db.snapshot();
+    assert!(snapshot.resolve_citations().is_defined(&tex, "alternate"));
+    assert_eq!(
+        snapshot
+            .citation_definition(&tex, "alternate")
+            .unwrap()
+            .1
+            .key,
+        "real"
+    );
+    assert!(
+        !snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+    assert!(
+        !snapshot
+            .bib_lint_findings(snapshot.lookup_file(&bib).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "unused-entry")
+    );
+    assert!(snapshot.resolve_citations().is_defined(&tex, "Manual"));
+    assert!(!snapshot.resolve_citations().is_defined(&tex, "MANUAL"));
+    let items = cite_completion_items(&snapshot, snapshot.resolve_citations(), &tex);
+    assert!(items.iter().any(|item| item.label == "Manual"));
+    assert!(items.iter().any(|item| item.label == "manual"));
+    drop(snapshot);
+    db.apply_change(&bib, "@misc{real,title={Paper},ids=aliases}", None);
+    let snapshot = db.snapshot();
+    assert!(!snapshot.resolve_citations().is_closed(&tex));
+    assert!(
+        !snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+}
+
+#[test]
+fn glossary_completion_searches_descriptions_and_resolves_cards_lazily() {
+    let (db, path) =
+        database("\\newglossaryentry{atom}{name={Atom},description={Quantum particle}}\\gls{}");
+    let snapshot = db.snapshot();
+    let items = glossary_completion_items(&snapshot, snapshot.resolve_labels(), &path, "");
+    let item = items.into_iter().find(|item| item.label == "atom").unwrap();
+    assert!(
+        item.filter_text
+            .as_ref()
+            .unwrap()
+            .contains("Quantum particle")
+    );
+    assert!(item.documentation.is_none());
+    let item = completion_resolve::resolve(&snapshot, item);
+    assert!(
+        serde_json::to_string(&item.documentation)
+            .unwrap()
+            .contains("Quantum particle")
+    );
+}
+
+#[test]
+fn literal_missing_entry_dependencies_require_closed_root_coverage() {
+    let (mut db, tex) = database("\\documentclass{article}\\bibliography{refs}");
+    let bib = tex.with_file_name("refs.bib");
+    db.apply_change(&bib, "@misc{child,title={Draft},crossref={missing}}", None);
+    let findings = db.bib_lint_findings(db.lookup_file(&bib).unwrap());
+    assert_eq!(
+        findings
+            .iter()
+            .filter(|finding| finding.rule == "undefined-entry")
+            .count(),
+        1
+    );
+    db.apply_change(
+        &tex,
+        "\\documentclass{article}\\bibliography{refs,unavailable}",
+        None,
+    );
+    assert!(
+        !db.bib_lint_findings(db.lookup_file(&bib).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-entry")
+    );
+}
+
+#[test]
+fn classic_bibtex_does_not_accept_biber_aliases() {
+    let (mut db, tex) = database("\\documentclass{article}\\bibliography{refs}\\cite{alternate}");
+    let bib = tex.with_file_name("refs.bib");
+    db.apply_change(&bib, "@misc{real,title={Paper},ids={alternate}}", None);
+    let snapshot = db.snapshot();
+    assert!(!snapshot.resolve_citations().is_defined(&tex, "alternate"));
+    assert!(snapshot.citation_definition(&tex, "alternate").is_none());
+    assert!(
+        !cite_completion_items(&snapshot, snapshot.resolve_citations(), &tex)
+            .iter()
+            .any(|item| item.label == "alternate")
+    );
+    assert!(
+        snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+}
+
+#[test]
+fn classic_bibtex_ignores_opaque_biber_alias_metadata() {
+    let (mut db, tex) = database("\\documentclass{article}\\bibliography{refs}\\cite{missing}");
+    let bib = tex.with_file_name("refs.bib");
+    db.apply_change(
+        &bib,
+        "@misc{real,title={Paper},ids=aliases,xdata={missing}}",
+        None,
+    );
+    let snapshot = db.snapshot();
+    assert!(snapshot.resolve_citations().is_closed(&tex));
+    assert!(
+        snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+    assert!(
+        !snapshot
+            .bib_lint_findings(snapshot.lookup_file(&bib).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-entry")
+    );
+}
+
+#[test]
+fn prefixed_wrapper_rename_refuses_unrepresentable_suffixes_atomically() {
+    let source = "\\documentclass{article}\\defkey{ignored}{😀old}\\ref{sec:😀old}";
+    let (mut db, path) = database(source);
+    let declarations: tex_ls_parser::declarations::Declarations = serde_json::from_str(
+        r#"{"commands":{"defkey":{"like":"label","argument-index":1,"prefix":"sec:"}}}"#,
+    )
+    .unwrap();
+    db.set_declarations(declarations.resolve().unwrap());
+    for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let snapshot = db.snapshot();
+        let file = snapshot.lookup_file(&path).unwrap();
+        let index = snapshot.file_line_index(file, enc);
+        let (line, character) = index.position(source.rfind("sec:").unwrap() + 1);
+        for replacement in ["sec:two words", "sec:two\twords", "sec:[bad]", "other:new"] {
+            assert!(
+                compute_rename(
+                    &snapshot,
+                    &path,
+                    Position::new(line, character),
+                    replacement,
+                    enc
+                )
+                .is_none(),
+                "{replacement:?}"
+            );
+        }
+        let (line, character) = index.position(source.find("😀old").unwrap());
+        let edit =
+            compute_rename(&snapshot, &path, Position::new(line, character), "new", enc).unwrap();
+        let changes = edit.changes.unwrap();
+        let edits = &changes[&path_to_uri(&path).unwrap()];
+        assert_eq!(edits.len(), 2);
+        assert!(edits.iter().any(|edit| edit.new_text == "new"));
+        assert!(edits.iter().any(|edit| edit.new_text == "sec:new"));
+    }
+}
+
+#[test]
+fn pending_backend_options_open_included_citation_scopes() {
+    let (mut db, tex) = database(
+        "\\documentclass{article}\\input{options}\\usepackage{biblatex}\\addbibresource{refs.bib}\\cite{key}",
+    );
+    db.apply_change(
+        &tex.with_file_name("options.tex"),
+        "\\PassOptionsToPackage{backend=bibtex}{biblatex}",
+        None,
+    );
+    db.apply_change(
+        &tex.with_file_name("refs.bib"),
+        "@misc{Key,title={Upper}}",
+        None,
+    );
+    let snapshot = db.snapshot();
+    assert!(!snapshot.resolve_citations().is_closed(&tex));
+    assert!(
+        !snapshot
+            .latex_lint_findings(snapshot.lookup_file(&tex).unwrap())
+            .iter()
+            .any(|finding| finding.rule == "undefined-citation")
+    );
+    assert!(
+        compute_rename(
+            &snapshot,
+            &tex,
+            Position::new(
+                0,
+                snapshot
+                    .file_text(snapshot.lookup_file(&tex).unwrap())
+                    .rfind("key")
+                    .unwrap() as u32
+            ),
+            "new",
+            PositionEncoding::Utf16
+        )
+        .is_none()
+    );
 }

@@ -15,6 +15,9 @@
 //! feature additionally derives `schemars::JsonSchema` for embedders that
 //! publish a config schema (see [`formatter::style`]).
 
+#[macro_use]
+mod error;
+
 pub mod bib;
 pub mod formatter;
 pub mod settings;

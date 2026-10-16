@@ -5,7 +5,8 @@
 //! (see `bib_skeleton`). A divergence from texlab is **never a bug by itself**: tex-ls
 //! is a deliberately generic surface parser and the skeleton deliberately stops at the
 //! field level, where the two genuinely diverge (texlab resolves accents/commands inside
-//! values; tex-ls keeps them generic). AGENTS.md: measure against, never match.
+//! values; tex-ls keeps them generic). Reference similarity is a triage aid, not a
+//! shape-equivalence requirement.
 //!
 //! It is `#[ignore]`d so it does not run in `cargo test`; invoke it explicitly:
 //!
@@ -21,11 +22,16 @@
 #[path = "support/bib_skeleton.rs"]
 mod bib_skeleton;
 
+#[path = "support/compat.rs"]
+mod compat;
+
+use compat::{dice, lcs_len};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use bib_skeleton::{dice, lcs_len, project_tex_ls, project_texlab, render_lines};
+use bib_skeleton::{project_tex_ls, project_texlab, render_lines};
 
 /// One corpus file's outcome.
 enum Outcome {
@@ -106,45 +112,18 @@ fn collect_corpus() -> Vec<(String, PathBuf)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("bib_corpus");
-    let mut files = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("bib") {
-                let key = path.file_name().unwrap().to_string_lossy().into_owned();
-                files.push((key, path));
-            }
-        }
-    }
-    files.sort();
-    files
+    compat::collect_corpus(&dir, "bib")
 }
 
 // --- allowlist ------------------------------------------------------------
 
 /// Loads the deviations allowlist: `key = "reason"` lines (a simple TOML subset,
-/// hand-parsed to avoid a dev-dependency). Mirrors `parse_compat.rs`.
+/// hand-parsed to avoid a dev-dependency).
 fn load_allowlist() -> BTreeMap<String, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("bib_parse_compat_allowlist.toml");
-    let mut map = BTreeMap::new();
-    let Ok(text) = fs::read_to_string(&path) else {
-        return map;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().trim_matches('"').to_string();
-        let value = value.trim().trim_matches('"').to_string();
-        map.insert(key, value);
-    }
-    map
+    compat::load_allowlist(&path)
 }
 
 // --- reporting ------------------------------------------------------------
@@ -197,8 +176,8 @@ fn render_report(
          cite keys or value internals, where the two legitimately diverge) and measures how \
          structurally close they are. A divergence is never a bug by itself: it is either a \
          deliberate, recorded deviation or an open question. Note texlab's bib parser has no \
-         error channel, so this gauge never reports texlab parse errors. AGENTS.md: measure \
-         against, never match.\n\n",
+         error channel, so this gauge never reports texlab parse errors. Reference similarity \
+         is a triage aid, not a shape-equivalence requirement.\n\n",
     );
     s.push_str("- **Corpus:** bib corpus (`tests/bib_corpus/*.bib`)\n");
     s.push_str(&format!(

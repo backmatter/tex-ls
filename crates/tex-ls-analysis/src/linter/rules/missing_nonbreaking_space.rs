@@ -33,7 +33,7 @@
 //!
 //! The command table lives here, not in `data/signatures.json`: which commands
 //! want a tie is a lint judgment, not the structural arity/verbatim fact the
-//! signature DB carries (AGENTS.md core decision #2).
+//! signature DB carries.
 //!
 //! **What earns a tie: an orphanable unit.** The tie convention exists so a line
 //! break cannot strand a self-contained blob—a bare number/label, or a
@@ -220,28 +220,17 @@ impl Rule for MissingNonbreakingSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if MissingNonbreakingSpace.interests().contains(&el.kind()) {
-                MissingNonbreakingSpace.check(&el, &ctx, &mut out);
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if MissingNonbreakingSpace.interests().contains(&el.kind()) {
+                    MissingNonbreakingSpace.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

@@ -148,7 +148,7 @@ fn collect_command(
     // The braced form `\DescribeMacro{\foo}` carries the name as the first group;
     // the conventional braceless form `\DescribeMacro\foo` carries it as the next
     // sibling command (control words are not greedily attached as arguments, so the
-    // macro is a sibling — AGENTS.md decision #8).
+    // macro is a sibling).
     if let Some(group) = nth_group(command, 0) {
         if let Some(name) = documented_name(&group, kind) {
             out.push(DocAssociation {

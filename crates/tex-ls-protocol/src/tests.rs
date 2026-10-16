@@ -1,6 +1,60 @@
-use super::*;
-use crate::test_host::TestHost;
-use tex_ls_analysis::linter::lint_document;
+use crate::{
+    actions::{code_action_kind_requested, compute_code_actions},
+    bib_strings, code_action,
+    completion::{
+        compute_bib_completion, compute_completion, compute_tex_completion,
+        context as completion_context, package_completion_items, resolve as completion_resolve,
+    },
+    convert::{
+        byte_range_to_lsp, dedup_locations, location_for, locations_for_ranges, lsp_range,
+        path_to_uri, uri_to_fs_path,
+    },
+    diagnostics::{analyze_bib, analyze_tex, lint_diagnostic_tags, lint_findings, lint_to_lsp},
+    formatting::compute_range_format,
+    glossary, hints, hover,
+    navigation::{
+        CursorTarget, compute_document_highlight, compute_goto_definition, compute_linked_editing,
+        compute_prepare_rename, compute_references, compute_rename, reference_under_cursor,
+    },
+    presentation, projects,
+    response_policy::ResponsePolicy,
+    structure::{
+        compute_bib_document_link, compute_document_link, compute_folding, compute_selection_range,
+    },
+    symbols::{compute_bib_symbols, compute_projects_workspace_symbols, compute_symbols},
+    synchronization::{
+        ContentChangeError, apply_content_changes, content_change_buffer_constructions,
+    },
+    test_host::TestHost,
+    workspace_edits::{finalize_rename, push_edit},
+};
+use lsp_types::{
+    Code, CodeActionKind, CodeActionResponse, DiagnosticTag, DocumentLink, DocumentSymbol,
+    FoldingRange, InsertTextFormat, Position, Range, SelectionRange, SymbolKind,
+    TextDocumentContentChangeEvent, Uri, WorkspaceSymbolResponse,
+};
+use rowan::{TextRange, TextSize};
+use smol_str::SmolStr;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+use tex_ls_analysis::{
+    incremental::IncrementalDatabase,
+    linter::{RuleSelection, lint_document},
+    name_refs::{self, NameKind, NameTarget},
+    project::texmf::TexmfIndex,
+    source::FileKind,
+    text::{LineIndex, PositionEncoding, TextBuffer},
+};
+use tex_ls_formatter::formatter::{FormatStyle, SentenceOptions};
+use tex_ls_parser::{
+    declarations::ResolvedDeclarations,
+    parser::{Edit, parse, parse_with_declarations},
+    semantic::SemanticModel,
+    syntax::{SyntaxKind, SyntaxNode},
+};
 
 #[test]
 fn overridden_listing_factory_cannot_invent_a_reader_or_definition() {
@@ -1067,6 +1121,213 @@ fn invalid_change_rejects_the_entire_batch() {
     assert_eq!(result, Err(ContentChangeError { index: 1 }));
     assert!(Arc::ptr_eq(&buffer, &original));
 }
+
+/// Preserve the sequential synchronization algorithm as a byte/position oracle.
+fn content_changes_reference(
+    buffer: &mut Arc<TextBuffer>,
+    changes: Vec<TextDocumentContentChangeEvent>,
+) -> Result<Option<Vec<Edit>>, ContentChangeError> {
+    let mut candidate = buffer.clone();
+    let mut edits = Some(Vec::new());
+    for (index, change) in changes.into_iter().enumerate() {
+        let next = match change {
+            TextDocumentContentChangeEvent::TextDocumentContentChangeWholeDocument(change) => {
+                edits = None;
+                TextBuffer::new(change.text, candidate.encoding())
+            }
+            TextDocumentContentChangeEvent::TextDocumentContentChangePartial(change) => {
+                if change.range.start > change.range.end {
+                    return Err(ContentChangeError { index });
+                }
+                let index = candidate.line_index();
+                let start = index.offset_at(change.range.start.line, change.range.start.character);
+                let end = index.offset_at(change.range.end.line, change.range.end.character);
+                let next = candidate.with_replacement(start..end, &change.text);
+                if let Some(edits) = &mut edits {
+                    edits.push(Edit {
+                        range: start..end,
+                        insert: change.text,
+                    });
+                }
+                next
+            }
+        };
+        candidate = Arc::new(next);
+    }
+    *buffer = candidate;
+    Ok(edits)
+}
+
+fn assert_content_change_reference(
+    source: &str,
+    encoding: PositionEncoding,
+    changes: Vec<TextDocumentContentChangeEvent>,
+) -> usize {
+    let mut actual = Arc::new(TextBuffer::new(source, encoding));
+    let original = actual.clone();
+    let mut expected = actual.clone();
+    let reference = content_changes_reference(&mut expected, changes.clone());
+    let before = content_change_buffer_constructions();
+    let result = apply_content_changes(&mut actual, changes);
+    let constructions = content_change_buffer_constructions() - before;
+    assert_eq!(result, reference);
+    assert_eq!(actual.text(), expected.text());
+    if result.is_err() {
+        assert!(Arc::ptr_eq(&actual, &original));
+    } else if let Ok(Some(edits)) = result {
+        assert_eq!(
+            tex_ls_parser::parser::try_apply_edits(source, &edits).as_deref(),
+            Some(actual.text())
+        );
+    }
+    let expected_index = expected.line_index();
+    let actual_index = actual.line_index();
+    let mut expected_cursor = expected_index.position_cursor();
+    let mut actual_cursor = actual_index.position_cursor();
+    for offset in actual
+        .text()
+        .char_indices()
+        .map(|(at, _)| at)
+        .chain(std::iter::once(actual.text().len()))
+    {
+        assert_eq!(
+            actual_cursor.position(offset),
+            expected_cursor.position(offset)
+        );
+    }
+    constructions
+}
+
+#[test]
+fn descending_multicursor_changes_construct_one_buffer() {
+    for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        let source = "😀word ".repeat(2048);
+        let (stride, first) = match encoding {
+            PositionEncoding::Utf8 => (9, 4),
+            PositionEncoding::Utf16 => (7, 2),
+        };
+        let changes = (0..2048)
+            .rev()
+            .map(|slot| {
+                let at = slot * stride + first;
+                ranged((0, at), (0, at + 1), "X")
+            })
+            .collect();
+        assert_eq!(
+            assert_content_change_reference(&source, encoding, changes),
+            1
+        );
+    }
+    // A single untouched space separates these ranges. Its byte cannot change
+    // the line interpretation of either endpoint.
+    assert_eq!(
+        assert_content_change_reference(
+            "foo foo",
+            PositionEncoding::Utf16,
+            vec![ranged((0, 4), (0, 7), "B"), ranged((0, 0), (0, 3), "A")]
+        ),
+        1
+    );
+}
+
+#[test]
+fn bulk_changes_match_sequential_unicode_and_newline_seams() {
+    for source in ["abc def", "a\rb\r\ncd\nef", "α😀 β𝕏 γ"] {
+        for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let index = LineIndex::with_encoding(source, encoding);
+            let boundaries: Vec<_> = source
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(source.len()))
+                .collect();
+            let ranges: Vec<_> = boundaries
+                .iter()
+                .enumerate()
+                .flat_map(|(slot, &start)| {
+                    let first = index.position(start);
+                    let last = index.position(boundaries.get(slot + 1).copied().unwrap_or(start));
+                    [(first, first), (first, last)]
+                })
+                .collect();
+            for &(first_start, first_end) in &ranges {
+                for &(second_start, second_end) in &ranges {
+                    for first_insert in ["X", "\n", "\r"] {
+                        for second_insert in ["", "😀", "\r\n"] {
+                            assert_content_change_reference(
+                                source,
+                                encoding,
+                                vec![
+                                    ranged(first_start, first_end, first_insert),
+                                    ranged(second_start, second_end, second_insert),
+                                ],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn uncertain_bulk_changes_keep_sequential_and_atomic_behavior() {
+    for (source, changes) in [
+        (
+            "abc",
+            vec![
+                ranged((0, 100), (0, 100), "X"),
+                ranged((0, 50), (0, 50), "Y"),
+            ],
+        ),
+        (
+            "abc",
+            vec![
+                ranged((100, 0), (100, 0), "X"),
+                ranged((50, 0), (50, 0), "Y"),
+            ],
+        ),
+        (
+            "a😀bc",
+            vec![ranged((0, 5), (0, 5), "X"), ranged((0, 2), (0, 2), "Y")],
+        ),
+        (
+            "abc",
+            vec![ranged((0, 1), (0, 1), "X"), ranged((0, 1), (0, 1), "Y")],
+        ),
+        (
+            "a\rb",
+            vec![ranged((1, 0), (1, 0), "\n"), ranged((0, 1), (0, 1), "X")],
+        ),
+        (
+            "a\rb",
+            vec![ranged((1, 0), (1, 0), "\n"), ranged((1, 0), (1, 0), "X")],
+        ),
+        ("abc", vec![ranged((0, 2), (0, 2), "X"), whole("new")]),
+    ] {
+        assert_eq!(
+            assert_content_change_reference(source, PositionEncoding::Utf16, changes),
+            2
+        );
+    }
+    assert_eq!(
+        assert_content_change_reference(
+            "a😀bc",
+            PositionEncoding::Utf8,
+            vec![ranged((0, 7), (0, 7), "X"), ranged((0, 2), (0, 2), "Y"),],
+        ),
+        2
+    );
+    for encoding in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+        assert_content_change_reference(
+            "abc def",
+            encoding,
+            vec![
+                ranged((0, 7), (0, 7), "valid"),
+                ranged((0, 4), (0, 1), "invalid"),
+            ],
+        );
+    }
+}
 /// CRLF handling must not assume a one-byte line terminator. The `\r` is a line's
 /// content as far as byte offsets go, so a column at the line's end lands
 /// before it.
@@ -1299,8 +1560,6 @@ fn package_completion_surfaces_installed_set_and_ctan_detail() {
         amsmath.detail
     );
 }
-
-use tex_ls_analysis::incremental::IncrementalDatabase;
 
 #[test]
 fn selected_reference_key_never_resolves_a_sibling() {

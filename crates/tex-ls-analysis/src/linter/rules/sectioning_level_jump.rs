@@ -128,7 +128,7 @@ fn active_level(level: u8, has_chapter: bool) -> u8 {
 
 /// Whether the `COMMAND` node carries a `*` variant token (`\section*`): the star
 /// lexes as a `WORD "*"` sibling right after the `CONTROL_WORD`, before any
-/// argument group. A forward-bound comment run (`DOC_COMMENT`, decision #9) can
+/// argument group. A forward-bound comment run (`DOC_COMMENT`) can
 /// sit ahead of the control word, so it is skipped along with trivia; the first
 /// significant element after the control word decides. Reads only static token
 /// shape, no tex-ls.
@@ -221,28 +221,17 @@ impl StreamVisitor for SectioningLevelJumpVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
-    use crate::semantic::SemanticModel;
-    use crate::syntax::SyntaxNode;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = SyntaxNode::new_root(parse(src).green);
-        let model = SemanticModel::build(&root);
-        let ctx = RuleContext::new(
-            std::path::Path::new("x.tex"),
-            &root,
-            &model,
-            None,
-            None,
-            None,
-        );
-        let mut out = Vec::new();
-        let mut visitor = SectioningLevelJump.stream().expect("streaming rule");
-        for el in root.descendants_with_tokens() {
-            visitor.visit(&el, &ctx, &mut out);
-        }
-        visitor.finish(&ctx, &mut out);
-        out
+        crate::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            let mut visitor = SectioningLevelJump.stream().expect("streaming rule");
+            for el in root.descendants_with_tokens() {
+                visitor.visit(&el, ctx, &mut out);
+            }
+            visitor.finish(ctx, &mut out);
+            out
+        })
     }
 
     #[test]

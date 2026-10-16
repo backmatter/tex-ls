@@ -19,6 +19,9 @@ further work; `exit` disposes state. To restart, create a session and resupply i
 
 Workspace roots select the most specific project. `tex-ls/associateSource` accepts
 `uri` and `projectUri` to assign a source to a registered project.
+An explicit association moves with its source during file renames, including
+swaps across workspace roots. Overwriting a destination replaces its previous
+association; an unassociated source follows the destination root.
 `tex-ls/replaceProject` accepts a project `uri` and removes its attachments,
 settings, observations, and pending acquisitions. Other projects remain live.
 
@@ -116,7 +119,12 @@ owns scheduling, push publication, cancellation, and refresh notifications.
 
 Re-request semantic tokens after declarations or package sources change. Environment
 declarations can also change folding without a text edit. Shared dispatch does not
-send refresh requests to the editor.
+send refresh requests to the editor. Clients can negotiate `full.delta` and request
+`textDocument/semanticTokens/full/delta` with the previous result ID. Unknown or
+retired IDs return full data. Closing, reopening or relocating a source, or ending
+the session, retires its baseline. Replacing a project retires its sources' baselines
+and preserves other projects' baselines. Only open sources retain baselines; retained
+data is bounded to 32 sources and 4 MiB.
 
 Color requests support the same literal xcolor declarations as the native host.
 Apply the primary and additional presentation edits together against the queried
@@ -125,7 +133,10 @@ requested range must match a current literal color span.
 
 ## Presentation settings
 
-Pass settings to `tex-ls/updateSettings` globally or per source:
+Pass settings to `tex-ls/updateSettings` globally or per source. Sources without
+an override follow later default changes. A rename within a project preserves
+that inheritance and moves explicit source overrides with the source. Overwriting
+a destination replaces its previous override.
 
 ```json
 {
@@ -135,7 +146,8 @@ Pass settings to `tex-ls/updateSettings` globally or per source:
     "items": false,
     "environmentNames": { "custom": "Custom display" }
   },
-  "inlayHints": { "definitions": true, "references": true, "maxLength": 32 }
+  "inlayHints": { "definitions": true, "references": true, "sourceContext": false,
+    "pages": false, "names": false, "maxLength": 32 }
 }
 ```
 
@@ -143,10 +155,12 @@ The remaining outline toggles are `sections`, `frames`, `floats`, `theorems`,
 `labels`, `macros`, and `environments`, all true by default. Display names make
 otherwise transparent environments visible. Hiding a container retains its children.
 
-Hints require an unambiguous AUX label number and fall within the requested range.
-`maxLength` accepts 1 to 256 Unicode characters. Page/name references are omitted
-because AUX numbers do not supply their rendered text. Refresh hints after settings
-or artifacts change.
+Number hints require an unambiguous AUX label number. `sourceContext` adds current
+source descriptions to label definitions without requiring a build. `pages` and
+`names` enable literal AUX page/name hints for references. Those three options default
+to false. Artifact hints identify last-build data without claiming freshness.
+Hints fall within the requested range; `maxLength` accepts 1 to 256 Unicode characters.
+Refresh hints after settings or artifacts change.
 
 Workspace symbol queries require every Unicode query token. Exact names rank first,
 then the active source's root, then URI and position. A text-document request or

@@ -36,16 +36,25 @@ pub fn parsed_document(db: &dyn IncrementalDb, file: SourceInput) -> ParsedDocum
     }
     let reparsed = prev
         .as_ref()
+        .filter(|prev| prev.config == config && prev.declared.as_ref() == declared)
         .and_then(|prev| reparse_edits(&prev.as_reparse_base(declared), &staged, text));
-    let (green, errors, ctx) = match reparsed {
-        Some(parsed) => (
-            parsed.green,
-            parsed.errors,
-            prev.as_ref().unwrap().ctx.clone(),
-        ),
+    let (green, errors, ctx, declared) = match reparsed {
+        Some(parsed) => {
+            let prev = prev.as_ref().unwrap();
+            (
+                parsed.green,
+                parsed.errors,
+                parsed.ctx.map_or_else(|| prev.ctx.clone(), Arc::new),
+                prev.declared.clone(),
+            )
+        }
         None => {
             let (parsed, ctx) = parse_with_declarations_resolved(text, config, declared);
-            (parsed.green, parsed.errors, ctx)
+            let declared = prev
+                .as_ref()
+                .filter(|prev| prev.declared.as_ref() == declared)
+                .map_or_else(|| Arc::new(declared.clone()), |prev| prev.declared.clone());
+            (parsed.green, parsed.errors, Arc::new(ctx), declared)
         }
     };
     let artifact = Arc::new(PrevParse {
@@ -54,7 +63,7 @@ pub fn parsed_document(db: &dyn IncrementalDb, file: SourceInput) -> ParsedDocum
         errors,
         ctx,
         config,
-        declared: declared.clone(),
+        declared,
     });
     db.reparse_store(file, artifact.clone(), staged.len(), state.generation);
     artifact
@@ -251,6 +260,32 @@ pub fn doc_associations(db: &dyn IncrementalDb, file: SourceInput) -> Vec<DocAss
     )
 }
 
+#[salsa::tracked(returns(ref), unsafe(non_salsa_values))]
+pub fn file_role_contexts(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> crate::external::links::FileRoleContext {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::FileRoles,
+        file: Some(*file.identity(db)),
+    });
+    file_roles(db, file, &parsed_tree_root(db, file))
+}
+
+/// Exact content identity, independent of source path, installed provenance,
+/// editor overlay ownership, parser shape, and source-effect inference.
+#[salsa::tracked]
+pub fn installed_source_identity(
+    db: &dyn IncrementalDb,
+    file: SourceInput,
+) -> Option<crate::project::installed_source::InstalledSourceId> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::InstalledSourceIdentity,
+        file: Some(*file.identity(db)),
+    });
+    crate::project::installed_source::identify_source(file.text(db))
+}
+
 fn file_roles(
     db: &dyn IncrementalDb,
     file: SourceInput,
@@ -276,8 +311,8 @@ pub fn include_edges(db: &dyn IncrementalDb, file: SourceInput) -> Vec<IncludeEd
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
-    let roles = file_roles(db, file, &root);
-    crate::project::include::collect_include_edges_with_roles(&root, file.path(db).parent(), &roles)
+    let roles = file_role_contexts(db, file);
+    crate::project::include::collect_include_edges_with_roles(&root, file.path(db).parent(), roles)
         .iter()
         .map(crate::project::IncludeEdge::key)
         .collect()
@@ -296,8 +331,8 @@ pub fn package_edges(db: &dyn IncrementalDb, file: SourceInput) -> Vec<PackageEd
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
-    let roles = file_roles(db, file, &root);
-    crate::project::package::collect_package_edges_with_roles(&root, file.path(db).parent(), &roles)
+    let roles = file_role_contexts(db, file);
+    crate::project::package::collect_package_edges_with_roles(&root, file.path(db).parent(), roles)
         .into_iter()
         .map(|edge| edge.key())
         .collect()
@@ -577,6 +612,64 @@ pub fn file_cite_names(db: &dyn IncrementalDb, file: SourceInput) -> Vec<SmolStr
     document_cite_names(bib_semantic_model(db, file))
 }
 
+#[salsa::tracked(returns(ref))]
+pub fn file_cite_alias_names(db: &dyn IncrementalDb, file: SourceInput) -> Vec<SmolStr> {
+    crate::project::citations::document_cite_alias_names(bib_semantic_model(db, file))
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn bib_identity_complete(db: &dyn IncrementalDb, file: SourceInput) -> bool {
+    crate::project::citations::document_cite_identity_complete(bib_semantic_model(db, file))
+}
+
+/// Searchable glossary source fields are bounded and collected once per revision.
+#[salsa::tracked(returns(ref))]
+pub fn glossary_search_fields(db: &dyn IncrementalDb, file: SourceInput) -> Vec<(SmolStr, String)> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::GlossarySearchFields,
+        file: Some(*file.identity(db)),
+    });
+    let root = parsed_tree_root(db, file);
+    semantic_model(db, file)
+        .glossary_defs()
+        .iter()
+        .map(|entry| {
+            let mut search = entry.key.to_string();
+            if let Some(command) =
+                tex_ls_parser::syntax::token_at_offset(&root, entry.key_range.start())
+                    .right_biased()
+                    .and_then(|token| {
+                        token
+                            .parent_ancestors()
+                            .find(|node| node.kind() == crate::syntax::SyntaxKind::COMMAND)
+                    })
+            {
+                'groups: for group in command.children().filter(|node| {
+                    node.kind() == crate::syntax::SyntaxKind::GROUP
+                        && node.text_range().start() > entry.key_range.start()
+                }) {
+                    if search.len() >= entry.key.len() + 2048 {
+                        break 'groups;
+                    }
+                    search.push(' ');
+                    for token in group
+                        .descendants_with_tokens()
+                        .filter_map(rowan::NodeOrToken::into_token)
+                    {
+                        for ch in token.text().chars() {
+                            if search.len() >= entry.key.len() + 2048 {
+                                break 'groups;
+                            }
+                            search.push(ch);
+                        }
+                    }
+                }
+            }
+            (entry.key.clone(), search)
+        })
+        .collect()
+}
+
 /// Cached full search fields; changing a query does not rerender the bibliography.
 #[salsa::tracked(returns(ref))]
 pub fn bib_search_fields(db: &dyn IncrementalDb, file: SourceInput) -> Vec<(SmolStr, String)> {
@@ -588,11 +681,19 @@ pub fn bib_search_fields(db: &dyn IncrementalDb, file: SourceInput) -> Vec<(Smol
     bib_semantic_model(db, file)
         .entries()
         .iter()
-        .map(|entry| {
-            (
-                entry.key.clone(),
-                crate::bib::render::search_text(entry, &root),
-            )
+        .flat_map(|entry| {
+            let search = crate::bib::render::search_text(entry, &root);
+            let mut fields = Vec::new();
+            for alias in entry
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency.field == "ids")
+                .filter_map(|dependency| dependency.key.as_ref())
+            {
+                fields.push((alias.clone(), format!("{alias} {search}")));
+            }
+            fields.insert(0, (entry.key.clone(), search));
+            fields
         })
         .collect()
 }
@@ -608,9 +709,24 @@ pub fn bib_search_fields(db: &dyn IncrementalDb, file: SourceInput) -> Vec<(Smol
 /// own directory (`path.parent()`), like `include_edges`.
 #[derive(Debug, Clone, PartialEq, Eq, salsa::SalsaValue)]
 pub struct FileCiteFacts {
+    pub case_sensitive: Option<bool>,
     pub bib_targets: Vec<BibTarget>,
     pub manual_keys: Vec<SmolStr>,
     pub nocite_all: bool,
+}
+
+/// Literal bibliography acquisition targets without manual citation semantics.
+#[salsa::tracked(returns(ref))]
+pub fn file_bibliography_targets(db: &dyn IncrementalDb, file: SourceInput) -> Vec<BibTarget> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::FileBibliographyTargets,
+        file: Some(*file.identity(db)),
+    });
+    crate::project::include::collect_bib_resource_targets_with_roles(
+        &parsed_tree_root(db, file),
+        None,
+        file_role_contexts(db, file),
+    )
 }
 
 #[salsa::tracked(returns(ref))]
@@ -620,11 +736,9 @@ pub fn file_cite_facts(db: &dyn IncrementalDb, file: SourceInput) -> FileCiteFac
         file: Some(*file.identity(db)),
     });
     let root = parsed_tree_root(db, file);
-    let roles = file_roles(db, file, &root);
     FileCiteFacts {
-        bib_targets: crate::project::include::collect_bib_resource_targets_with_roles(
-            &root, None, &roles,
-        ),
+        case_sensitive: crate::project::citations::citation_case_sensitive(&root),
+        bib_targets: file_bibliography_targets(db, file).clone(),
         manual_keys: semantic_model(db, file)
             .bibitems()
             .iter()
@@ -632,6 +746,34 @@ pub fn file_cite_facts(db: &dyn IncrementalDb, file: SourceInput) -> FileCiteFac
             .collect(),
         nocite_all: semantic_model(db, file).has_wildcard_nocite(),
     }
+}
+
+/// Source boundaries for manual bibliography excerpts. Names and item-head
+/// ranges already live in the semantic model; cache this sorted end index so
+/// hover, completion and resolution do not rescan/sort the CST on each pull.
+#[salsa::tracked(returns(ref))]
+pub fn manual_bib_body_ends(db: &dyn IncrementalDb, file: SourceInput) -> Vec<rowan::TextSize> {
+    db.record_query(QueryLogEntry {
+        kind: QueryKind::ManualBibBodyEnds,
+        file: Some(*file.identity(db)),
+    });
+    let mut ends: Vec<_> = semantic_model(db, file)
+        .bibitems()
+        .iter()
+        .map(|item| item.range.start())
+        .chain(
+            parsed_tree_root(db, file)
+                .descendants()
+                .filter(|node| {
+                    node.kind() == crate::syntax::SyntaxKind::END
+                        && crate::ast::environment_name(node)
+                            .is_some_and(|name| name == "thebibliography")
+                })
+                .map(|node| node.text_range().start()),
+        )
+        .collect();
+    ends.sort_unstable();
+    ends
 }
 
 /// Current definition spans are shared by navigation, references, and rename.
@@ -683,7 +825,7 @@ fn file_references_in_context(
     context: &crate::external::FilePathContext,
 ) -> Vec<crate::external::links::FileReference> {
     let root = parsed_tree_root(db, file);
-    let roles = file_roles(db, file, &root);
+    let roles = file_role_contexts(db, file);
     let mut references: Vec<crate::external::links::FileReference> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for base in &context.bases {
@@ -692,7 +834,7 @@ fn file_references_in_context(
             Some(base),
             Some(&context.root_directory),
             &context.graphics,
-            &roles,
+            roles,
         ) {
             if seen.insert(reference.clone()) {
                 references.push(reference);
@@ -740,7 +882,7 @@ pub(crate) fn root_graphics(db: &dyn IncrementalDb, file: SourceInput) -> Vec<Pa
     crate::external::inherited_graphics_with_roles(
         &root,
         file.path(db).parent().unwrap_or(Path::new("")),
-        &file_roles(db, file, &root),
+        file_role_contexts(db, file),
     )
 }
 
@@ -751,7 +893,7 @@ pub fn file_discovery_references(
     file: SourceInput,
 ) -> Vec<crate::external::links::FileReference> {
     let project = db.project_input(*file.project(db));
-    let roots = resolved_labels(db, project).candidate_roots(file.path(db));
+    let roots = crate::project::root_views::candidate_roots(db, project, file.path(db));
     if roots.len() <= 1 {
         return file_references(db, file).clone();
     }

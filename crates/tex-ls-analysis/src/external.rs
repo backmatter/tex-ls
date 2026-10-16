@@ -26,7 +26,11 @@ pub enum LocationKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DirectoryContents {
+    /// UTF-8 names that can be represented in source edits. Native hosts skip
+    /// other names instead of publishing lossy aliases; source paths retain their bytes.
     pub entries: BTreeMap<String, LocationKind>,
+    /// Whether all representable names were observed. Non-UTF8 paths cannot
+    /// derive absence from these entries and require direct observations.
     pub complete: bool,
 }
 
@@ -57,6 +61,10 @@ pub struct CompilerArtifact {
     pub content_fingerprint: u64,
     pub built_from: Option<AnalysisRevision>,
     pub parsed: ParsedAux,
+    /// Exact AUX children supplied by a host that resolved physical artifact
+    /// aliases. When absent, analysis resolves textual inputs relative to the
+    /// logical artifact path, preserving generic and browser host semantics.
+    pub resolved_aux_inputs: Option<Vec<PathBuf>>,
     pub messages: Vec<compiler::Message>,
     pub recorder: Option<compiler::Recorder>,
 }
@@ -80,11 +88,16 @@ impl CompilerArtifact {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hash);
-        directory.to_string_lossy().as_ref().hash(&mut hash);
+        if let Some(directory) = directory.to_str() {
+            directory.hash(&mut hash);
+        } else {
+            directory.as_os_str().as_encoded_bytes().hash(&mut hash);
+        }
         Self {
             identity,
             content_fingerprint: hash.finish(),
             built_from: None,
+            resolved_aux_inputs: None,
             parsed: if extension == Some("aux") {
                 crate::project::aux::parse_aux(text)
             } else {
@@ -249,4 +262,29 @@ pub fn explicit_root_hints(text: &str, source: &std::path::Path) -> Vec<PathBuf>
         }
     }
     roots
+}
+
+#[cfg(all(test, unix))]
+mod native_path_fingerprint_tests {
+    use super::*;
+    #[test]
+    fn compiler_fingerprints_distinguish_non_utf8_origin_directories() {
+        use std::os::unix::ffi::OsStringExt;
+        let first =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/project/dir\xff".to_vec()));
+        let second =
+            std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/project/dir\xfe".to_vec()));
+        let path = std::path::Path::new("/project/main.fls");
+        let a = CompilerArtifact::from_text_in(path, "INPUT relative.tex", "native".into(), &first);
+        let b =
+            CompilerArtifact::from_text_in(path, "INPUT relative.tex", "native".into(), &second);
+        assert_ne!(
+            a.recorder, b.recorder,
+            "the observations identify different inputs"
+        );
+        assert_ne!(
+            a.content_fingerprint, b.content_fingerprint,
+            "different input origins cannot reuse the same fingerprint"
+        );
+    }
 }

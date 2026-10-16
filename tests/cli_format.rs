@@ -193,7 +193,7 @@ fn check_errors_go_to_stderr() {
 /// implicit (piped) stdin still works, and neither can be mixed with paths.
 /// The gated case — no paths at an interactive terminal — is a usage error
 /// rather than a silent wait (issue #111); it needs a pty to reproduce, so the
-/// decision itself is unit-tested in `main.rs` (`resolve_inputs`).
+/// decision itself is unit-tested in `src/commands/inputs.rs` (`resolve_inputs`).
 #[test]
 fn dash_formats_stdin_to_stdout() {
     let dir = repo_dir();
@@ -264,7 +264,7 @@ fn check_rejects_stdin() {
     );
 }
 
-// --- declared environments (`[environments.…]`; AGENTS.md decision #12) ------
+// --- declared environments (`[environments.…]`) ------
 
 /// The issue-#109 shape, with the pair defined somewhere this file cannot see —
 /// so the inferred alias scan has nothing to find and only the declaration can

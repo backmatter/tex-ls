@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tex_ls_formatter::formatter::FormatError::UnsupportedConstruct;
 use tex_ls_formatter::formatter::{
     FormatError, FormatStyle, ItemIndent, LineEnding, MathWrap, SentenceOptions, WrapMode, format,
     format_node_range_with_signatures, format_with_declarations_sentence, format_with_style,
@@ -16,6 +17,497 @@ use tex_ls_parser::declarations::{Declarations, ResolvedDeclarations};
 use tex_ls_parser::parser::{LatexFlavor, LexConfig, parse, parse_with_flavor, reconstruct};
 use tex_ls_parser::semantic::SignatureDb;
 use tex_ls_parser::syntax::SyntaxKind;
+
+#[test]
+fn uncertain_macrocode_environment_keeps_frame_body_boundaries() {
+    let source = concat!(
+        "\\iftrue\\catcode37=14\\fi\n",
+        "alpha beta\n\n",
+        "\\ExplSyntaxOn\n",
+        "%    \\begin{macrocode}\n",
+        "\\int_new:N \\l_demo_int\n\n",
+        "\\cs_new:Nn \\demo: { a % note\n b }\n",
+        "%    \\end{macrocode}\n",
+    );
+    let alternate = source.replacen("alpha beta", "alpha\nbeta", 1);
+    let config = LexConfig {
+        dtx: true,
+        ..LexConfig::default()
+    };
+    for newline in ["\n", "\r\n"] {
+        let source = source.replace('\n', newline);
+        let alternate = alternate.replace('\n', newline);
+        let parsed = parse_with_flavor(&source, config);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let macrocode = parsed
+            .syntax()
+            .descendants()
+            .find(|node| {
+                node.kind() == SyntaxKind::ENVIRONMENT
+                    && node.text().to_string().starts_with("\\begin{macrocode}")
+            })
+            .expect("the affected frame must be an environment");
+        assert!(
+            macrocode
+                .descendants_with_tokens()
+                .any(|element| element.kind() == SyntaxKind::UNCERTAIN),
+            "unknown ownership must occur inside the same framed environment"
+        );
+        let first_body = macrocode
+            .children()
+            .find(|node| node.kind() == SyntaxKind::PARAGRAPH)
+            .expect("the frame body begins with a paragraph");
+        assert_eq!(
+            first_body.first_token().unwrap().kind(),
+            SyntaxKind::NEWLINE
+        );
+        assert!(
+            !first_body
+                .descendants_with_tokens()
+                .any(|element| element.kind() == SyntaxKind::UNCERTAIN),
+            "the first paragraph must take the ordinary expl3 body lowering path"
+        );
+        assert!(first_body.text().to_string().contains("\\int_new:N"));
+        for wrap in [WrapMode::Reflow, WrapMode::Stable, WrapMode::Preserve] {
+            let style = FormatStyle {
+                wrap,
+                ..FormatStyle::default()
+            };
+            let output = format_with_style_flavored(&source, style, config).unwrap();
+            assert!(
+                output.contains(&format!("%    \\begin{{macrocode}}{newline}")),
+                "the documentary opener must retain its body boundary: {output:?}"
+            );
+            assert!(
+                output.contains(&format!("{newline}%    \\end{{macrocode}}")),
+                "the documentary closer must start on its physical line: {output:?}"
+            );
+            assert_eq!(
+                format_with_style_flavored(&output, style, config).unwrap(),
+                output
+            );
+            if wrap == WrapMode::Preserve {
+                let spaced = source.replacen("alpha beta", "alpha   beta", 1);
+                assert_eq!(
+                    format_with_style_flavored(&spaced, style, config).unwrap(),
+                    output,
+                    "Preserve still canonicalizes inline spaces"
+                );
+                let authored = format_with_style_flavored(&alternate, style, config).unwrap();
+                assert!(
+                    authored.contains(&format!("alpha{newline}beta")),
+                    "Preserve retains the authored ordinary prose line break"
+                );
+            } else {
+                assert_eq!(
+                    format_with_style_flavored(&alternate, style, config).unwrap(),
+                    output,
+                    "unrelated ordinary prose gaps must still canonicalize"
+                );
+            }
+            assert_eq!(
+                perturb::nontrivia_content(&output, config),
+                perturb::nontrivia_content(&source, config)
+            );
+            assert_eq!(
+                comment_texts(&output, config),
+                comment_texts(&source, config)
+            );
+            let uncertain = |text: &str| {
+                parse_with_flavor(text, config)
+                    .syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .filter(|token| token.kind() == SyntaxKind::UNCERTAIN)
+                    .map(|token| token.text().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(uncertain(&output), uncertain(&source));
+            perturb::check_trivia_convergence(
+                &source,
+                config,
+                perturb::DEFAULT_SINGLE_FLIP_SAMPLES,
+                |text| {
+                    format_with_style_flavored(text, style, config)
+                        .map_err(|error| error.to_string())
+                },
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
+fn uncertain_macrocode_tail_keeps_exact_trivia_before_closing_frame() {
+    let source = concat!(
+        "\\iftrue\\catcode37=14\\fi\n\\ExplSyntaxOn\n",
+        "%    \\begin{macrocode}\n",
+        "\\int_new:N \\l_demo_int\n\n",
+        "% final uncertain note  \n\n",
+        "%    \\end{macrocode}\n",
+    );
+    let config = LexConfig {
+        dtx: true,
+        ..LexConfig::default()
+    };
+    for newline in ["\n", "\r\n"] {
+        let source = source.replace('\n', newline);
+        let parsed = parse_with_flavor(&source, config);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let tail = parsed
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .find(|token| {
+                token.kind() == SyntaxKind::UNCERTAIN && token.text().starts_with("% final")
+            })
+            .expect("the final comment must have uncertain ownership");
+        let close = source.rfind("%    \\end{macrocode}").unwrap();
+        let protected = &source[usize::from(tail.text_range().start())..close];
+        assert_eq!(
+            protected,
+            format!("% final uncertain note  {newline}{newline}")
+        );
+        for wrap in [WrapMode::Reflow, WrapMode::Stable, WrapMode::Preserve] {
+            let style = FormatStyle {
+                wrap,
+                ..FormatStyle::default()
+            };
+            let output = format_with_style_flavored(&source, style, config).unwrap();
+            assert!(
+                output.contains(&format!("{protected}%    \\end{{macrocode}}")),
+                "the frame must preserve the exact uncertain token and adjacent trailing trivia: {output:?}"
+            );
+            assert_eq!(
+                format_with_style_flavored(&output, style, config).unwrap(),
+                output
+            );
+            assert_eq!(
+                perturb::nontrivia_content(&output, config),
+                perturb::nontrivia_content(&source, config)
+            );
+            assert_eq!(
+                comment_texts(&output, config),
+                comment_texts(&source, config)
+            );
+        }
+    }
+}
+
+#[test]
+fn uncertain_macrocode_head_keeps_exact_trivia_after_opening_frame() {
+    let source = concat!(
+        "\\iftrue\\catcode37=14\\fi\n\\ExplSyntaxOn\n",
+        "%    \\begin{macrocode}\n\n",
+        "% first uncertain note  \n\n",
+        "\\int_new:N \\l_demo_int\n",
+        "%    \\end{macrocode}\n",
+    );
+    let config = LexConfig {
+        dtx: true,
+        ..LexConfig::default()
+    };
+    for newline in ["\n", "\r\n"] {
+        let source = source.replace('\n', newline);
+        let parsed = parse_with_flavor(&source, config);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert!(
+            parsed
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .any(|token| token.kind() == SyntaxKind::UNCERTAIN
+                    && token.text().starts_with("% first"))
+        );
+        let boundary = format!(
+            "%    \\begin{{macrocode}}{newline}{newline}% first uncertain note  {newline}{newline}"
+        );
+        for wrap in [WrapMode::Reflow, WrapMode::Stable, WrapMode::Preserve] {
+            let style = FormatStyle {
+                wrap,
+                ..FormatStyle::default()
+            };
+            let output = format_with_style_flavored(&source, style, config).unwrap();
+            assert!(
+                output.contains(&boundary),
+                "the exact protected opener gap must not gain a frame break: {output:?}"
+            );
+            assert_eq!(
+                format_with_style_flavored(&output, style, config).unwrap(),
+                output
+            );
+            assert_eq!(
+                perturb::nontrivia_content(&output, config),
+                perturb::nontrivia_content(&source, config)
+            );
+            assert_eq!(
+                comment_texts(&output, config),
+                comment_texts(&source, config)
+            );
+        }
+    }
+}
+
+#[test]
+fn uncertain_lexical_ownership_preserves_protected_tokens_and_boundaries() {
+    for source in [
+        "\\iftrue\\catcode37=14\\fi\n\\ExplSyntaxOn\n{a % note\n b}\n",
+        "\\catcode37=5\n\\ExplSyntaxOn\n{a % note\n b}\n",
+        "\\iftrue\\catcode36=3\\fi\n{a $ note\n b}\n",
+        "\\iftrue\\catcode64=11\\fi\n\\hello@world\n",
+    ] {
+        let parsed = parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        assert_eq!(parsed.syntax().to_string(), source);
+        for wrap in [
+            WrapMode::Reflow,
+            WrapMode::Stable,
+            WrapMode::Sentence,
+            WrapMode::Semantic,
+            WrapMode::Preserve,
+        ] {
+            let style = FormatStyle {
+                wrap,
+                ..FormatStyle::default()
+            };
+            let output = format_with_style(source, style).unwrap();
+            let uncertain_tokens = |text: &str| {
+                parse(text)
+                    .syntax()
+                    .descendants_with_tokens()
+                    .filter_map(|element| element.into_token())
+                    .filter(|token| token.kind() == SyntaxKind::UNCERTAIN)
+                    .map(|token| token.text().to_owned())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                uncertain_tokens(&output),
+                uncertain_tokens(source),
+                "{source} under {wrap:?}"
+            );
+            assert_eq!(format_with_style(&output, style).unwrap(), output);
+            let config: LexConfig = LatexFlavor::Document.into();
+            assert_eq!(
+                perturb::nontrivia_content(&output, config),
+                perturb::nontrivia_content(source, config)
+            );
+            assert_eq!(
+                comment_texts(&output, config),
+                comment_texts(source, config)
+            );
+            let reparsed = parse(&output);
+            assert!(reparsed.errors.is_empty());
+            assert_eq!(reparsed.syntax().to_string(), output);
+            // Joining an uncertain percent line with its following closing brace
+            // is rejected by the unchanged perturb oracle's parse-shape check.
+            // Such unsupported seams do not satisfy a zero-dropped premise.
+            perturb::check_trivia_convergence(
+                source,
+                config,
+                perturb::DEFAULT_SINGLE_FLIP_SAMPLES,
+                |text| format_with_style(text, style).map_err(|error| error.to_string()),
+            )
+            .expect("every verified variant must preserve invariants and converge");
+            let crlf = FormatStyle {
+                line_ending: LineEnding::Crlf,
+                ..style
+            };
+            assert_eq!(
+                format_with_style(source, crlf).unwrap(),
+                output.replace('\n', "\r\n")
+            );
+        }
+        assert!(matches!(
+            format_node_range_with_signatures(
+                &parsed.syntax(),
+                FormatStyle::default(),
+                &SignatureDb::default(),
+                parsed.syntax().text_range(),
+            ),
+            Err(UnsupportedConstruct {
+                kind: SyntaxKind::UNCERTAIN,
+                ..
+            })
+        ));
+    }
+    assert!(format("\\catcode37=12\n{a % note\n b}\n").is_ok());
+    assert!(format("{\\catcode37=5}\n{a % comment\n b}\n").is_ok());
+}
+
+#[test]
+fn uncertain_lexical_lines_do_not_preserve_unrelated_consumed_trivia() {
+    let source = "\\iftrue\\catcode37=14\\fi\n\\ExplSyntaxOn\nalpha beta\n% note\n";
+    let changed = source.replacen("alpha beta", "alpha\nbeta", 1);
+    let parsed = parse(source);
+    assert!(parsed.errors.is_empty());
+    assert!(
+        parsed
+            .syntax()
+            .descendants_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::UNCERTAIN)
+    );
+    let variants = perturb::trivia_perturbations(source, LatexFlavor::Document, 16);
+    assert!(
+        variants
+            .variants
+            .iter()
+            .any(|variant| variant.text == changed),
+        "the isolated ordinary prose gap must be proved safe independently of formatter ownership"
+    );
+    // Neutral CST equality does not prove a boundary beside an uncertain token
+    // TeX-identical. With '%' assigned EOL, a newline before it can move the EOL
+    // character from skip-blanks to new-line state and introduce a paragraph.
+    // Only the independent alpha/beta gap is consumed here; unknown seams remain.
+    for width in [24, 80] {
+        let style = FormatStyle {
+            line_width: width,
+            ..FormatStyle::default()
+        };
+        let output = format_with_style(source, style).unwrap();
+        let alternate = format_with_style(&changed, style).unwrap();
+        assert_eq!(
+            output, alternate,
+            "unrelated consumed trivia must canonicalize"
+        );
+        assert!(output.contains("beta\n% note\n"));
+        assert_format_invariants_with_style(source, style);
+        assert_format_invariants_with_style(&changed, style);
+    }
+}
+
+#[test]
+fn uncertain_boundaries_preserve_eol_state_and_protected_eof_trivia() {
+    for source in [
+        "\\catcode37=5\nalpha beta % note  ",
+        "\\catcode37=5\nalpha beta\n% note  ",
+        "\\iftrue\\catcode36=3\\fi\nalpha beta $ note  ",
+        "\\iftrue\\catcode64=11\\fi\nalpha beta \\hello@world  \\ref{real}\n",
+        "\\iftrue\\catcode64=11\\fi\nalpha beta \\hello@world  ",
+        "\\catcode37=5\nalpha beta\n% note  \n\n",
+        "\\catcode37=5\nalpha beta\n% note  \r\n\r\n",
+    ] {
+        let parsed = parse(source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+        let tokens: Vec<_> = parsed
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .collect();
+        let protected: Vec<_> = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| token.kind() == SyntaxKind::UNCERTAIN)
+            .map(|(index, token)| {
+                let mut first = index;
+                let mut last = index;
+                while first > 0
+                    && matches!(
+                        tokens[first - 1].kind(),
+                        SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE
+                    )
+                {
+                    first -= 1;
+                }
+                while last + 1 < tokens.len()
+                    && matches!(
+                        tokens[last + 1].kind(),
+                        SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE
+                    )
+                {
+                    last += 1;
+                }
+                assert!(!token.text().is_empty());
+                tokens[first..=last]
+                    .iter()
+                    .map(|token| token.text().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(!protected.is_empty());
+        for wrap in [
+            WrapMode::Reflow,
+            WrapMode::Stable,
+            WrapMode::Sentence,
+            WrapMode::Semantic,
+            WrapMode::Preserve,
+        ] {
+            let style = FormatStyle {
+                wrap,
+                ..FormatStyle::default()
+            };
+            let output = format_with_style(source, style).unwrap();
+            for bytes in &protected {
+                // These fixtures detect LF from their first physical line.
+                let normalized = bytes.replace("\r\n", "\n");
+                assert!(
+                    output.contains(&normalized),
+                    "{bytes:?} missing from {output:?}"
+                );
+            }
+            assert_eq!(format_with_style(&output, style).unwrap(), output);
+            assert_format_invariants_with_style(source, style);
+        }
+    }
+}
+
+#[test]
+fn preserve_mode_normalizes_independent_spacing_beside_uncertain_lines() {
+    let style = FormatStyle {
+        wrap: WrapMode::Preserve,
+        ..FormatStyle::default()
+    };
+    let source = "\\catcode37=5\nalpha   beta\n% note\n";
+    let output = format_with_style(source, style).unwrap();
+    assert!(output.contains("alpha beta\n% note\n"));
+    assert_eq!(format_with_style(&output, style).unwrap(), output);
+    assert_format_invariants_with_style(source, style);
+}
+
+#[test]
+fn uncertain_documentary_arguments_keep_their_external_physical_margin() {
+    let source =
+        "% \\iftrue\\catcode64=11\\fi\\text{alpha beta gamma delta epsilon \\hello@world}\n";
+    let config = dtx_config();
+    let parsed = parse_with_flavor(source, config);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let root = parsed.syntax();
+    let margin = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.kind() == SyntaxKind::DOC_MARGIN)
+        .unwrap();
+    let uncertain = root
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .find(|token| token.kind() == SyntaxKind::UNCERTAIN)
+        .unwrap();
+    let argument = uncertain
+        .parent_ancestors()
+        .find(|node| node.kind() == SyntaxKind::GROUP)
+        .unwrap();
+    assert!(margin.text_range().end() <= argument.text_range().start());
+    assert!(
+        !argument
+            .descendants_with_tokens()
+            .any(|element| element.kind() == SyntaxKind::DOC_MARGIN)
+    );
+    for width in [20, 24, 80] {
+        let style = FormatStyle {
+            line_width: width,
+            ..FormatStyle::default()
+        };
+        let output = format_with_style_flavored(source, style, config).unwrap();
+        assert_eq!(
+            output, source,
+            "a same-line margin outside the argument owns its physical line"
+        );
+        assert_eq!(
+            format_with_style_flavored(&output, style, config).unwrap(),
+            output
+        );
+        check_format_invariants(source, style, config).unwrap();
+    }
+}
 
 #[test]
 fn embedded_code_keeps_its_layout_including_active_tex_islands() {
@@ -78,8 +570,7 @@ fn primitive_string_keeps_its_printed_token_and_active_following_source() {
     }
 }
 
-/// Every `%` comment in `text`, in document order, trailing whitespace trimmed
-/// (the printer may drop a comment's trailing spaces along with the line's).
+/// Every `%` comment in `text`, in document order, with its exact bytes.
 ///
 /// `DOC_MARGIN` and `GUARD` are deliberately excluded: a `.dtx` margin is
 /// re-synthesized per output line by the doc-paragraph reflow, so its *count* is
@@ -90,7 +581,7 @@ fn comment_texts(text: &str, config: LexConfig) -> Vec<String> {
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| token.kind() == SyntaxKind::COMMENT)
-        .map(|token| token.text().trim_end().to_string())
+        .map(|token| token.text().to_string())
         .collect()
 }
 
@@ -1798,6 +2289,32 @@ fn dtx_config() -> LexConfig {
 }
 
 #[test]
+fn documented_definition_operands_preserve_content_comments_and_trivia_layout() {
+    for source in [
+        "% \\def\\foo{^^A\n%   body}\n% Documentation after the definition.\n",
+        "% \\NewDocumentCommand\\fmi{sO{}m}\n% {\\IfBooleanTF{#1}{\\todo[inline,#2]{#3}}^^A\n% {\\todo[#2]{#3}}}\n% Documentation.\n",
+        "% \\renewcommand\\MacroFont{\\fontencoding\\encodingdefault\n% \\fontfamily\\ttdefault\\small}\n% Documentation.\n",
+    ] {
+        let before = parse_with_flavor(source, dtx_config());
+        assert!(before.errors.is_empty(), "{source}: {:?}", before.errors);
+        for width in [24, 60, 80] {
+            let style = FormatStyle {
+                line_width: width,
+                wrap: WrapMode::Reflow,
+                ..FormatStyle::default()
+            };
+            check_format_invariants(source, style, dtx_config())
+                .unwrap_or_else(|error| panic!("width {width}: {source}: {error}"));
+            perturb::check_trivia_invariance(source, dtx_config(), 16, |text| {
+                format_with_style_flavored(text, style, dtx_config())
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|error| panic!("width {width}: {source}: {error:?}"));
+        }
+    }
+}
+
+#[test]
 fn dtx_fixtures_match_expected() {
     for &name in DTX_FIXTURES {
         let style = FormatStyle {
@@ -3161,8 +3678,7 @@ fn a_literal_begin_does_not_inherit_the_alias_target() {
 fn env_alias_resolves_with_no_external_signatures() {
     // `format` passes an empty external `SignatureDb`, which is the WASM
     // plugin's path. The alias must resolve from the document's own scan alone,
-    // or the plugin would become a second sanctioned divergence from `tex-ls
-    // format` (AGENTS.md allows exactly one).
+    // so editor output agrees with `tex-ls format`.
     let out = format(ALIAS_DOC).expect("formats");
     assert!(out.contains("a & = & b"));
 }
@@ -3455,4 +3971,107 @@ fn active_literal_bodies_preserve_their_whitespace() {
             );
         }
     }
+}
+
+#[test]
+fn latex_comment_bytes_keep_trailing_spaces_and_tabs() {
+    let comments = |source: &str| {
+        parse(source)
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|element| element.into_token())
+            .filter(|token| token.kind() == SyntaxKind::COMMENT)
+            .map(|token| token.text().to_string())
+            .collect::<Vec<_>>()
+    };
+    let mut failures = Vec::new();
+    for newline in ["\n", "\r\n", "\r"] {
+        for source in [
+            "% EOF \t",
+            "% Unicode \u{3000} \t",
+            "% standalone \t\ntext\n",
+            "text % trailing \t\n",
+            "text\n% final \t",
+            "\\begin{align}\na&=b % row \t\n\\end{align}\n",
+            "\\newcommand{\\foo}{x % inside \t\n y}\n",
+        ] {
+            let source = source.replace('\n', newline);
+            let expected = comments(&source);
+            let formatted = format(&source).unwrap();
+            if comments(&formatted) != expected {
+                failures.push(format!("{source:?}: {formatted:?}"));
+            }
+            assert_eq!(format(&formatted).unwrap(), formatted);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn range_comment_bytes_keep_trailing_spaces_and_tabs() {
+    let source = "text\n\n% final \t\n";
+    let root = parse(source).syntax();
+    let formatted = format_node_range_with_signatures(
+        &root,
+        FormatStyle::default(),
+        &SignatureDb::default(),
+        root.text_range(),
+    )
+    .unwrap();
+    assert!(formatted.ends_with("% final \t"), "{formatted:?}");
+
+    let source = "text % included \t\n\nfollowing paragraph";
+    let root = parse(source).syntax();
+    // Public range formatting emits an intersecting block in full.
+    let head = rowan::TextRange::new(0.into(), (source.find("\n\n").unwrap() as u32).into());
+    let formatted = format_node_range_with_signatures(
+        &root,
+        FormatStyle::default(),
+        &SignatureDb::default(),
+        head,
+    )
+    .unwrap();
+    assert_eq!(formatted, "text % included \t");
+
+    let start = source.find('%').unwrap() as u32;
+    let partial = rowan::TextRange::new(start.into(), (start + 2).into());
+    assert_eq!(
+        format_node_range_with_signatures(
+            &root,
+            FormatStyle::default(),
+            &SignatureDb::default(),
+            partial,
+        )
+        .unwrap(),
+        "% included \t"
+    );
+    let empty = rowan::TextRange::empty(start.into());
+    assert_eq!(
+        format_node_range_with_signatures(
+            &root,
+            FormatStyle::default(),
+            &SignatureDb::default(),
+            empty,
+        )
+        .unwrap(),
+        ""
+    );
+
+    let source = "\\begin{document}\n\ntext % body final \t\n\nunselected body paragraph\n\n\\end{document}\n\nother paragraph";
+    let root = parse(source).syntax();
+    let body = rowan::TextRange::new(
+        (source.find("text").unwrap() as u32).into(),
+        (source.find("unselected").unwrap() as u32).into(),
+    );
+    assert_eq!(
+        format_node_range_with_signatures(
+            &root,
+            FormatStyle::default(),
+            &SignatureDb::default(),
+            body,
+        )
+        .unwrap(),
+        "text % body final \t",
+        "range={body:?}, tree={root:#?}"
+    );
 }

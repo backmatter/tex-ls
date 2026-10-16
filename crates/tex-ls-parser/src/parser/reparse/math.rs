@@ -67,8 +67,7 @@ pub(super) fn reparse_math(
 
     // Faithfulness proves that the target does not depend on lexer or parser
     // entry state absent from the base context supplied to the fragment parse.
-    let context = base.ctx.rebased_for_fragment(start);
-    let old_parsed = parse_fragment_with_ctx(old, &context, base.config, base.implicit_expl);
+    let old_parsed = parse_fragment_with_ctx(old, base.ctx, base.config, base.implicit_expl, start);
     if !old_parsed.errors.is_empty() {
         return None;
     }
@@ -77,7 +76,7 @@ pub(super) fn reparse_math(
         return None;
     }
 
-    let parsed = parse_fragment_with_ctx(&new, &context, base.config, base.implicit_expl);
+    let parsed = parse_fragment_with_ctx(&new, base.ctx, base.config, base.implicit_expl, start);
     let replacement = full_span_container(&parsed.syntax(), target.kind(), new.len())?;
     // A fragment starts with a fresh recursion budget. CST depth conservatively
     // bounds recursive grammar entries, including the unchanged outer context.
@@ -110,7 +109,7 @@ pub(super) fn reparse_math(
 /// full-span checks.
 fn math_target(root: &SyntaxNode, edit: TextRange) -> Option<SyntaxNode> {
     let starts: Vec<SyntaxNode> = if edit.is_empty() {
-        root.token_at_offset(edit.start())
+        crate::syntax::token_at_offset(root, edit.start())
             .filter_map(|token| token.parent())
             .collect()
     } else {
@@ -170,10 +169,13 @@ fn right_boundary_holds(
     let mut probe = String::with_capacity(replacement_text.len() + next.text().len());
     probe.push_str(replacement_text);
     probe.push_str(next.text());
-    let context = base
-        .ctx
-        .rebased_for_fragment(usize::from(target.text_range().start()));
-    let parsed = parse_fragment_with_ctx(&probe, &context, base.config, base.implicit_expl);
+    let parsed = parse_fragment_with_ctx(
+        &probe,
+        base.ctx,
+        base.config,
+        base.implicit_expl,
+        usize::from(target.text_range().start()),
+    );
     parsed.syntax().descendants().any(|node| {
         node.kind() == target.kind()
             && usize::from(node.text_range().start()) == 0
@@ -197,7 +199,7 @@ fn surface_is_local(base: &ReparseBase<'_>, edit: &Edit) -> bool {
 /// after a control word would rename that control word.
 fn position_is_local(root: &SyntaxNode, edit: TextRange) -> bool {
     let tokens: Vec<SyntaxToken> = if edit.is_empty() {
-        root.token_at_offset(edit.start()).collect()
+        crate::syntax::token_at_offset(root, edit.start()).collect()
     } else {
         root.descendants_with_tokens()
             .filter_map(|element| element.into_token())

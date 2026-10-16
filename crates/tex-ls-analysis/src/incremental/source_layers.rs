@@ -16,11 +16,21 @@ impl IncrementalDatabase {
         files: &[(PathBuf, PathBuf)],
         project_for: impl Fn(&Path) -> Option<ProjectId>,
     ) {
-        let captured: Vec<_> = files
+        self.rename_sources_between(files, |old, new| project_for(old).zip(project_for(new)));
+    }
+
+    /// Move layers using separately captured source and destination ownership.
+    /// A swap can give the same path different projects before and after moving.
+    pub fn rename_sources_between(
+        &mut self,
+        files: &[(PathBuf, PathBuf)],
+        projects_for: impl Fn(&Path, &Path) -> Option<(ProjectId, ProjectId)>,
+    ) {
+        let captured: std::collections::BTreeMap<_, _> = files
             .iter()
             .map(|(old, new)| {
                 let mut layers = self.layers_for(old);
-                if let Some((from, to)) = project_for(old).zip(project_for(new)) {
+                if let Some((from, to)) = projects_for(old, new) {
                     if layers.backing_projects.remove(&from) {
                         layers.backing_projects.insert(to);
                     }
@@ -28,15 +38,29 @@ impl IncrementalDatabase {
                         layers.overlay_projects.insert(to);
                     }
                 }
-                (new, layers)
+                (normalize_path(new), layers)
             })
             .collect();
+        // Remove every old membership before installing any destination, so
+        // swaps cannot overwrite a layer awaiting capture or removal. Rebuild
+        // storage once for the batch rather than once per renamed source.
+        let mut removed = HashSet::new();
+        let mut changed_projects = HashSet::new();
         for (old, _) in files {
-            self.publish_layers(old, SourceLayers::default());
+            self.stage_layers(
+                old,
+                SourceLayers::default(),
+                &mut removed,
+                &mut changed_projects,
+            );
         }
+        self.finish_layer_batch(removed, changed_projects);
+        let mut removed = HashSet::new();
+        let mut changed_projects = HashSet::new();
         for (new, layers) in captured {
-            self.publish_layers(new, layers);
+            self.stage_layers(&new, layers, &mut removed, &mut changed_projects);
         }
+        self.finish_layer_batch(removed, changed_projects);
     }
 
     /// Supply or remove backing contents for a project member. An open overlay
@@ -78,13 +102,7 @@ impl IncrementalDatabase {
             }
             self.stage_layers(&path, layers, &mut removed, &mut changed_projects);
         }
-        if !removed.is_empty() {
-            self.read.inner.rebuild(&removed, None);
-        } else {
-            for project in changed_projects {
-                self.read.inner.sync_project_files(project);
-            }
-        }
+        self.finish_layer_batch(removed, changed_projects);
         Ok(())
     }
 
@@ -175,6 +193,15 @@ impl IncrementalDatabase {
         let mut removed = HashSet::new();
         let mut changed_projects = HashSet::new();
         self.stage_layers(path, layers, &mut removed, &mut changed_projects);
+        self.finish_layer_batch(removed, changed_projects);
+        self.read.inner.files.get(&normalize_path(path)).copied()
+    }
+
+    fn finish_layer_batch(
+        &mut self,
+        removed: HashSet<(ProjectId, PathBuf)>,
+        changed_projects: HashSet<ProjectId>,
+    ) {
         if !removed.is_empty() {
             self.read.inner.rebuild(&removed, None);
         } else {
@@ -182,7 +209,6 @@ impl IncrementalDatabase {
                 self.read.inner.sync_project_files(project);
             }
         }
-        self.read.inner.files.get(&normalize_path(path)).copied()
     }
 
     fn stage_layers(
@@ -249,6 +275,84 @@ impl IncrementalDatabase {
             db.revision += 1;
         } else if let Some(source) = old_source {
             Arc::make_mut(&mut db.source_layers).remove(&source);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_rename_destinations_keep_the_last_rows_owners_and_layers() {
+        let mut db = IncrementalDatabase::default();
+        let first = db.project_id();
+        let second = db.create_project(ResolvedDeclarations::default());
+        let a = PathBuf::from("/project/a.tex");
+        let b = PathBuf::from("/project/b.tex");
+        let destination = PathBuf::from("/project/destination.tex");
+        db.set_backing(first, &a, Some("first".into_source_text()))
+            .unwrap();
+        db.set_backing(second, &b, Some("last backing".into_source_text()))
+            .unwrap();
+        db.open_overlay(second, &b, "last overlay").unwrap();
+        db.set_backing(second, &destination, Some("overwritten".into_source_text()))
+            .unwrap();
+        db.rename_sources(
+            &[(a, destination.clone()), (b, destination.clone())],
+            |_| None,
+        );
+        assert!(
+            db.snapshot_for(first)
+                .unwrap()
+                .lookup_file(&destination)
+                .is_none()
+        );
+        let snapshot = db.snapshot_for(second).unwrap();
+        let source = snapshot.lookup_file(&destination).unwrap();
+        assert_eq!(snapshot.file_text(source), "last overlay");
+        drop(snapshot);
+        db.close_overlay(second, &destination).unwrap();
+        let snapshot = db.snapshot_for(second).unwrap();
+        assert_eq!(
+            snapshot.file_text(snapshot.lookup_file(&destination).unwrap()),
+            "last backing"
+        );
+    }
+
+    #[test]
+    fn batch_rename_rebuilds_once_and_preserves_swapped_layers() {
+        let mut db = IncrementalDatabase::default();
+        let project = db.project_id();
+        let retained = Path::new("/project/retained.tex");
+        let retained_source = db.apply_change(retained, "retained", None);
+        let mut files = Vec::new();
+        for index in 0..32 {
+            let left = PathBuf::from(format!("/project/left{index}.tex"));
+            let right = PathBuf::from(format!("/project/right{index}.tex"));
+            db.set_backing(project, &left, Some("left backing".into_source_text()))
+                .unwrap();
+            db.open_overlay(project, &left, "left overlay").unwrap();
+            db.set_backing(project, &right, Some("right backing".into_source_text()))
+                .unwrap();
+            files.extend([(left.clone(), right.clone()), (right, left)]);
+        }
+        let before = db.snapshot();
+        let rebuilds = db.read.inner.rebuild_count;
+        db.rename_sources(&files, |_| Some(project));
+        assert_eq!(db.read.inner.rebuild_count - rebuilds, 1);
+        assert_eq!(db.lookup_file(retained), Some(retained_source));
+        for index in 0..32 {
+            let left = PathBuf::from(format!("/project/left{index}.tex"));
+            let right = PathBuf::from(format!("/project/right{index}.tex"));
+            let source = db.lookup_file(&left).unwrap();
+            assert_eq!(db.file_text(source), "right backing");
+            let source = db.lookup_file(&right).unwrap();
+            assert_eq!(db.file_text(source), "left overlay");
+            let old_source = before.lookup_file(&left).unwrap();
+            assert_eq!(before.file_text(old_source), "left overlay");
+            db.close_overlay(project, &right).unwrap();
+            assert_eq!(db.file_text(source), "left backing");
         }
     }
 }

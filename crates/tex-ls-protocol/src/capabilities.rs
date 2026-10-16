@@ -1,5 +1,11 @@
 //! Capabilities operations.
-use super::*;
+use lsp_types::{
+    CodeActionKind, CodeActionProvider, CompletionOptions, DiagnosticOptions, DiagnosticProvider,
+    DocumentLinkOptions, DocumentOnTypeFormattingOptions, FoldingRangeProvider, HoverProvider,
+    PositionEncodingKind, RenameOptions, SelectionRangeProvider, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentSync, TextDocumentSyncKind,
+};
+use tex_ls_analysis::text::PositionEncoding;
 
 /// Capabilities implemented by the shared operations. Hosts add their own extensions.
 pub fn server_capabilities(
@@ -128,8 +134,8 @@ pub fn server_capabilities(
 /// UTF-8 when offered (columns are then plain byte distances — no per-line
 /// re-count), else the protocol-mandatory UTF-16 default (also the fallback for
 /// a pre-3.17 client that sends no offer). Advertised back via
-/// `ServerCapabilities::position_encoding` and honored by every [`LineIndex`]
-/// conversion (each is built with [`LineIndex::with_encoding`]).
+/// `ServerCapabilities::position_encoding` and honored by every [`LineIndex`](tex_ls_analysis::text::LineIndex)
+/// conversion (each is built with [`LineIndex::with_encoding`](tex_ls_analysis::text::LineIndex::with_encoding)).
 pub fn negotiate_position_encoding(init_params: &serde_json::Value) -> PositionEncoding {
     let offers = init_params
         .get("capabilities")

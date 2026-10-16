@@ -22,13 +22,9 @@ pub struct SigTarget {
 /// over a *complete* construct rather than a typed prefix.
 pub fn signature_target_at(root: &SyntaxNode, offset: usize) -> Option<SigTarget> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
 
-    for token in [left, right].into_iter().flatten() {
+    for token in tokens {
         if tex_ls_parser::semantic::context::in_token_list(&token) {
             continue;
         }

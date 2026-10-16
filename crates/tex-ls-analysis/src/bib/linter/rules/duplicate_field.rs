@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::bib::ast::{entry_type, field_name, field_value, fields};
+use crate::bib::ast::{entry_type, field_name, field_name_range, field_value, fields};
 use crate::bib::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use crate::linter::diagnostic::{Diagnostic, Severity};
 
@@ -122,39 +122,20 @@ impl BibRule for DuplicateField {
     }
 }
 
-/// The range of a `FIELD`'s `FIELD_NAME` child, for a tight caret on the name.
-fn field_name_range(field: &SyntaxNode) -> Option<rowan::TextRange> {
-    field
-        .children()
-        .find(|c| c.kind() == SyntaxKind::FIELD_NAME)
-        .map(|n| n.text_range())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bib::parse;
-    use crate::bib::semantic::Model;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = parse(src).syntax();
-        let model = Model::build(&root);
-        let ctx = BibRuleContext {
-            project: None,
-            path: std::path::Path::new("x.bib"),
-            root: &root,
-            source: src,
-            model: &model,
-            db: crate::bib::semantic::builtin(),
-            suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),
-        };
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if DuplicateField.interests().contains(&el.kind()) {
-                DuplicateField.check(&el, &ctx, &mut out);
+        crate::bib::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if DuplicateField.interests().contains(&el.kind()) {
+                    DuplicateField.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

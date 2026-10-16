@@ -1,4 +1,18 @@
-use super::*;
+use crate::{
+    config::BuildConfig,
+    declarations::ResolvedDeclarations,
+    file_discovery::ExcludeFilter,
+    formatter::{FormatStyle, sentence::SentenceLanguage},
+    linter::RuleSelection,
+    lsp::{refresh, settings::ResolvedSettings},
+    parser::Edit,
+    texmf::InstalledPackages,
+    text::TextBuffer,
+};
+use lsp_server::{RequestId, Response};
+use lsp_types::{CodeActionKind, CompletionItem, Diagnostic, Position, Range, Uri};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use tex_ls_analysis::source::FileKind;
 
 /// Source updates carry shared text; read jobs carry request descriptors.
 pub(super) enum WorkerJob {
@@ -46,7 +60,7 @@ pub(super) enum WorkerJob {
         /// no config; exclude-nothing when no `tex-ls.toml` governs.
         exclude: ExcludeFilter,
         /// The exact transform from the text the db currently holds to `text`, for
-        /// the incremental reparse to splice (`AGENTS.md` decision #6). [`None`]
+        /// the incremental reparse to splice. [`None`]
         /// when the text arrived by a route carrying no edits — a `didOpen`, a
         /// re-lint sweep — which clears the chain rather than leaving one that no
         /// longer describes how this text was reached.
@@ -66,11 +80,9 @@ pub(super) enum WorkerJob {
     Close {
         path: PathBuf,
     },
-    /// A `workspace/didChangeWatchedFiles` event for a **non-open** `.tex`/`.bib`
-    /// project file: re-read it from disk (or evict it on delete) and re-lint every
-    /// open document, since a sibling's labels/cites may have changed. The main loop
-    /// has already confirmed the path is not an open editor buffer (whose overlay text
-    /// is authoritative), so this path deliberately re-reads disk.
+    /// Refresh a watched backing file, including one hidden by an authoritative
+    /// editor overlay. Re-lint open documents when the effective project inputs
+    /// change; keep refreshed backing bytes ready for a later close.
     WatchedChange {
         path: PathBuf,
         deleted: bool,
@@ -314,6 +326,7 @@ pub(super) enum WorkerJob {
         only: Option<Vec<CodeActionKind>>,
         /// The document's resolved lint-rule selection, applied to the findings.
         rules: RuleSelection,
+        texmf: InstalledPackages,
     },
 }
 

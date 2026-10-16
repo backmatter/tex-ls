@@ -10,7 +10,7 @@
 /// [`Parser::attach_arguments`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum BracketPolicy {
-    /// Attach across intervening trivia (decision #8's default).
+    /// Attach across intervening trivia.
     Greedy,
     /// Attach only a directly-abutting `[` (a curated math environment's
     /// `\begin`: its math body starts right after, so a detached `[` is
@@ -25,7 +25,7 @@ pub(super) enum BracketPolicy {
 /// A closed, curated set of TeX/amsmath primitives whose sole "argument" is the
 /// delimiter token that follows (`\Big[`, `\bigl(`, `\Bigg|`), so a `[…]` after
 /// one is never an optional argument (issue #43). The static-fact posture
-/// mirrors `\left`/`\right` (`AGENTS.md`, decision #1).
+/// mirrors `\left`/`\right`.
 pub(super) fn is_big_delimiter_command(text: &str) -> bool {
     let Some(name) = text.strip_prefix('\\') else {
         return false;
@@ -74,32 +74,7 @@ pub(crate) fn is_definition_body_command(text: &str) -> bool {
     ) || is_command_definition_command(text)
 }
 
-/// The LaTeX2e and xparse command-definition families. Unlike environment
-/// definitions and hooks, these consume a control sequence as their name, so a
-/// control-symbol name must remain data rather than opening live syntax.
-pub(super) fn is_command_definition_command(text: &str) -> bool {
-    matches!(
-        text,
-        "\\newcommand"
-            | "\\renewcommand"
-            | "\\providecommand"
-            | "\\DeclareRobustCommand"
-            | "\\newrobustcmd"
-            | "\\renewrobustcmd"
-            | "\\providerobustcmd"
-            | "\\NewDocumentCommand"
-            | "\\NewExpandableDocumentCommand"
-            | "\\RenewExpandableDocumentCommand"
-            | "\\ProvideExpandableDocumentCommand"
-            | "\\DeclareExpandableDocumentCommand"
-            | "\\NewCommandCopy"
-            | "\\RenewCommandCopy"
-            | "\\DeclareCommandCopy"
-            | "\\RenewDocumentCommand"
-            | "\\ProvideDocumentCommand"
-            | "\\DeclareDocumentCommand"
-    )
-}
+pub(super) use crate::parser::reader_facts::is_command_definition_command;
 
 /// The TeX `\def`-family primitives, whose next token is always the control
 /// sequence being (re)defined. A control-*symbol* name would otherwise be

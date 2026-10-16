@@ -198,7 +198,7 @@ fn unterminated_macrocode_recovers_losslessly() {
 
 #[test]
 fn doc_margins_never_form_a_doc_comment() {
-    // The leading-comment bind (decision #9) keys on real `COMMENT` tokens. A
+    // The leading-comment bind keys on real `COMMENT` tokens. A
     // `.dtx` documentation margin is a `DOC_MARGIN` trivia leaf, not a comment, so
     // even prose directly above a documentable construct never binds into a
     // `DOC_COMMENT` node — margins float like whitespace.
@@ -374,6 +374,69 @@ fn parse_dtx_with_errors(input: &str) -> (SyntaxNode, usize) {
         "losslessness violated for {input:?}"
     );
     (root, parsed.errors.len())
+}
+
+#[test]
+fn literal_definition_operands_cross_documentation_margins_and_guards() {
+    for source in [
+        "% \\def\n% \\foo{body}\n% \\foo\n",
+        "% \\let\\foo\n% \\bar\n% \\foo\n",
+        "%<package>\\def\n%<package>\\foo{body}\n",
+        "% \\def\n% \\foo#1\n% {#1}\n",
+    ] {
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let (root, errors) = parse_dtx_with_errors(&source);
+            assert_eq!(errors, 0, "{source}");
+            assert_eq!(count_token(&root, SyntaxKind::COMMENT), 0, "{source}");
+            assert!(
+                tex_ls_parser::semantic::scan_definition_sites(&root)
+                    .iter()
+                    .any(|site| site.name == "foo"),
+                "{source}"
+            );
+            assert!(tokens(&root).contains(&(SyntaxKind::CONTROL_WORD, "\\foo".to_owned())));
+            if source.contains("\\def") {
+                let definitions = tex_ls_parser::semantic::scan_definitions(&root);
+                let signature = definitions.command("foo").expect("documentary definition");
+                assert_eq!(signature.args.len(), usize::from(source.contains("#1")));
+            }
+        }
+    }
+}
+
+#[test]
+fn compared_control_sequences_cross_documentation_margins() {
+    let source = "% \\ifx\n% \\begin\n% \\end\n% \\fi\n% \\ref{live}\n";
+    let (root, errors) = parse_dtx_with_errors(source);
+    assert_eq!(errors, 0);
+    assert_eq!(count_token(&root, SyntaxKind::COMMENT), 0);
+    assert_eq!(count(&root, SyntaxKind::ENVIRONMENT), 0);
+    let model = tex_ls_parser::semantic::SemanticModel::build(&root);
+    assert_eq!(model.refs().len(), 1);
+}
+
+#[test]
+fn documentary_frame_lookalikes_remain_inert_in_literal_contexts() {
+    for source in [
+        "% \\detokenize{\n%    \\begin{macrocode}\n% }\n% \\ref{live}\n",
+        "% \\meaning\n%    \\begin{macrocode}\n% \\ref{live}\n",
+    ] {
+        let (root, errors) = parse_dtx_with_errors(source);
+        assert_eq!(errors, 0, "{source}");
+        assert_eq!(count(&root, SyntaxKind::ENVIRONMENT), 0, "{source}");
+        let model = tex_ls_parser::semantic::SemanticModel::build(&root);
+        assert_eq!(model.refs().len(), 1, "{source}");
+    }
+    let source =
+        "% \\meaning\\foo\n%    \\begin{macrocode}\n\\def\\bar@name{body}\n%    \\end{macrocode}\n";
+    let (root, errors) = parse_dtx_with_errors(source);
+    assert_eq!(errors, 0);
+    assert_eq!(count(&root, SyntaxKind::ENVIRONMENT), 1);
+    assert!(
+        tex_ls_parser::semantic::scan_definition_sites(&root)
+            .iter()
+            .any(|site| site.name == "bar@name")
+    );
 }
 
 #[test]
@@ -658,6 +721,32 @@ fn braced_macro_name_argument_captures_content_as_verb() {
 }
 
 #[test]
+fn multiline_documented_name_arguments_remain_raw_data() {
+    for source in [
+        "% \\begin{function}\n%   {\n%     \\NewDocumentCommand,\n%     \\RenewDocumentCommand\n%   }\n% Documentation.\n% \\end{function}\n",
+        "% \\begin{macro} [internal]\n% {\\catcode37=12\n% \\verb|a| \\ref{inert}}\n% \\end{macro}\n% \\ref{real}\n",
+    ] {
+        for source in [source.to_owned(), source.replace('\n', "\r\n")] {
+            let (root, errors) = parse_dtx_with_errors(&source);
+            assert_eq!(errors, 0, "{source}");
+            assert!(root.descendants_with_tokens().any(|element| {
+                element.into_token().is_some_and(|token| {
+                    token.kind() == SyntaxKind::VERB && token.text().contains('\n')
+                })
+            }));
+            assert_eq!(count(&root, SyntaxKind::ENVIRONMENT), 1);
+            assert!(tex_ls_parser::semantic::scan_definition_sites(&root).is_empty());
+            let model = tex_ls_parser::semantic::SemanticModel::build(&root);
+            assert_eq!(model.refs().len(), usize::from(source.contains("{real}")));
+        }
+    }
+    let source = "\\begin{function}\n{\\NewDocumentCommand,\n\\RenewDocumentCommand}\nDocumentation.\\end{function}\n";
+    let parsed = parse_with_flavor(source, LatexFlavor::Document);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    assert_eq!(parsed.syntax().to_string(), source);
+}
+
+#[test]
 fn braced_v_arg_name_holding_a_closer_is_no_orphan() {
     // xo-grid.dtx documents `\[`/`\]` themselves (issue #60): the braced
     // v-type name is raw data, so the closer draws no orphan diagnostic and
@@ -893,4 +982,59 @@ fn implicit_expl_provides_expl_flags_body_before_declaration() {
     let toks = tokens(&root);
     assert!(toks.contains(&(SyntaxKind::CONTROL_WORD, "\\cs_new:Npn".to_string())));
     assert!(toks.contains(&(SyntaxKind::CONTROL_WORD, "\\tl_set:Nn".to_string())));
+}
+
+#[test]
+fn malformed_macrocode_group_stops_stale_expl3_argument_replay() {
+    for prefix in ["\\ExplSyntaxOn\n", "\\ProvidesExplPackage{x}{2020}{1}{x}\n"] {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!("{prefix}\\foo:nn {{\n%    \\begin{{macrocode}}\nx\n}} {{b}}\n%    \\end{{macrocode}}\n").replace('\n', ending);
+            let parsed = tex_ls_parser::parser::parse_with_flavor(
+                &source,
+                LexConfig {
+                    flavor: LatexFlavor::Document,
+                    dtx: true,
+                },
+            );
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(
+                parsed
+                    .errors
+                    .iter()
+                    .any(|error| error.message == "unclosed `{`")
+            );
+            assert!(parsed.syntax().descendants().count() < 50);
+            let declarations = tex_ls_parser::declarations::ResolvedDeclarations::default();
+            let config = LexConfig {
+                flavor: LatexFlavor::Document,
+                dtx: true,
+            };
+            let (base_parse, context) = tex_ls_parser::parser::parse_with_declarations_resolved(
+                &source,
+                config,
+                &declarations,
+            );
+            let base = tex_ls_parser::parser::ReparseBase::from_parts(
+                &source,
+                &base_parse.green,
+                &base_parse.errors,
+                &context,
+                config,
+                &declarations,
+            );
+            let start = source.find(&format!("{ending}x{ending}")).unwrap() + ending.len();
+            let edit = tex_ls_parser::parser::Edit {
+                range: start..start + 1,
+                insert: "text".into(),
+            };
+            let changed = edit.apply(&source);
+            let full = tex_ls_parser::parser::parse_with_flavor(&changed, config);
+            let result = tex_ls_parser::parser::reparse_edits(&base, &[edit], &changed);
+            if let Some(result) = result {
+                assert_eq!(result.green, full.green);
+                assert_eq!(result.errors, full.errors);
+            }
+            assert_eq!(full.syntax().to_string(), changed);
+        }
+    }
 }

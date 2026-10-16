@@ -1,5 +1,6 @@
 # Developing the VS Code extension
 
+Use Node 22 or newer for extension development and VSIX packaging.
 The extension lives in `editors/vscode`. For installation and everyday use, see
 the [extension guide](../../editors/vscode/README.md).
 
@@ -36,11 +37,4 @@ in that window or package once to populate `server/`.
 The extension and bundled server share one release version. Release-plz prepares
 the version change, and the release workflow synchronizes the extension metadata.
 See the [distribution guide](https://github.com/backmatter/tex-ls/blob/main/docs/development/distribution.md#vs-code)
-for packaging and publishing. The icon uses the Backmatter family mark, rendered with the existing logo renderer:
-
-```sh
-node ../logos/src/render.js backmatter --out dist/marketplace --no-png
-rsvg-convert -w 256 -h 256 ../logos/dist/marketplace/backmatter/favicon.svg -o editors/vscode/images/icon.png
-```
-
-Run these commands from the repository root with the sibling `logos` checkout.
+for packaging and publishing.

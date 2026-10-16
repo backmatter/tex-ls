@@ -40,7 +40,7 @@ impl BibRule for MissingRequiredField {
     fn description(&self) -> &'static str {
         "Report fields required by the biblatex entry type but missing from an entry. \
          Alternatives such as `date` or `year` and aliases such as `journal` for `journaltitle` \
-         are accepted. Unknown entry types are excluded. No fix can supply the missing content."
+         are accepted. Unknown entry types and entries using crossref/xdata inheritance are excluded. No fix can supply the missing content."
     }
 
     fn examples(&self) -> &'static [Example] {
@@ -71,6 +71,16 @@ impl BibRule for MissingRequiredField {
             .filter_map(|f| field_name(&f))
             .map(|n| ctx.db.canonical(&n))
             .collect();
+
+        // Inheritance can map field names and be customized by the bibliography
+        // style. Without evaluating that model, absence in the child is no proof
+        // of absence in its effective entry, including unresolved parents.
+        if present
+            .iter()
+            .any(|name| matches!(name.as_str(), "crossref" | "xdata"))
+        {
+            return;
+        }
 
         // Underline the cite key; fall back to the whole entry on a keyless recovery.
         let range = cite_key(entry)
@@ -112,28 +122,17 @@ impl BibRule for MissingRequiredField {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bib::parse;
-    use crate::bib::semantic::Model;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = parse(src).syntax();
-        let model = Model::build(&root);
-        let ctx = BibRuleContext {
-            project: None,
-            path: std::path::Path::new("x.bib"),
-            root: &root,
-            source: src,
-            model: &model,
-            db: crate::bib::semantic::builtin(),
-            suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),
-        };
-        let mut out = Vec::new();
-        for el in root.descendants_with_tokens() {
-            if MissingRequiredField.interests().contains(&el.kind()) {
-                MissingRequiredField.check(&el, &ctx, &mut out);
+        crate::bib::linter::test_support::with_context(src, |root, ctx| {
+            let mut out = Vec::new();
+            for el in root.descendants_with_tokens() {
+                if MissingRequiredField.interests().contains(&el.kind()) {
+                    MissingRequiredField.check(&el, ctx, &mut out);
+                }
             }
-        }
-        out
+            out
+        })
     }
 
     #[test]

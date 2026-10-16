@@ -7,7 +7,7 @@
 //!
 //! Environment declarations name spellings, not pairings: shape gates still
 //! decide whether the source supports a construct. Command declarations are
-//! semantic-only ref/cite aliases and never affect tree shape.
+//! semantic-only key aliases and never affect tree shape.
 //!
 //! The schema follows three rules:
 //!
@@ -27,8 +27,22 @@ use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 
 use crate::parser::lexer::is_control_word_name;
-use crate::semantic::roles::{cite_command, ref_command};
+use crate::semantic::roles::{ArgumentRole, cite_command, key_argument_role, ref_command};
 use crate::semantic::signature::{EnvironmentSig, SignatureDb, builtin};
+
+/// A source suffix whose identity remains literal under an implicit key prefix.
+/// Callers split list-valued arguments before applying this predicate.
+pub fn is_literal_key_suffix(key: &str) -> bool {
+    !key.is_empty()
+        && !key.chars().any(|ch| {
+            ch.is_control()
+                || ch.is_whitespace()
+                || matches!(
+                    ch,
+                    '\\' | '{' | '}' | '[' | ']' | '#' | '%' | '$' | '&' | '~' | '^'
+                )
+        })
+}
 
 /// A control-word name as written in a declaration, stored **without** the
 /// leading backslash — the spelling every signature and `ParseCtx` map is keyed
@@ -126,15 +140,22 @@ impl EnvironmentDecl {
 /// name the field's type without restating the key type.
 pub type EnvironmentDecls = BTreeMap<SmolStr, EnvironmentDecl>;
 
-/// One `[commands.<name>]` entry: the built-in reference or citation command
+/// One `[commands.<name>]` entry: the built-in label, reference, citation, or glossary command
 /// whose semantic behavior the project command copies.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct CommandDecl {
-    /// The built-in reference or citation command whose key behavior is copied.
+    /// The built-in label, reference, citation, or glossary command whose key behavior is copied.
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     pub like: Option<SmolStr>,
+    /// Zero-based index of the required brace group holding the key. Omitted
+    /// declarations retain all key argument positions of the target command.
+    #[cfg_attr(feature = "schema", schemars(range(min = 0, max = 255)))]
+    pub argument_index: Option<usize>,
+    /// Literal namespace text implicitly prepended by the wrapper to each key.
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub prefix: SmolStr,
 }
 
 /// The name-keyed `[commands]` declaration map.
@@ -223,7 +244,7 @@ impl Declarations {
             // targets a wrapper most needs: that file carries layout data and omits
             // most of the ref/cite families, `\cpageref` — the only list-valued page
             // reference — among them.
-            if ref_command(target).is_none() && cite_command(target).is_none() {
+            if !supported_key_target(target) {
                 return Err(DeclarationError {
                     key: dotted_key(["commands", name, "like"]),
                     kind: DeclarationErrorKind::UnknownCommandLikeTarget {
@@ -231,7 +252,37 @@ impl Declarations {
                     },
                 });
             }
-            commands.insert(name.clone(), target.clone());
+            if entry.argument_index.is_some_and(|index| index > 255) {
+                return Err(DeclarationError {
+                    key: dotted_key(["commands", name, "argument-index"]),
+                    kind: DeclarationErrorKind::InvalidArgumentIndex,
+                });
+            }
+            if entry.prefix.chars().any(|ch| {
+                ch.is_control()
+                    || ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        ',' | '{'
+                            | '}'
+                            | '['
+                            | ']'
+                            | '\\'
+                            | '%'
+                            | '#'
+                            | '"'
+                            | '$'
+                            | '&'
+                            | '~'
+                            | '^'
+                    )
+            }) {
+                return Err(DeclarationError {
+                    key: dotted_key(["commands", name, "prefix"]),
+                    kind: DeclarationErrorKind::InvalidKeyPrefix,
+                });
+            }
+            commands.insert(name.clone(), entry.clone());
         }
 
         // Which entry already claimed a spelling, so a second claim is an error
@@ -374,7 +425,7 @@ impl Declarations {
 pub struct ResolvedDeclarations {
     pub options: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     db: SignatureDb,
-    commands: BTreeMap<SmolStr, SmolStr>,
+    commands: BTreeMap<SmolStr, CommandDecl>,
 }
 
 impl ResolvedDeclarations {
@@ -387,7 +438,32 @@ impl ResolvedDeclarations {
 
     /// The built-in semantic target of a declared command alias.
     pub fn command_like(&self, name: &str) -> Option<&str> {
-        self.commands.get(name).map(SmolStr::as_str)
+        self.commands
+            .get(name)
+            .and_then(|entry| entry.like.as_deref())
+    }
+
+    /// The semantic key role for this required brace-group index.
+    pub fn command_key_role(&self, name: &str, index: usize) -> Option<ArgumentRole> {
+        if let Some(entry) = self.commands.get(name) {
+            let target = entry.like.as_deref()?;
+            if let Some(selected) = entry.argument_index {
+                if index != selected {
+                    return None;
+                }
+                return (0..2).find_map(|index| key_argument_role(target, index));
+            }
+            key_argument_role(target, index)
+        } else {
+            key_argument_role(name, index)
+        }
+    }
+
+    /// Literal implicit text for a declared key wrapper, empty for built-ins.
+    pub fn command_key_prefix(&self, name: &str) -> &str {
+        self.commands
+            .get(name)
+            .map_or("", |entry| entry.prefix.as_str())
     }
 
     /// The declared command names, in deterministic order.
@@ -447,18 +523,26 @@ pub struct DeclarationError {
     pub kind: DeclarationErrorKind,
 }
 
-/// Why a declaration was rejected. Each variant is a rule from
-/// `AGENTS.md` decision #12 or its architecture section.
+/// Why a declaration was rejected. Each variant identifies a supported
+/// declaration validation rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeclarationErrorKind {
     /// A `[commands.<name>]` entry without its required `like` target.
     EmptyCommandEntry,
+    InvalidArgumentIndex,
+    InvalidKeyPrefix,
     /// A command map key that could never lex as one control word.
-    InvalidCommandName { name: SmolStr },
+    InvalidCommandName {
+        name: SmolStr,
+    },
     /// A declaration attempted to reclassify a curated built-in command.
-    BuiltinCommandName { name: SmolStr },
-    /// `like` did not name a curated reference or citation command.
-    UnknownCommandLikeTarget { target: SmolStr },
+    BuiltinCommandName {
+        name: SmolStr,
+    },
+    /// `like` did not name a curated label, reference, citation, or glossary command.
+    UnknownCommandLikeTarget {
+        target: SmolStr,
+    },
     /// An entry with no keys at all. Nothing to reject it on rule grounds, and
     /// nothing for it to do either — which is the outcome this module exists to
     /// avoid.
@@ -466,7 +550,9 @@ pub enum DeclarationErrorKind {
     /// `like` named something the curated built-in database does not have.
     /// Never resolved against the CWL tier or scanned definitions: behavior
     /// comes from curated data only.
-    UnknownLikeTarget { target: SmolStr },
+    UnknownLikeTarget {
+        target: SmolStr,
+    },
     /// Delimiter spellings for a verbatim environment. Not conservatism but TeX
     /// truth, which is why it is rejected rather than merely discouraged.
     VerbatimTarget,
@@ -479,11 +565,16 @@ pub enum DeclarationErrorKind {
     UndeclaredTarget,
     /// A spelling two entries both claim. Silently letting the last one win
     /// would make the pairing depend on map order.
-    DuplicateDelimiter { name: CommandName, first: SmolStr },
+    DuplicateDelimiter {
+        name: CommandName,
+        first: SmolStr,
+    },
     /// A spelling one entry lists twice — across its two sides, or twice on
     /// one. The [`DuplicateDelimiter`](Self::DuplicateDelimiter) mistake seen
     /// from inside a single entry, where naming the "other" entry is no help.
-    RepeatedDelimiter { name: CommandName },
+    RepeatedDelimiter {
+        name: CommandName,
+    },
     /// A spelling that *is* the written-out delimiter (`\end{split}`) rather
     /// than a command standing in for one. A special case of
     /// [`NotAControlWord`](Self::NotAControlWord) with its own fix: the literal
@@ -494,11 +585,15 @@ pub enum DeclarationErrorKind {
     },
     /// A spelling the lexer could never produce as one control word, so it
     /// could never match anything.
-    NotAControlWord { name: CommandName },
+    NotAControlWord {
+        name: CommandName,
+    },
     /// A spelling the curated database already knows as a command. Not a
     /// no-op — it would take effect, on a command the project did not mean to
     /// redefine.
-    SpellingIsABuiltinCommand { name: CommandName },
+    SpellingIsABuiltinCommand {
+        name: CommandName,
+    },
 }
 
 /// Whether the curated data already knows `name` as a command.
@@ -516,6 +611,22 @@ fn is_builtin_command(name: &str) -> bool {
         || builtin().command(name).is_some()
         || ref_command(name).is_some()
         || cite_command(name).is_some()
+        || supported_key_target(name)
+}
+
+fn supported_key_target(name: &str) -> bool {
+    (0..2).any(|index| {
+        matches!(
+            key_argument_role(name, index),
+            Some(
+                ArgumentRole::Label
+                    | ArgumentRole::Reference(_)
+                    | ArgumentRole::Citation(_)
+                    | ArgumentRole::GlossaryDefinition(_)
+                    | ArgumentRole::GlossaryUse
+            )
+        )
+    })
 }
 
 /// The environment named by `spelling` when it is the written-out delimiter
@@ -571,7 +682,12 @@ impl fmt::Display for DeclarationErrorKind {
         match self {
             Self::EmptyCommandEntry => write!(
                 f,
-                "declares nothing; add `like` naming a reference or citation command"
+                "declares nothing; add `like` naming a label, reference, citation, or glossary command"
+            ),
+            Self::InvalidArgumentIndex => write!(f, "argument-index must be between 0 and 255"),
+            Self::InvalidKeyPrefix => write!(
+                f,
+                "prefix must contain literal key characters without whitespace, delimiters, or TeX control syntax"
             ),
             Self::InvalidCommandName { name } => write!(
                 f,
@@ -583,7 +699,7 @@ impl fmt::Display for DeclarationErrorKind {
             ),
             Self::UnknownCommandLikeTarget { target } => write!(
                 f,
-                "unknown reference or citation command `{target}`; `like` must name a curated ref/cite command"
+                "unknown key command `{target}`; `like` must name a curated label, reference, citation, or glossary command"
             ),
             Self::EmptyEntry => write!(
                 f,
@@ -650,6 +766,64 @@ mod tests {
 
     fn from_json(json: &str) -> Declarations {
         serde_json::from_str(json).expect("deserializes")
+    }
+
+    #[test]
+    fn key_wrappers_validate_literal_prefixes_and_selected_arguments() {
+        for target in [
+            "label",
+            "zlabel",
+            "ref",
+            "volcite",
+            "gls",
+            "newglossaryentry",
+            "newacronym",
+        ] {
+            let json = format!(
+                r#"{{"commands":{{"wrapper":{{"like":"{target}","argument-index":1,"prefix":"ns:"}}}}}}"#
+            );
+            let declared = from_json(&json).resolve().unwrap();
+            assert_eq!(declared.command_key_prefix("wrapper"), "ns:");
+            assert!(declared.command_key_role("wrapper", 0).is_none());
+            assert!(declared.command_key_role("wrapper", 1).is_some());
+            assert!(declared.parse_tier().is_empty());
+        }
+        for json in [
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"bad key"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"bad,comma"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"\\dynamic"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"$math"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"align&"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"active~"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","prefix":"escape^"}}}"#,
+            r#"{"commands":{"wrapper":{"like":"ref","argument-index":256}}}"#,
+        ] {
+            assert!(from_json(json).resolve().is_err(), "{json}");
+        }
+    }
+
+    #[test]
+    fn literal_key_suffix_proof_rejects_expansion_and_layout_characters() {
+        for key in ["intro", "sec:résumé", "*", "two.words"] {
+            assert!(is_literal_key_suffix(key), "{key}");
+        }
+        for key in [
+            "",
+            "two words",
+            "tab\tkey",
+            "control\u{7}",
+            r"\dynamic",
+            "{nested}",
+            "[option]",
+            "param#",
+            "comment%",
+            "$math$",
+            "align&",
+            "active~",
+            "escape^",
+        ] {
+            assert!(!is_literal_key_suffix(key), "{key}");
+        }
     }
 
     #[test]

@@ -1,4 +1,18 @@
-use super::*;
+use crate::{
+    declarations::ResolvedDeclarations,
+    lsp::{
+        refresh,
+        settings::{CachedSettings, EditorSettings},
+    },
+    text::{PositionEncoding, TextBuffer},
+};
+use lsp_server::RequestId;
+use lsp_types::Uri;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 /// An open document buffer: its current text and the version it is at.
 ///
@@ -53,6 +67,8 @@ pub(super) struct GlobalState {
     pub(super) next_request_id: u64,
     pub(super) watcher_acknowledged: bool,
     pub(super) artifact_watches: HashMap<PathBuf, Vec<PathBuf>>,
+    /// Live compiler watch rows per exact path, including shared physical aliases.
+    pub(super) artifact_watch_counts: HashMap<PathBuf, usize>,
     pub(super) scoped_editor_settings: HashMap<PathBuf, EditorSettings>,
     pub(super) pending_configuration: HashMap<RequestId, Vec<PathBuf>>,
     pub(super) configuration_generation: u64,
@@ -68,6 +84,35 @@ pub(super) struct GlobalState {
 }
 
 impl GlobalState {
+    pub(super) fn replace_artifact_watches(&mut self, source: PathBuf, paths: Vec<PathBuf>) {
+        if self
+            .artifact_watches
+            .get(&source)
+            .is_some_and(|previous| previous == &paths)
+        {
+            return;
+        }
+        if let Some(previous) = self.artifact_watches.remove(&source) {
+            for path in previous {
+                if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                    self.artifact_watch_counts.entry(path)
+                {
+                    if *entry.get() == 1 {
+                        entry.remove();
+                    } else {
+                        *entry.get_mut() -= 1;
+                    }
+                }
+            }
+        }
+        if !paths.is_empty() {
+            for path in &paths {
+                *self.artifact_watch_counts.entry(path.clone()).or_default() += 1;
+            }
+            self.artifact_watches.insert(source, paths);
+        }
+    }
+
     /// Whether `path` falls inside this server's workspace. A server with no
     /// roots claims everything — it has no basis to decline, and declining would
     /// leave the request unanswered by anyone.

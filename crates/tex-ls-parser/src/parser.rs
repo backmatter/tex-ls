@@ -17,7 +17,9 @@ pub(crate) mod embedded;
 pub(crate) mod events;
 pub(crate) mod grammar;
 pub mod lexer;
+pub(crate) mod reader_facts;
 pub mod reparse;
+pub(crate) mod source_profiles;
 pub(crate) mod tree_builder;
 
 pub use core::{

@@ -1,6 +1,6 @@
 # Formatting
 
-Format LaTeX documents, packages, and classes (`.tex`, `.sty`, `.cls`, `.dtx`,
+Format LaTeX documents, packages, and classes (`.tex`, `.sty`, `.cls`, `.clo`, `.dtx`,
 `.ins`, `.def`, and `.lco`), and BibTeX bibliographies (`.bib` and `.bibtex`).
 
 ```sh
@@ -53,10 +53,36 @@ unchanged. Run `tex-ls lint` to locate the parse errors. Arbitrary catcode
 changes and macro-generated delimiters are outside the surface grammar; for
 example, changing `%` into an ordinary character can make balanced TeX appear
 unclosed to the parser. Extremely deep nesting also produces a diagnostic.
+BibTeX values ending in a concatenation `#`, empty `@string` or `@preamble`
+bodies, and a missing comma between a citation key and its fields also produce
+diagnostics and remain unchanged. Empty value groups such as `@string{x={}}` are
+valid. Bibliography comments retain their attachment across LF, CRLF, and CR line
+endings.
+The default `comment` reader requires an exact physical `\end{comment}` line.
+An exact verbatim-package setup in the source enables its spaced or midline closer
+and keeps the text after that closer active. Altered or ambiguous definitions use
+the default profile.
+
+Standalone `\IncludeInRelease` calls assume the standard kernel reader when the
+source defines neither the command nor its forwarding helpers. Dates remain
+ordinary source, an initial name token is stringified, and the description is
+protected token data. Local bindings require the complete, exact kernel definition
+profile. Ordinary replacements and altered or partial helper definitions retain
+ordinary arguments.
+
+When source catcode changes leave lexical ownership uncertain, formatting preserves
+those tokens and their immediately adjacent whitespace except configured line
+endings. Independent prose gaps still normalize. Range formatting refuses that
+document because it cannot prove a safe replacement.
 
 Formatting is idempotent and changes trivia only. Comments and protected bodies
 such as `verbatim`, `lstlisting`, and `\verb` are preserved except configured line
-endings. Declare custom protected environments or begin/end aliases in
+endings, including trailing spaces and tabs inside comment tokens. Declare custom
+protected environments or begin/end aliases in
 [`[environments]`](../reference/configuration.md#environments).
+
+With stable prose wrapping, overflow takes precedence over authored line breaks.
+If a continuation indent would cause greater overflow, the formatter can retain a
+small overflow on the preceding line instead.
 
 Content rewrites such as `x^{2}` to `x^2` are lint fixes; use `tex-ls lint --fix`.

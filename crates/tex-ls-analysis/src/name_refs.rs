@@ -58,14 +58,9 @@ pub fn name_target_under_cursor(
     def_sites: &[DefSite],
 ) -> Option<NameTarget> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(at) {
-        rowan::TokenAtOffset::None => return None,
-        rowan::TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
-        rowan::TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
-    };
-    let tokens: Vec<_> = [left, right]
+    let tokens = tex_ls_parser::syntax::token_candidates_at_offset(root, at)?;
+    let tokens: Vec<_> = tokens
         .into_iter()
-        .flatten()
         .filter(|token| !tex_ls_parser::semantic::context::in_token_list(token))
         .collect();
 
@@ -120,8 +115,7 @@ pub fn navigation_target_under_cursor(
     sites: &[DefSite],
 ) -> Option<NameTarget> {
     let at = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    for token in root
-        .token_at_offset(at)
+    for token in tex_ls_parser::syntax::token_at_offset(root, at)
         .filter(|token| !tex_ls_parser::semantic::context::in_token_list(token))
     {
         if token.kind() == SyntaxKind::VERB && token.text().starts_with("\\verb") {

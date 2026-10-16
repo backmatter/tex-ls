@@ -6,10 +6,8 @@
 //! family name and verb, leaving the enclosing entry, selector, and reason
 //! untouched.
 
-use std::path::PathBuf;
-
-use crate::directives::Verb;
-use crate::linter::diagnostic::{Diagnostic, Fix, Severity};
+use crate::linter::diagnostic::Diagnostic;
+use crate::linter::suppression_meta::{self, Carrier};
 
 use super::{BibRule, BibRuleContext, Example};
 
@@ -41,37 +39,12 @@ impl BibRule for DeprecatedSuppressionSyntax {
     }
 
     fn check_file(&self, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
-        for located in ctx
-            .suppressions
-            .directives()
-            .iter()
-            .filter(|located| located.directive.deprecated)
-        {
-            let replacement = match located.directive.verb {
-                Verb::Skip => "tex-ls-lint skip",
-                Verb::SkipFile => "tex-ls-lint skip-file",
-                Verb::Off | Verb::On => continue,
-            };
-            let start = usize::from(located.family_range.start());
-            let end = usize::from(located.family_range.end());
-            sink.push(Diagnostic {
-                rule: self.id(),
-                severity: Severity::Warning,
-                path: PathBuf::new(),
-                start,
-                end,
-                message: format!(
-                    "retired suppression syntax; use `@comment{{{replacement} …}}` instead"
-                ),
-                fix: Some(Fix::safe(
-                    start,
-                    end,
-                    replacement,
-                    "Rewrite the retired suppression directive",
-                )),
-                related: Vec::new(),
-            });
-        }
+        sink.extend(
+            ctx.suppressions
+                .directives()
+                .iter()
+                .filter_map(|located| suppression_meta::deprecated(located, Carrier::Bibtex)),
+        );
     }
 }
 

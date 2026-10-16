@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use crate::declarations::ResolvedDeclarations;
 use crate::parser::parse_with_declarations;
-use crate::project::{PackageTarget, collect_package_edge_keys, dtx_source_of};
+use crate::project::{PackageEdgeKey, PackageTarget, collect_package_edge_keys, dtx_source_of};
 use crate::semantic::{SignatureDb, scan_definitions};
 use crate::syntax::SyntaxNode;
 use tex_ls_analysis::source::file_kind_or_tex;
@@ -60,9 +60,8 @@ pub fn collect_package_signatures(
     merged
 }
 
-/// Fold the definitions of the packages loaded by `root` into `merged`, recursing
-/// into each package's own loads first (post-order: a package overrides its
-/// dependencies).
+/// Fold loaded definitions in dependency post-order using heap frames, so package
+/// depth cannot exhaust the call stack. A package overrides its dependencies.
 fn collect_loaded(
     root: &SyntaxNode,
     base_dir: Option<&Path>,
@@ -71,7 +70,25 @@ fn collect_loaded(
     visited: &mut HashSet<PathBuf>,
     merged: &mut SignatureDb,
 ) {
-    for edge in collect_package_edge_keys(root, base_dir) {
+    struct Frame {
+        edges: std::vec::IntoIter<PackageEdgeKey>,
+        package: Option<(SyntaxNode, PathBuf)>,
+    }
+    let mut stack = vec![Frame {
+        edges: collect_package_edge_keys(root, base_dir).into_iter(),
+        package: None,
+    }];
+    while let Some(frame) = stack.last_mut() {
+        let Some(edge) = frame.edges.next() else {
+            if let Some((pkg_root, path)) = stack.pop().unwrap().package {
+                // Keep the edge target's origin when loading a .dtx fallback.
+                merged.merge_from(
+                    &scan_definitions(&pkg_root),
+                    path.file_stem().and_then(|stem| stem.to_str()),
+                );
+            }
+            continue;
+        };
         let PackageTarget::Path(path) = edge.target else {
             continue;
         };
@@ -79,15 +96,10 @@ fn collect_loaded(
             continue;
         }
         if let Some((pkg_root, pkg_base)) = load_pkg(&path, src, declared) {
-            collect_loaded(&pkg_root, Some(&pkg_base), src, declared, visited, merged);
-            // The origin is the *edge target's* stem, so the `.dtx` fallback
-            // (`mypkg.sty` absent, `mypkg.dtx` loaded) still reads `mypkg`.
-            match path.file_stem().and_then(|s| s.to_str()) {
-                Some(origin) => {
-                    merged.merge_from(&scan_definitions(&pkg_root), Some(origin));
-                }
-                None => merged.merge_from(&scan_definitions(&pkg_root), None),
-            }
+            stack.push(Frame {
+                edges: collect_package_edge_keys(&pkg_root, Some(&pkg_base)).into_iter(),
+                package: Some((pkg_root, path)),
+            });
         }
     }
 }
@@ -177,6 +189,52 @@ mod tests {
             &MapSource::new(files),
             &ResolvedDeclarations::default(),
         )
+    }
+
+    #[test]
+    fn deep_package_chain_preserves_postorder_without_recursive_stack_growth() {
+        const CHILD: &str = "TEX_LS_DEEP_PACKAGE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "package_source::tests::deep_package_chain_preserves_postorder_without_recursive_stack_growth",
+                    "--exact",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("RUST_MIN_STACK", "262144")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let source = MapSource {
+            files: (0..512)
+                .map(|index| {
+                    let next = (index + 1) % 512;
+                    (
+                        PathBuf::from(format!("/proj/p{index}.sty")),
+                        format!(
+                            "\\RequirePackage{{p{next}}}\\newcommand{{\\shared}}[{}]{{}}",
+                            index % 4 + 1
+                        ),
+                    )
+                })
+                .collect(),
+        };
+        let root = parse("\\usepackage{p0}").syntax();
+        let signatures = collect_package_signatures(
+            &root,
+            Some(Path::new("/proj")),
+            &source,
+            &ResolvedDeclarations::default(),
+        );
+        assert_eq!(signatures.command("shared").unwrap().args.len(), 1);
+        assert_eq!(signatures.command_origin("shared"), Some("p0"));
     }
 
     #[test]

@@ -481,7 +481,7 @@ pub(super) fn build_alignment_grid(
                 if !rest_is_trivia_and_comment_lines(&inline, idx + 1) {
                     return None;
                 }
-                let text = token.text().trim_end().to_string();
+                let text = token.text().to_string();
                 finish_cell(&mut cell, &mut cells, &printer, cell_cx, math)?;
                 items.push(GridItem::Row(AlignRow {
                     cells: std::mem::take(&mut cells),

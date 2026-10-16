@@ -1,5 +1,9 @@
 //! Context operations.
-use super::*;
+use std::path::Path;
+use tex_ls_analysis::{
+    incremental::Analysis,
+    project::{ResolvedLabels, aux::AuxData},
+};
 
 /// `path`'s label namespace — its include-graph component — falling back to just
 /// `path` for a standalone or untracked file, so a caller always has something to

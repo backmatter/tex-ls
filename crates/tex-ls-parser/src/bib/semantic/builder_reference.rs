@@ -28,6 +28,24 @@ pub fn build(root: &SyntaxNode) -> Model {
         match node.kind() {
             SyntaxKind::ENTRY => collect_entry(&node, &mut model),
             SyntaxKind::STRING_ENTRY => collect_string(&node, &mut model),
+            SyntaxKind::LITERAL
+                if node
+                    .parent()
+                    .and_then(|value| value.parent())
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::PREAMBLE_ENTRY) =>
+            {
+                if let Some(value) = node.parent() {
+                    for (name, range) in ast::value_macro_uses(&value)
+                        .filter(|(_, range)| *range == node.text_range())
+                    {
+                        model.string_uses.push(StringUse {
+                            name: SmolStr::new(name.to_lowercase()),
+                            range,
+                            resolved: false,
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -49,6 +67,7 @@ fn collect_entry(entry: &SyntaxNode, model: &mut Model) {
             key_range,
             range: entry.text_range(),
             duplicate: false,
+            dependencies: super::entry_dependencies(entry),
         });
     }
     collect_uses(entry, model);
@@ -97,7 +116,7 @@ fn resolve(model: &mut Model) {
     // Duplicate cite keys (case-insensitive; the first occurrence stays `false`).
     let mut seen: HashSet<SmolStr> = HashSet::new();
     for entry in &mut model.entries {
-        let folded = SmolStr::new(entry.key.to_lowercase());
+        let folded = SmolStr::new(entry.key.to_ascii_lowercase());
         if !seen.insert(folded) {
             entry.duplicate = true;
         }

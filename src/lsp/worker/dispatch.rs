@@ -1,4 +1,27 @@
-use super::*;
+use crate::{
+    formatter::SentenceOptions,
+    lsp::{
+        compiler_acquisition, file_acquisition,
+        messages::{Outbound, WorkerJob, WorkspaceDiagnosticSources},
+        refresh,
+        responses::{
+            respond_diagnostic_with_cancellation_check, respond_with_cancellation_check,
+            run_completion, run_completion_resolve, run_document_highlight, run_document_link,
+            run_folding, run_forward_search, run_goto_definition, run_hover, run_linked_editing,
+            run_prepare_rename, run_references, run_rename, run_selection_range,
+            run_signature_help, run_symbols, run_workspace_symbols,
+        },
+        worker::{AnalyzeRequest, Worker},
+    },
+};
+use lsp_server::Response;
+use std::collections::HashSet;
+use tex_ls_protocol::{
+    actions::compute_code_actions,
+    completion::resolve as completion_resolve,
+    convert::{path_to_uri, uri_to_path},
+    formatting::{compute_format, compute_on_type_format},
+};
 
 impl Worker {
     pub(in crate::lsp) fn handle_job(&mut self, job: WorkerJob) {
@@ -21,7 +44,7 @@ impl Worker {
                     .collect::<std::collections::BTreeSet<_>>()
                     .into_iter()
                     .collect();
-                let result = serde_json::json!({"failures":failures,"installationIssues":installation_issues,"sourceReadAttempts":file_acquisition::source_reads(), "compilerProbeAttempts":services::compiler_probes(), "pendingReads":self.pending_reads.len(), "pendingFileAcquisitions":self.files_inflight.len(), "pendingCompilerAcquisitions":self.compiler_acquisition.pending_count(), "installationLoading":!self.loading_indexes.is_empty(), "projectInspectionCommand":"tex-ls.inspectProject"});
+                let result = serde_json::json!({"failures":failures,"installationIssues":installation_issues,"sourceReadAttempts":file_acquisition::source_reads(), "compilerProbeAttempts":compiler_acquisition::compiler_probes(), "pendingReads":self.pending_reads.len(), "pendingFileAcquisitions":self.files_inflight.len(), "pendingCompilerAcquisitions":self.compiler_acquisition.pending_count(), "installationLoading":!self.loading_indexes.is_empty(), "projectInspectionCommand":"tex-ls.inspectProject"});
                 let _ = self
                     .out_tx
                     .send(Outbound::Response(Response::new_ok(id, result)));
@@ -41,18 +64,23 @@ impl Worker {
                     if !requests.lock().expect("ledger").contains(&id) {
                         return;
                     }
-                    respond(id, &out_tx, || match presentation {
-                        Some((range, color)) => {
-                            serde_json::to_value(tex_ls_protocol::colors::color_presentations(
-                                &snapshot, &path, enc, range, color,
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || match presentation {
+                            Some((range, color)) => {
+                                serde_json::to_value(tex_ls_protocol::colors::color_presentations(
+                                    &snapshot, &path, enc, range, color,
+                                ))
+                                .expect("color presentations")
+                            }
+                            None => serde_json::to_value(tex_ls_protocol::colors::document_colors(
+                                &snapshot, &path, enc,
                             ))
-                            .expect("color presentations")
-                        }
-                        None => serde_json::to_value(tex_ls_protocol::colors::document_colors(
-                            &snapshot, &path, enc,
-                        ))
-                        .expect("document colors"),
-                    });
+                            .expect("document colors"),
+                        },
+                    );
                 });
             }
             WorkerJob::SemanticTokens { id, path, range } => {
@@ -66,9 +94,12 @@ impl Worker {
                     if !requests.lock().expect("ledger").contains(&id) {
                         return;
                     }
-                    respond(id, &out_tx, || {
-                        tex_ls_protocol::semantic_tokens::compute(&snapshot, &path, enc, range)
-                    });
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || tex_ls_protocol::semantic_tokens::compute(&snapshot, &path, enc, range),
+                    );
                 });
             }
             WorkerJob::WillRenameFiles { id, files } => {
@@ -90,9 +121,16 @@ impl Worker {
                     if !requests.lock().expect("ledger").contains(&id) {
                         return;
                     }
-                    respond(id, &out_tx, || {
-                        tex_ls_protocol::file_operations::will_rename(&snapshots, &files, enc)
-                    });
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || {
+                            for snapshot in &snapshots {
+                                snapshot.check_revision_cancelled();
+                            }
+                        },
+                        || tex_ls_protocol::file_operations::will_rename(&snapshots, &files, enc),
+                    );
                 });
             }
             WorkerJob::DidRenameFiles { files } => {
@@ -106,6 +144,7 @@ impl Worker {
                 self.seeded_dirs.clear();
                 self.bib_lookups.clear();
                 self.acquisition_keys.clear();
+                self.acquisition_project_prefixes.clear();
                 self.parent_keys.clear();
                 self.refresh(refresh::Feature::Folding);
                 self.refresh(refresh::Feature::SemanticTokens);
@@ -113,6 +152,31 @@ impl Worker {
             WorkerJob::WorkspaceRoots { roots, open } => {
                 self.compiler_acquisition.clear(&mut self.db);
                 self.projects.update_roots(&mut self.db, &roots, &open);
+                let live: HashSet<_> = self.projects.projects().collect();
+                self.acquisition_project_prefixes
+                    .retain(|project, _| live.contains(project));
+                self.file_acquisition.retain_projects(live.clone());
+                self.discovery_anchors
+                    .retain(|project, _| live.contains(project));
+                self.acquisition_failures
+                    .retain(|project, _| live.contains(project));
+                self.observation_scope_work
+                    .retain(|project, _| live.contains(project));
+                self.pending_scans
+                    .retain(|project, _| live.contains(project));
+                self.extra_sources
+                    .retain(|project, _| live.contains(project));
+                self.extra_locations
+                    .retain(|project, _| live.contains(project));
+                self.files_inflight.retain(|project| live.contains(project));
+                self.loading_indexes.retain(|index| {
+                    self.discovery_anchors
+                        .values()
+                        .any(|(_, active)| active == index)
+                });
+                if self.files_inflight.is_empty() && self.loading_indexes.is_empty() {
+                    let _ = self.out_tx.send(Outbound::Loading(false));
+                }
                 self.seeded_dirs.clear();
                 self.bib_lookups.clear();
                 self.acquisition_keys.clear();
@@ -237,10 +301,18 @@ impl Worker {
                     .extension()
                     .and_then(|ext| ext.to_str())
                     .is_some_and(|ext| matches!(ext, "aux" | "log" | "fls"));
-                // Source discovery excludes do not suppress build observations.
+                // Discovery excludes cannot suppress observations owned by an
+                // installed search tree or another workspace project.
                 if !artifact
                     && exclude.force_excludes(&path)
-                    && self.snapshot_for(&path).lookup_file(&path).is_none()
+                    && !self
+                        .projects
+                        .projects()
+                        .any(|project| self.source_version_at(project, &path).is_some())
+                    && !self
+                        .discovery_anchors
+                        .values()
+                        .any(|(_, installed)| installed.contains_source_path(&path))
                 {
                     return;
                 }
@@ -283,9 +355,12 @@ impl Worker {
                     }
                     let sentence =
                         SentenceOptions::from_resolved(sentence_lang, &sentence_no_break);
-                    respond(id, &out_tx, || {
-                        compute_format(&snapshot, &path, enc, style, kind, sentence)
-                    })
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || compute_format(&snapshot, &path, enc, style, kind, sentence),
+                    )
                 });
             }
             WorkerJob::RangeFormat {
@@ -316,11 +391,16 @@ impl Worker {
                     }
                     let sentence =
                         SentenceOptions::from_resolved(sentence_lang, &sentence_no_break);
-                    respond(id, &out_tx, || {
-                        tex_ls_protocol::formatting::compute_ranges_format(
-                            &snapshot, &path, enc, style, kind, &ranges, sentence,
-                        )
-                    })
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || {
+                            tex_ls_protocol::formatting::compute_ranges_format(
+                                &snapshot, &path, enc, style, kind, &ranges, sentence,
+                            )
+                        },
+                    )
                 });
             }
             WorkerJob::OnTypeFormat {
@@ -351,11 +431,16 @@ impl Worker {
                     }
                     let sentence =
                         SentenceOptions::from_resolved(sentence_lang, &sentence_no_break);
-                    respond(id, &out_tx, || {
-                        compute_on_type_format(
-                            &snapshot, &path, enc, style, kind, position, sentence,
-                        )
-                    })
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || {
+                            compute_on_type_format(
+                                &snapshot, &path, enc, style, kind, position, sentence,
+                            )
+                        },
+                    )
                 });
             }
             WorkerJob::InlayHints {
@@ -380,9 +465,12 @@ impl Worker {
                     {
                         return;
                     }
-                    respond(id, &out_tx, || {
-                        tex_ls_protocol::hints::compute(&snapshot, &path, range, enc, &options)
-                    });
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || tex_ls_protocol::hints::compute(&snapshot, &path, range, enc, &options),
+                    );
                 });
             }
             WorkerJob::Symbols {
@@ -899,40 +987,49 @@ impl Worker {
                     {
                         return;
                     }
-                    respond_diagnostic(id.clone(), &out_tx, || {
-                        let mut items = Vec::new();
-                        tex_ls_protocol::diagnostic_store::stream_workspace_diagnostics(
-                            &snapshots,
-                            &previous,
-                            enc,
-                            |path| settings[path].0.rule_selection(),
-                            |path| settings[path].1,
-                            |path| {
-                                !settings[path]
-                                    .0
-                                    .exclude
-                                    .clone()
-                                    .with_force_exclude(true)
-                                    .force_excludes(path)
-                            },
-                            |batch| {
-                                if !requests.lock().expect("request ledger").contains(&id) {
-                                    return false;
-                                }
-                                if let Some(token) = &partial {
-                                    let _ = out_tx.send(Outbound::Progress {
-                                        id: id.clone(),
-                                        token: token.clone(),
-                                        value: serde_json::json!({"items":batch}),
-                                    });
-                                } else {
-                                    items.extend(batch);
-                                }
-                                true
-                            },
-                        );
-                        serde_json::json!({"items":items})
-                    });
+                    respond_diagnostic_with_cancellation_check(
+                        id.clone(),
+                        &out_tx,
+                        || {
+                            for snapshot in &snapshots {
+                                snapshot.check_revision_cancelled();
+                            }
+                        },
+                        || {
+                            let mut items = Vec::new();
+                            tex_ls_protocol::diagnostic_store::stream_workspace_diagnostics(
+                                &snapshots,
+                                &previous,
+                                enc,
+                                |path| settings[path].0.rule_selection(),
+                                |path| settings[path].1,
+                                |path| {
+                                    !settings[path]
+                                        .0
+                                        .exclude
+                                        .clone()
+                                        .with_force_exclude(true)
+                                        .force_excludes(path)
+                                },
+                                |batch| {
+                                    if !requests.lock().expect("request ledger").contains(&id) {
+                                        return false;
+                                    }
+                                    if let Some(token) = &partial {
+                                        let _ = out_tx.send(Outbound::Progress {
+                                            id: id.clone(),
+                                            token: token.clone(),
+                                            value: serde_json::json!({"items":batch}),
+                                        });
+                                    } else {
+                                        items.extend(batch);
+                                    }
+                                    true
+                                },
+                            );
+                            serde_json::json!({"items":items})
+                        },
+                    );
                 });
             }
             WorkerJob::Diagnostic {
@@ -960,16 +1057,21 @@ impl Worker {
                     {
                         return;
                     }
-                    respond_diagnostic(id, &out_tx, || {
-                        tex_ls_protocol::diagnostic_store::document_diagnostics(
-                            &snapshot,
-                            &path,
-                            kind,
-                            &rules,
-                            enc,
-                            previous_result_id.as_deref(),
-                        )
-                    })
+                    respond_diagnostic_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || {
+                            tex_ls_protocol::diagnostic_store::document_diagnostics(
+                                &snapshot,
+                                &path,
+                                kind,
+                                &rules,
+                                enc,
+                                previous_result_id.as_deref(),
+                            )
+                        },
+                    )
                 });
             }
             WorkerJob::CodeAction {
@@ -980,6 +1082,7 @@ impl Worker {
                 range,
                 only,
                 rules,
+                texmf: _,
             } => {
                 // On-demand re-lint, like the pull-diagnostics path, runs against a
                 // snapshot on the read pool.
@@ -998,18 +1101,23 @@ impl Worker {
                     {
                         return;
                     }
-                    respond(id, &out_tx, || {
-                        compute_code_actions(
-                            &snapshot,
-                            &uri,
-                            &path,
-                            kind,
-                            range,
-                            only.as_deref(),
-                            &rules,
-                            enc,
-                        )
-                    })
+                    respond_with_cancellation_check(
+                        id,
+                        &out_tx,
+                        || snapshot.check_revision_cancelled(),
+                        || {
+                            compute_code_actions(
+                                &snapshot,
+                                &uri,
+                                &path,
+                                kind,
+                                range,
+                                only.as_deref(),
+                                &rules,
+                                enc,
+                            )
+                        },
+                    )
                 });
             }
         }

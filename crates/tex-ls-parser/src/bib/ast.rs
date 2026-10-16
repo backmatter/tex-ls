@@ -84,6 +84,11 @@ pub fn field_name(field: &SyntaxNode) -> Option<String> {
     child::<FieldName>(field).and_then(|n| n.text())
 }
 
+/// The range of a field's name node, excluding its value and surrounding trivia.
+pub fn field_name_range(field: &SyntaxNode) -> Option<TextRange> {
+    child::<FieldName>(field).map(|name| name.syntax().text_range())
+}
+
 /// The `VALUE` node of a `FIELD` (the right-hand side of `=`), or `None` if absent.
 pub fn field_value(field: &SyntaxNode) -> Option<SyntaxNode> {
     child::<Value>(field).map(|v| v.syntax().clone())

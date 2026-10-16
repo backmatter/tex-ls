@@ -35,6 +35,8 @@ pub enum OutputMode {
 /// callers grep and cut, and `Json` is machine-readable, so neither ever carries
 /// ANSI escapes. The caller resolves it against the
 /// destination stream — for the CLI that is *stderr*, where the text modes go.
+/// JSON serialization failures produce an explicit error object. Call
+/// [`render_json`] to handle the error separately from the rendered data.
 pub fn render_findings(
     diagnostics: &[Diagnostic],
     mode: OutputMode,
@@ -44,14 +46,15 @@ pub fn render_findings(
     match mode {
         OutputMode::Pretty => render_pretty(diagnostics, use_color, source_for),
         OutputMode::Concise => render_concise(diagnostics, source_for),
-        OutputMode::Json => render_json(diagnostics),
+        OutputMode::Json => render_json(diagnostics)
+            .unwrap_or_else(|error| serde_json::json!({"error": error.to_string()}).to_string()),
     }
 }
 
 /// Serialize the findings as a pretty-printed JSON array (no trailing newline).
-/// An empty slice renders as `[]`, so consumers always receive valid JSON.
-fn render_json(diagnostics: &[Diagnostic]) -> String {
-    serde_json::to_string_pretty(diagnostics).unwrap_or_else(|_| "[]".to_string())
+/// An empty slice renders as `[]`. Unrepresentable path fields return an error.
+pub fn render_json(diagnostics: &[Diagnostic]) -> Result<String, serde_json::Error> {
+    serde_json::to_string_pretty(diagnostics)
 }
 
 /// Group diagnostics by path, preserving their original order within each file.
@@ -272,6 +275,20 @@ fn severity_word(s: Severity) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn json_serialization_failure_never_looks_like_an_empty_report() {
+        use std::os::unix::ffi::OsStringExt;
+        let mut diagnostic = diag(0, 1, "finding");
+        diagnostic.path = PathBuf::from(std::ffi::OsString::from_vec(b"source\xff.tex".to_vec()));
+        let rendered = render_findings(&[diagnostic], OutputMode::Json, false, &|_| None);
+        let report: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert!(
+            report["error"].is_string(),
+            "serialization must report failure"
+        );
+    }
 
     fn diag(start: usize, end: usize, message: &str) -> Diagnostic {
         Diagnostic {

@@ -292,7 +292,7 @@ job-name = "thesis"
 
 ## `[commands]`
 
-Declares reference or citation wrappers whose first braced argument contains keys.
+Declares wrappers for label definitions, references, citations, and glossary keys.
 Keys are command names without a leading backslash.
 
 ```toml
@@ -301,13 +301,27 @@ like = "cref"
 
 [commands.projectcite]
 like = "parencite"
+
+[commands.framelabel]
+like = "label"
+argument-index = 1
+prefix = "frame:"
 ```
 
 ### Command `like`
 
-A curated reference or citation command whose key behavior the wrapper copies.
+A curated key command whose behavior the wrapper copies. Definitions include
+`label`, `zlabel`, `newglossaryentry`, and `newacronym`; glossary uses include `gls`.
 `ref` and `eqref` accept one label; `cref` and citation commands split keys on commas;
-`nocite` also supports `*`.
+`nocite` also supports `*` unless an implicit prefix is configured.
+
+`argument-index` selects the zero-based braced argument containing the key, up to
+255. Without it, the wrapper copies the target's key slots. `prefix` adds a literal
+identity prefix without changing the authored key or its range. For example,
+`\framelabel{Title}{intro}` defines `frame:intro` with the configuration above.
+Completion inserts the suffix. Rename initiated at that suffix accepts a new suffix
+and updates full-key and prefixed occurrences together. Rename declines if any
+occurrence cannot represent the new key under its declared prefix.
 
 Declarations affect linting, navigation, rename, and completion. They do not expand
 macros or change argument attachment, arity, or layout. Match the wrapper's accepted

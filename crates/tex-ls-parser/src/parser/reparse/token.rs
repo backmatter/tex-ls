@@ -7,7 +7,8 @@
 //! adjacent CST leaves sliced from one lexer token, so that path reconstructs and
 //! relexes the coalesced word before splicing one leaf. Rowan's
 //! [`SyntaxToken::replace_with`] rebuilds only the leaf-to-root spine and shares
-//! every green node off it, so the splice is `O(depth)` rather than `O(file)`.
+//! every green node off it. Ancestor child arrays are rebuilt, so splice cost
+//! depends on their widths as well as the path depth.
 //! Diagnostics keep their prefix, shift their suffix, and refuse anything that
 //! touches the leaf.
 //!
@@ -23,7 +24,8 @@
 //! splice reproduces a full parse exactly when it can show that
 //!
 //! 1. the token **kind** sequence is unchanged, and only the one leaf's text moved;
-//! 2. the `ParseCtx` is unchanged;
+//! 2. definition/declaration facts are unchanged and ordered reader positions
+//!    stay coherent with the edited source;
 //! 3. no decision that reads a token's **text** can flip.
 //!
 //! Each is a guard below.
@@ -46,7 +48,11 @@
 //! sits under none of them cannot change what the scan found.
 //! [`context_admits`](super::leaf::context_admits) bans those, plus the
 //! environment-name positions and the commands whose *lexing* reads the raw text
-//! after them.
+//! after them. The outer tier ladder either retains unchanged reader positions
+//! or returns a context with their checked source-offset rebasing. Chained
+//! reparses and analysis caching carry that returned context; the immutable
+//! declaration and alias maps remain shared. Qualified readers whose definition
+//! positions cannot be retained still require a full parse.
 //!
 //! **(3) The text reads.** [`text_reads_are_inert`](super::leaf::text_reads_are_inert)
 //! enumerates every place the grammar branches on a `WORD`'s text, and the survey in
@@ -136,6 +142,109 @@ pub(super) fn reparse_letters(
         .find_map(|leaf| try_leaf(base, edit, new_text, &leaf, range))
 }
 
+/// A source-wide literal/settings signal need not disable ordinary prose or math
+/// outside those constructs. Only ASCII letters in an ordinary prose or math WORD
+/// can use this admission; the ordinary token proof still checks every lexical join,
+/// text read, virtual-atom partition and diagnostic boundary.
+pub(super) fn reparse_ordinary_word(
+    base: &ReparseBase<'_>,
+    edit: &Edit,
+    new_text: &str,
+) -> Option<Reparsed> {
+    if base.ctx.reparse_guard.letter_short_verbs
+        || !edit
+            .insert
+            .bytes()
+            .chain(base.text[edit.range.clone()].bytes())
+            .all(|byte| byte.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let range = TextRange::new(
+        TextSize::try_from(edit.range.start).ok()?,
+        TextSize::try_from(edit.range.end).ok()?,
+    );
+    candidates(&base.syntax(), range)
+        .into_iter()
+        .find_map(|leaf| {
+            if leaf.kind() != SyntaxKind::WORD
+                || !leaf.text().bytes().all(|byte| byte.is_ascii_alphabetic())
+            {
+                return None;
+            }
+            let mut in_math = false;
+            let mut in_prose = false;
+            for ancestor in leaf.parent_ancestors() {
+                match ancestor.kind() {
+                    // Unowned groups may be raw reader arguments even when blank
+                    // lines detached them from their command.
+                    SyntaxKind::GROUP | SyntaxKind::OPTIONAL | SyntaxKind::ARGUMENT => {
+                        if !ordinary_argument_owner(base, &ancestor) {
+                            return None;
+                        }
+                    }
+                    SyntaxKind::COMMAND => {
+                        if !ordinary_command(base, &ancestor) {
+                            return None;
+                        }
+                    }
+                    SyntaxKind::NAME_GROUP
+                    | SyntaxKind::BARE_ARGUMENT
+                    | SyntaxKind::TOKEN_LIST
+                    | SyntaxKind::EMBEDDED_TEX
+                    | SyntaxKind::INLINE_CODE => return None,
+                    SyntaxKind::MATH => in_math = true,
+                    SyntaxKind::PARAGRAPH => in_prose = true,
+                    SyntaxKind::ENVIRONMENT => {
+                        let begin = ancestor
+                            .children()
+                            .find(|node| node.kind() == SyntaxKind::BEGIN)?;
+                        let name_group = begin
+                            .children()
+                            .find(|node| node.kind() == SyntaxKind::NAME_GROUP)?;
+                        if usize::from(name_group.text_range().len()) > MAX_PROBE_BYTES {
+                            return None;
+                        }
+                        let name = name_group.text().to_string();
+                        let name = name.strip_prefix('{')?.strip_suffix('}')?.trim();
+                        if base.ctx.is_literal_alltt_environment(name)
+                            || base.ctx.is_verbatim_environment(name)
+                        {
+                            return None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (in_math || in_prose)
+                .then(|| try_leaf(base, edit, new_text, &leaf, range))
+                .flatten()
+        })
+}
+
+fn ordinary_command(base: &ReparseBase<'_>, command: &SyntaxNode) -> bool {
+    command
+        .children_with_tokens()
+        .filter_map(NodeOrToken::into_token)
+        .find(|token| token.kind() == SyntaxKind::CONTROL_WORD)
+        .is_some_and(|head| {
+            head.text().len() <= MAX_PROBE_BYTES && base.ctx.ordinary_math_command(head.text())
+        })
+}
+
+fn ordinary_argument_owner(base: &ReparseBase<'_>, argument: &SyntaxNode) -> bool {
+    let Some(mut owner) = argument.parent() else {
+        return false;
+    };
+    if owner.kind() == SyntaxKind::ARGUMENT {
+        let Some(command) = owner.parent() else {
+            return false;
+        };
+        owner = command;
+    }
+    owner.kind() == SyntaxKind::COMMAND && ordinary_command(base, &owner)
+}
+
 /// The leaves an edit of `range` could be inside, in preference order.
 ///
 /// An insertion at a token boundary belongs to *either* neighbour, and which one
@@ -145,7 +254,7 @@ pub(super) fn reparse_letters(
 /// token, and a range that straddles two lands on their parent node instead.
 pub(super) fn candidates(root: &SyntaxNode, range: TextRange) -> Vec<SyntaxToken> {
     if range.is_empty() {
-        root.token_at_offset(range.start()).collect()
+        crate::syntax::token_at_offset(root, range.start()).collect()
     } else {
         match root.covering_element(range) {
             NodeOrToken::Token(t) => vec![t],

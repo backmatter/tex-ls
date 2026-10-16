@@ -21,7 +21,7 @@
 //! heuristic (`resolve_command_def`): when a definition command has no attached
 //! group, the name and argument shape are read off the immediately-following sibling
 //! `COMMAND`. This stays in the scanner — no parser change — so the parser remains
-//! syntax-only (decision #2). Environment names are brace-delimited *text*, never a
+//! syntax-only. Environment names are brace-delimited *text*, never a
 //! bare control word, so they have no unbraced form to recover.
 
 pub mod editor;
@@ -71,7 +71,7 @@ pub fn scan_definitions_with_operands(
     // wins, like `db`) and filtered by [`apply_env_aliases`] afterwards, since
     // admitting one requires seeing the *other* half of the pair.
     let mut alias_candidates: HashMap<SmolStr, EnvAliasCandidate> = HashMap::new();
-    let mut listing_overrides = HashSet::new();
+    let mut declaration_overrides = HashSet::new();
 
     for command in root
         .descendants()
@@ -83,7 +83,7 @@ pub fn scan_definitions_with_operands(
             continue;
         };
         let extra = editor::extra_declarations(&command);
-        if listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides) {
+        if declaration_overridden(&command, &name, &extra, &mut declaration_overrides) {
             continue;
         }
         match DefKind::of(&name) {
@@ -106,8 +106,9 @@ pub fn scan_definitions_with_operands(
         }
     }
 
-    apply_verbatim_flags(&mut db, &bodies);
-    apply_verbatim_env_flags(&mut db, &env_bodies, &bodies);
+    let verbatim_helpers = verbatim_helper_names(&bodies);
+    apply_verbatim_flags(&mut db, &verbatim_helpers);
+    apply_verbatim_env_flags(&mut db, &env_bodies, &verbatim_helpers);
     apply_env_aliases(&mut db, &alias_candidates);
     db
 }
@@ -211,7 +212,7 @@ fn record_env_alias(
 ///
 /// - **The target must be a curated built-in environment.** An alias declares a
 ///   *spelling*, never a *semantic*; every behavior flag still comes from curated
-///   data, exactly as `is_math_environment` requires (AGENTS.md decision #1).
+///   data, exactly as `is_math_environment` requires.
 /// - **The target must not be verbatim.** `\newcommand{\bv}{\begin{verbatim}}`
 ///   genuinely does not work in TeX — `verbatim` others catcodes, and the body is
 ///   already tokenized by the time the macro expands — so pairing it would model a
@@ -301,7 +302,7 @@ fn raw_definition_sites(
 ) -> Vec<DefSite> {
     let contexts = super::context::TokenListContexts::new(root);
     let mut sites = Vec::new();
-    let mut listing_overrides = HashSet::new();
+    let mut declaration_overrides = HashSet::new();
     for command in root
         .descendants()
         .filter(|node| node.kind() == SyntaxKind::COMMAND)
@@ -313,7 +314,7 @@ fn raw_definition_sites(
         let extra = editor::extra_declarations(&command);
         if operands.is_some()
             && let Some(name) = command_name(&command)
-            && listing_declaration_overridden(&command, &name, &extra, &mut listing_overrides)
+            && declaration_overridden(&command, &name, &extra, &mut declaration_overrides)
         {
             continue;
         }
@@ -326,18 +327,18 @@ fn raw_definition_sites(
     sites
 }
 
-fn listing_declaration_overridden(
+fn declaration_overridden(
     command: &SyntaxNode,
     name: &str,
     extra: &[editor::EditorDeclaration],
     overrides: &mut HashSet<SmolStr>,
 ) -> bool {
-    if listing_declaration_factory(name) && overrides.contains(name) {
+    if overrides.contains(name) {
         return true;
     }
     if extra.is_empty() {
         if let Some(site) = ordinary_definition_site(command)
-            && listing_command_override(&site)
+            && declaration_command_override(&site)
         {
             overrides.insert(site.name);
         }
@@ -346,23 +347,15 @@ fn listing_declaration_overridden(
             extra
                 .iter()
                 .map(|declaration| &declaration.site)
-                .filter(|site| listing_command_override(site))
+                .filter(|site| declaration_command_override(site))
                 .map(|site| site.name.clone()),
         );
     }
     false
 }
 
-pub(crate) fn listing_command_override(site: &DefSite) -> bool {
+pub(crate) fn declaration_command_override(site: &DefSite) -> bool {
     site.kind == DefSiteKind::Command
-        && crate::parser::embedded::observes_settings_command(&site.name)
-}
-
-pub(crate) fn listing_declaration_factory(name: &str) -> bool {
-    matches!(
-        DefKind::of(name),
-        Some(DefKind::Minted | DefKind::VerbatimEnvironment)
-    )
 }
 
 fn ordinary_definition_site(command: &SyntaxNode) -> Option<DefSite> {
@@ -380,68 +373,19 @@ fn ordinary_definition_site(command: &SyntaxNode) -> Option<DefSite> {
         if matches!(
             DefKind::of(&name),
             Some(DefKind::Command | DefKind::XparseCommand | DefKind::Def)
-        ) || matches!(
-            name.as_str(),
-            "let"
-                | "futurelet"
-                | "chardef"
-                | "mathchardef"
-                | "countdef"
-                | "dimendef"
-                | "skipdef"
-                | "muskipdef"
-                | "toksdef"
-                | "font"
-                | "newcount"
-                | "newdimen"
-                | "newskip"
-                | "newmuskip"
-                | "newtoks"
-                | "newbox"
-                | "newread"
-                | "newwrite"
-                | "newlength"
-                | "newsavebox"
-                | "DeclareMathSymbol"
-                | "DeclareMathDelimiter"
-                | "DeclareMathAccent"
-                | "DeclareMathOperator"
-                | "DeclareMathAlphabet"
-                | "DeclareMathRadical"
-                | "DeclareTextFontCommand"
-                | "DeclareOldFontCommand"
-                | "DeclareTextCommand"
-                | "ProvideTextCommand"
-                | "DeclareTextCommandDefault"
-                | "ProvideTextCommandDefault"
-                | "DeclareTextSymbol"
-                | "DeclareTextAccent"
-        ) || name.split_once(':').is_some_and(|(base, args)| {
-            args.starts_with('N')
-                && matches!(
-                    base,
-                    "cs_new"
-                        | "cs_set"
-                        | "cs_gset"
-                        | "cs_new_protected"
-                        | "cs_set_protected"
-                        | "cs_gset_protected"
-                        | "cs_new_nopar"
-                        | "cs_set_nopar"
-                        | "cs_gset_nopar"
-                        | "cs_new_protected_nopar"
-                        | "cs_set_protected_nopar"
-                        | "cs_gset_protected_nopar"
-                        | "cs_new_eq"
-                        | "cs_set_eq"
-                        | "cs_gset_eq"
-                )
-        }) {
+        ) || matches!(name.as_str(), "let" | "futurelet")
+            || crate::parser::reader_facts::literal_definition_name_slots(&name) > 0
+        {
             literal_command_def_site(command)
         } else {
             None
         }
     })
+}
+
+/// Documentation margins and guards do not occupy a TeX definition operand.
+fn definition_trivia(kind: SyntaxKind) -> bool {
+    is_trivia(kind) || matches!(kind, SyntaxKind::DOC_MARGIN | SyntaxKind::GUARD)
 }
 
 /// Read a literal control sequence without interpreting its replacement or arity.
@@ -452,13 +396,13 @@ fn literal_command_def_site(command: &SyntaxNode) -> Option<DefSite> {
         .filter_map(NodeOrToken::into_token)
         .find(|token| token.kind() == SyntaxKind::CONTROL_WORD)?;
     let mut token = head.next_token()?;
-    while is_trivia(token.kind()) || token.text() == "*" {
+    while definition_trivia(token.kind()) || token.text() == "*" {
         token = token.next_token()?;
     }
     let braced = token.text() == "{";
     if braced {
         token = token.next_token()?;
-        while is_trivia(token.kind()) {
+        while definition_trivia(token.kind()) {
             token = token.next_token()?;
         }
     }
@@ -473,7 +417,7 @@ fn literal_command_def_site(command: &SyntaxNode) -> Option<DefSite> {
     }
     if braced {
         let mut close = token.next_token()?;
-        while is_trivia(close.kind()) {
+        while definition_trivia(close.kind()) {
             close = close.next_token()?;
         }
         if close.text() != "}" {
@@ -564,7 +508,7 @@ fn environment_def_site(command: &SyntaxNode) -> Option<DefSite> {
 
 /// Replacement-body facts for one scanned command definition, used to detect
 /// verbatim-argument commands without executing anything. We read only *static*
-/// surface text of the body — no macro expansion (AGENTS.md decision #1).
+/// surface text of the body — no macro expansion.
 struct DefBody {
     /// A catcode-othering signal appears directly in this command's own body
     /// (`\@makeother`, `\catcode…12`, `\dospecials`, …) — see [`catcode_signal`].
@@ -577,23 +521,22 @@ struct DefBody {
 /// Flag user commands whose argument is verbatim. A command is verbatim when it
 /// **takes at least one argument** (so it grabs the user's `{…}` itself) **and** a
 /// catcode-othering signal is reachable from its body — present directly, or in the
-/// body of a scanned macro it transitively calls. Conservative by construction
-/// (AGENTS.md): a wrong flag *suppresses* real diagnostics inside the body, so we
+/// body of a scanned macro it transitively calls. Conservative by construction:
+/// a wrong flag *suppresses* real diagnostics inside the body, so we
 /// flag only on a clear catcode signal and otherwise leave the body ordinary.
 ///
 /// On a match we adopt the built-in convention: only the *leading* (non-verbatim)
 /// arguments stay in `args`; the final argument becomes the implicit verbatim one, so
 /// we drop the last `ArgSpec` and set `verbatim = true`. This keeps the lexer's
 /// `lex_verbatim_command` path uniform between built-in and user commands.
-fn apply_verbatim_flags(db: &mut SignatureDb, bodies: &HashMap<SmolStr, DefBody>) {
-    let verbatim: Vec<SmolStr> = bodies
-        .keys()
+fn apply_verbatim_flags(db: &mut SignatureDb, helpers: &HashSet<&str>) {
+    let verbatim: Vec<SmolStr> = helpers
+        .iter()
         .filter(|name| {
             // Needs an argument of its own to capture, and a reachable signal.
             db.command(name).is_some_and(|sig| !sig.args.is_empty())
-                && reaches_signal(name, bodies, &mut HashSet::new())
         })
-        .cloned()
+        .map(SmolStr::new)
         .collect();
 
     for name in verbatim {
@@ -616,12 +559,17 @@ fn apply_verbatim_flags(db: &mut SignatureDb, bodies: &HashMap<SmolStr, DefBody>
 fn apply_verbatim_env_flags(
     db: &mut SignatureDb,
     env_bodies: &HashMap<SmolStr, DefBody>,
-    bodies: &HashMap<SmolStr, DefBody>,
+    helpers: &HashSet<&str>,
 ) {
     let verbatim: Vec<SmolStr> = env_bodies
         .iter()
         .filter(|(name, body)| {
-            db.environment(name).is_some() && reaches_signal_body(body, bodies, &mut HashSet::new())
+            db.environment(name).is_some()
+                && (body.signal
+                    || body
+                        .called
+                        .iter()
+                        .any(|callee| helpers.contains(callee.as_str())))
         })
         .map(|(name, _)| name.clone())
         .collect();
@@ -634,40 +582,36 @@ fn apply_verbatim_env_flags(
     }
 }
 
-/// Whether a catcode-othering signal is reachable from `name`'s body, following
-/// chained helper macros within the scanned definition set. A `visited` set breaks
-/// definition cycles (mutually recursive helpers terminate). A helper defined via
-/// `\def` (not scanned) is absent from `bodies`, so the chain breaks there and we do
-/// not flag — the conservative false-negative.
-fn reaches_signal(
-    name: &str,
-    bodies: &HashMap<SmolStr, DefBody>,
-    visited: &mut HashSet<SmolStr>,
-) -> bool {
-    if !visited.insert(SmolStr::new(name)) {
-        return false;
+/// Compute the exact signal-reachable helpers once. Each name is queued once
+/// and each call edge is considered once, including cycles and shared suffixes.
+/// Unknown callees cannot establish a signal. Borrow names from the immutable
+/// bodies so propagation neither copies source names nor uses the call stack.
+fn verbatim_helper_names(bodies: &HashMap<SmolStr, DefBody>) -> HashSet<&str> {
+    let mut callers: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut reachable = HashSet::new();
+    let mut pending = Vec::new();
+    for (name, body) in bodies {
+        if body.signal {
+            reachable.insert(name.as_str());
+            pending.push(name.as_str());
+        }
+        for callee in &body.called {
+            callers
+                .entry(callee.as_str())
+                .or_default()
+                .push(name.as_str());
+        }
     }
-    let Some(body) = bodies.get(name) else {
-        return false;
-    };
-    reaches_signal_body(body, bodies, visited)
-}
-
-/// Whether a catcode-othering signal is reachable from a definition `body` —
-/// present directly, or in the body of a scanned command it transitively calls. The
-/// body-level entry point used both by [`reaches_signal`] (after a name lookup) and by
-/// [`apply_verbatim_env_flags`] (for an environment's begin-code, which has no command
-/// name to look up).
-fn reaches_signal_body(
-    body: &DefBody,
-    bodies: &HashMap<SmolStr, DefBody>,
-    visited: &mut HashSet<SmolStr>,
-) -> bool {
-    body.signal
-        || body
-            .called
-            .iter()
-            .any(|callee| reaches_signal(callee, bodies, visited))
+    while let Some(callee) = pending.pop() {
+        if let Some(names) = callers.get(callee) {
+            for &name in names {
+                if reachable.insert(name) {
+                    pending.push(name);
+                }
+            }
+        }
+    }
+    reachable
 }
 
 /// Whether `body` text reassigns a special char's catcode to "other" — the static
@@ -745,7 +689,7 @@ const DELEGATING_PRIMITIVES: &[&str] = &["secdef", "@startsection", "@dblarg", "
 /// (which would drop, e.g., a sectioning command's `prose` title and its reflow — the
 /// jss-class bug). The caller keeps the built-in showing through the overlay instead.
 ///
-/// Narrow by construction (AGENTS.md conservatism): fires only when arity is 0, the body
+/// Narrow by construction: fires only when arity is 0, the body
 /// delegates, *and* a built-in exists to preserve. A genuine 0-arg redefinition has a
 /// self-contained body (no delegation) and is left to win, so it correctly loses prose.
 fn keeps_builtin_over_arity0(name: &str, arity: usize, body: &DefBody) -> bool {
@@ -940,7 +884,7 @@ fn scan_newcommand(
 /// **parameter text** (`#1#2…`) between the name and the body — counted by
 /// [`def_params_and_body`] — not from a `[n]` optional. We record the body for the same
 /// catcode-signal/helper-chain analysis as `\newcommand`, which is what lets a `\def`
-/// helper participate in chain resolution ([`reaches_signal`]).
+/// helper participate in chain resolution ([`verbatim_helper_names`]).
 fn scan_def(
     command: &SyntaxNode,
     db: &mut SignatureDb,
@@ -1007,7 +951,7 @@ fn def_params_and_body(name_node: &SyntaxNode) -> (usize, Option<SyntaxNode>) {
     let mut next = name_node.next_sibling_or_token();
     while let Some(element) = next {
         match element {
-            NodeOrToken::Token(token) if is_trivia(token.kind()) => {
+            NodeOrToken::Token(token) if definition_trivia(token.kind()) => {
                 next = token.next_sibling_or_token();
             }
             NodeOrToken::Token(token) if token.kind() == SyntaxKind::HASH => {
@@ -1064,8 +1008,8 @@ fn scan_newenvironment(
 /// A `listings`/`fancyvrb` verbatim-environment definition → an [`EnvironmentSig`]
 /// with `verbatim_body`. Unlike [`scan_newenvironment`], the verbatim-ness is *not*
 /// read from a catcode signal in the begin-code — that machinery lives inside the
-/// package — but is implied by the defining command's identity, a bounded static fact
-/// (AGENTS.md decision #1). The name is the control-word-free text in the first group:
+/// package — but is implied by the defining command's identity, a bounded static fact.
+/// The name is the control-word-free text in the first group:
 /// - `\lstnewenvironment{name}[n][default]{begin}{end}` — the `[n][default]` optionals
 ///   give the runtime argument shape, as in [`scan_newenvironment`].
 /// - `\DefineVerbatimEnvironment{name}{base}{opts}` — the environment takes one
@@ -1162,7 +1106,7 @@ fn resolve_command_def(command: &SyntaxNode) -> Option<CommandDef> {
         });
     }
     // Unbraced `\newcommand\foo…`: read the name and signature groups off the
-    // following sibling `COMMAND` (decision #2 — a scanner heuristic, no parser
+    // following sibling `COMMAND` (a scanner heuristic, no parser
     // change).
     let sibling = adjacent_sibling_command(command)?;
     let name = command_name(&sibling)?;
@@ -1182,7 +1126,7 @@ fn adjacent_sibling_command(command: &SyntaxNode) -> Option<SyntaxNode> {
     let mut next = command.next_sibling_or_token();
     while let Some(element) = next {
         match element {
-            NodeOrToken::Token(token) if is_trivia(token.kind()) => {
+            NodeOrToken::Token(token) if definition_trivia(token.kind()) => {
                 next = token.next_sibling_or_token();
             }
             NodeOrToken::Node(node) if node.kind() == SyntaxKind::COMMAND => return Some(node),
@@ -1211,10 +1155,21 @@ fn scan_xparse_environment(
         return;
     };
     record_body(env_bodies, name, nth_group(command, 2).as_ref());
-    db.insert_environment(
-        name,
-        environment_sig(xparse::parse_spec(&group_inner_source(&spec))),
-    );
+    let spec = group_inner_source(&spec);
+    let mut sig = environment_sig(xparse::parse_spec(&spec));
+    // Retain the existing l3doc reader only when its own source definition
+    // proves exactly that profile. An arbitrary xparse `v` slot cannot add a
+    // lexical reader, and an ordinary replacement of these names retires it.
+    if spec
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .eq(b"O{}+v".iter().copied())
+        && let Some(curated) = builtin().environment(name).filter(|sig| sig.verbatim_arg)
+    {
+        sig.args = curated.args.clone();
+        sig.verbatim_arg = true;
+    }
+    db.insert_environment(name, sig);
 }
 
 /// The `(arity, first_arg_optional)` pair for a LaTeX2e definition: the integer in
@@ -1273,8 +1228,8 @@ fn environment_sig(args: Vec<ArgSpec>) -> EnvironmentSig {
     EnvironmentSig {
         args: args.into(),
         verbatim_body: false,
-        // The delimited-verbatim name argument is a curated l3doc fact; a
-        // scanned definition never earns it.
+        // Raw name arguments need a curated profile. The xparse scanner may
+        // retain l3doc's exact profile, but arbitrary source slots cannot add it.
         verbatim_arg: false,
         math: false,
         code: false,
@@ -1545,6 +1500,98 @@ mod tests {
         let db = db_of("\\newcommand\\a[1]{\\b#1}\\newcommand\\b[1]{\\a#1}\n");
         assert!(!db.command("a").expect("a defined").verbatim);
         assert!(!db.command("b").expect("b defined").verbatim);
+    }
+
+    #[test]
+    fn long_verbatim_helper_chains_are_stack_safe() {
+        const COUNT: usize = 8192;
+        let name = |index: usize| {
+            let mut name = String::from("helper");
+            for divisor in [26 * 26, 26, 1] {
+                name.push(char::from(b'a' + ((index / divisor) % 26) as u8));
+            }
+            name
+        };
+        let mut source = String::new();
+        for index in 0..COUNT {
+            let body = if index + 1 == COUNT {
+                String::from("\\@makeother\\%#1")
+            } else {
+                format!("\\{}{{#1}}", name(index + 1))
+            };
+            source.push_str(&format!("\\newcommand{{\\{}}}[1]{{{body}}}\n", name(index)));
+        }
+        let parsed = crate::parser::parse_with_flavor(&source, crate::parser::LatexFlavor::Package);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let db = scan_definitions(&parsed.syntax());
+        for index in 0..COUNT {
+            let name = name(index);
+            let signature = db.command(&name).expect("helper remains defined");
+            assert!(signature.verbatim, "{name}");
+            assert!(signature.args.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn verbatim_helper_reachability_matches_independent_forward_search() {
+        let mut seed = 0x6c8e_9cf5_7093_2bd5_u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            seed >> 32
+        };
+        for _ in 0..1024 {
+            let mut bodies = HashMap::new();
+            for index in 0..12 {
+                let signal = next() % 7 == 0;
+                let called = (0..next() % 5)
+                    .map(|_| SmolStr::new(format!("helper{}", next() % 16)))
+                    .collect();
+                bodies.insert(
+                    SmolStr::new(format!("helper{index}")),
+                    DefBody { signal, called },
+                );
+            }
+            let reachable = verbatim_helper_names(&bodies);
+            for name in bodies.keys() {
+                let mut pending = vec![name.as_str()];
+                let mut visited = HashSet::new();
+                let mut expected = false;
+                while let Some(name) = pending.pop() {
+                    if !visited.insert(name) {
+                        continue;
+                    }
+                    if let Some(body) = bodies.get(name) {
+                        if body.signal {
+                            expected = true;
+                            break;
+                        }
+                        pending.extend(body.called.iter().map(SmolStr::as_str));
+                    }
+                }
+                assert_eq!(reachable.contains(name.as_str()), expected, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn signaled_helper_cycles_share_command_and_environment_inference() {
+        let db = db_of(concat!(
+            "\\newcommand\\signal{\\@makeother\\$}",
+            "\\newcommand\\a[1]{\\b{#1}}",
+            "\\newcommand\\b[1]{\\a{#1}\\signal}",
+            "\\newcommand\\c[1]{\\b{#1}}",
+            "\\newcommand\\plain[1]{\\unknown{#1}}",
+            "\\newenvironment{raw}{\\a{x}}{}",
+            "\\newenvironment{ordinary}{\\unknown{x}}{}",
+        ));
+        for name in ["a", "b", "c"] {
+            assert!(db.command(name).unwrap().verbatim, "{name}");
+        }
+        assert!(!db.command("signal").unwrap().verbatim);
+        assert!(!db.command("plain").unwrap().verbatim);
+        assert!(db.environment("raw").unwrap().verbatim_body);
+        assert!(!db.environment("ordinary").unwrap().verbatim_body);
     }
 
     #[test]

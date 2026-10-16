@@ -6,6 +6,7 @@
 use std::fs;
 use std::path::Path;
 
+use tex_ls_formatter::bib::formatter::FormatError::ParseErrors;
 use tex_ls_formatter::bib::{format, format_with_style};
 use tex_ls_formatter::formatter::{FormatStyle, LineEnding};
 use tex_ls_parser::bib::semantic::Model;
@@ -85,7 +86,7 @@ fn field_values(text: &str) -> Vec<(String, String)> {
     values
 }
 
-/// The *multiset* of every `%` comment in the document, trailing whitespace trimmed.
+/// The *multiset* of the exact bytes of every `%` comment in the document.
 /// The formatter relocates comments (they ride their bound field through the canonical
 /// sort) but must never drop, duplicate, or rewrite one — the check the entry- and
 /// value-level oracles above cannot make, since neither looks at trivia.
@@ -96,7 +97,7 @@ fn comments(text: &str) -> Vec<String> {
         .syntax()
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::COMMENT)
-        .map(|n| n.to_string().trim_end().to_string())
+        .map(|n| n.to_string())
         .collect();
     found.sort();
     found
@@ -193,10 +194,10 @@ fn format_invariants_corpus() {
 #[test]
 fn format_refuses_unparseable_input() {
     // An unterminated brace is a parse error; the formatter refuses the document
-    // rather than reshaping around the parser's recovery (AGENTS.md tenet 3).
+    // rather than reshaping around the parser's recovery.
     let input = "@misc{k, title = {unterminated";
     assert!(!parse(input).errors.is_empty(), "test input must be dirty");
-    assert!(format(input).is_err());
+    assert!(matches!(format(input), Err(ParseErrors { count }) if count > 0));
 }
 
 #[test]
@@ -247,4 +248,84 @@ fn line_ending_overrides_the_source() {
     )
     .expect("formats");
     assert_eq!(crlf, "@misc{k,\r\n  t = {x}\r\n}\r\n");
+}
+
+#[test]
+fn bib_comments_survive_each_physical_line_ending() {
+    for ending in ["\n", "\r", "\r\n"] {
+        let source = format!("@misc{{k,title={{T}},% one{ending}% two{ending}author={{A}}}}");
+        assert!(parse(&source).errors.is_empty());
+        let formatted = format(&source).unwrap();
+        assert_eq!(
+            formatted.matches("% one").count(),
+            1,
+            "{ending:?}: {formatted:?}"
+        );
+        assert_eq!(
+            formatted.matches("% two").count(),
+            1,
+            "{ending:?}: {formatted:?}"
+        );
+        assert_eq!(format(&formatted).unwrap(), formatted);
+    }
+}
+
+#[test]
+fn dangling_bib_concatenation_is_rejected() {
+    for source in [
+        "@misc{k,title={T} #}",
+        "@string{x={T} #}",
+        "@preamble{{T} #}",
+        "@misc{k,title={T} #",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.message == "expected a value"),
+            "{source}: {:?}",
+            parsed.errors
+        );
+        assert!(format(source).is_err(), "{source}");
+    }
+}
+
+#[test]
+fn bib_comment_bytes_keep_trailing_spaces_and_tabs() {
+    let mut failures = Vec::new();
+    for newline in ["\n", "\r\n", "\r"] {
+        for source in [
+            "% EOF \t",
+            "% standalone \t\n@misc{k,title={T}}\n",
+            "@misc{k,title={T},% trailing \u{3000} \t\nauthor={A}}\n",
+            "@misc{k,\n% leading \t\ntitle={T}\n% last \t\n}",
+        ] {
+            let source = source.replace('\n', newline);
+            let expected = comments(&source);
+            let formatted = format(&source).unwrap();
+            if comments(&formatted) != expected {
+                failures.push(format!("{source:?}: {formatted:?}"));
+            }
+            assert_eq!(format(&formatted).unwrap(), formatted);
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn empty_required_bib_bodies_are_refused() {
+    for source in ["@string{}", "@preamble{}"] {
+        assert!(format(source).is_err(), "{source}");
+    }
+    for source in ["@string{x={}}", "@preamble{{}}"] {
+        let output = format(source).unwrap();
+        assert_eq!(format(&output).unwrap(), output);
+    }
+}
+
+#[test]
+fn missing_bib_key_field_separator_is_refused() {
+    assert!(format("@misc{k title={T}}").is_err());
 }

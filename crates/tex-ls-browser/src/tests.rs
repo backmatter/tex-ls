@@ -142,6 +142,118 @@ fn source_settings_survive_reopening_and_can_return_to_project_defaults() {
 }
 
 #[test]
+fn inherited_browser_rename_clears_overwritten_source_settings() {
+    let mut session = running_session();
+    let old = fixture_uri!("/project/main.tex");
+    let new = fixture_uri!("/project/destination.tex");
+    let source = "A paragraph with enough words to make the narrow source override visibly wrap differently from the project defaults.\n$x^{2}$\n";
+    session
+        .dispatch(
+            "tex-ls/updateSettings",
+            json!({"settings":{"format":{"line-width":72},"lint":{"select":["redundant-script-braces"]}}}),
+        )
+        .unwrap();
+    open(&mut session, source);
+    session
+        .dispatch(
+            "textDocument/didOpen",
+            json!({"textDocument":{"uri":new,"languageId":"latex","version":0,"text":source}}),
+        )
+        .unwrap();
+    session
+        .dispatch(
+            "tex-ls/updateSettings",
+            json!({"uri":new,"settings":{"format":{"line-width":15},"lint":{"select":[]}}}),
+        )
+        .unwrap();
+    let inherited = format_and_lint_state(&mut session, old);
+    let destination = format_and_lint_state(&mut session, new);
+    assert_ne!(inherited.0, destination.0);
+    assert_eq!(inherited.1, 1);
+    assert_eq!(destination.1, 0);
+    session
+        .dispatch(
+            "workspace/didRenameFiles",
+            json!({"files":[{"oldUri":old,"newUri":new}]}),
+        )
+        .unwrap();
+    assert_eq!(format_and_lint_state(&mut session, new), inherited);
+}
+
+#[test]
+fn browser_source_settings_follow_mixed_provenance_swap() {
+    let mut session = running_session();
+    let a = fixture_uri!("/project/main.tex");
+    let b = fixture_uri!("/project/other.tex");
+    let source = "A paragraph with enough words to make the narrow source override visibly wrap differently from the project defaults.\n$x^{2}$\n";
+    session.dispatch("tex-ls/updateSettings", json!({"settings":{"format":{"line-width":72},"lint":{"select":["redundant-script-braces"]}}})).unwrap();
+    open(&mut session, source);
+    session
+        .dispatch(
+            "textDocument/didOpen",
+            json!({"textDocument":{"uri":b,"languageId":"latex","version":0,"text":source}}),
+        )
+        .unwrap();
+    session
+        .dispatch(
+            "tex-ls/updateSettings",
+            json!({"uri":b,"settings":{"format":{"line-width":15},"lint":{"select":[]}}}),
+        )
+        .unwrap();
+    let inherited = format_and_lint_state(&mut session, a);
+    let explicit = format_and_lint_state(&mut session, b);
+    assert_ne!(inherited.0, explicit.0);
+    assert_eq!(inherited.1, 1);
+    assert_eq!(explicit.1, 0);
+    session
+        .dispatch(
+            "workspace/didRenameFiles",
+            json!({"files":[{"oldUri":a,"newUri":b},{"oldUri":b,"newUri":a}]}),
+        )
+        .unwrap();
+    assert_eq!(format_and_lint_state(&mut session, a), explicit);
+    assert_eq!(format_and_lint_state(&mut session, b), inherited);
+}
+
+#[test]
+fn equal_explicit_browser_settings_survive_rename_and_default_change() {
+    let mut session = running_session();
+    let old = fixture_uri!("/project/main.tex");
+    let new = fixture_uri!("/project/renamed.tex");
+    let source = "A paragraph with enough words to make the narrow source override visibly wrap differently from the project defaults.\n$x^{2}$\n";
+    let settings = json!({"format":{"line-width":15},"lint":{"select":[]}});
+    session
+        .dispatch("tex-ls/updateSettings", json!({"settings":settings}))
+        .unwrap();
+    open(&mut session, source);
+    session
+        .dispatch(
+            "tex-ls/updateSettings",
+            json!({"uri":old,"settings":settings}),
+        )
+        .unwrap();
+    let explicit = format_and_lint_state(&mut session, old);
+    assert_eq!(explicit.1, 0);
+    session
+        .dispatch(
+            "workspace/didRenameFiles",
+            json!({"files":[{"oldUri":old,"newUri":new}]}),
+        )
+        .unwrap();
+    session.dispatch("tex-ls/updateSettings", json!({"settings":{"format":{"line-width":72},"lint":{"select":["redundant-script-braces"]}}})).unwrap();
+    assert_eq!(format_and_lint_state(&mut session, new), explicit);
+}
+
+fn format_and_lint_state(session: &mut Session, uri: &str) -> (serde_json::Value, usize) {
+    let params = json!({"textDocument":{"uri":uri}});
+    let format = session
+        .dispatch("textDocument/formatting", params.clone())
+        .unwrap();
+    let report = session.dispatch("textDocument/diagnostic", params).unwrap();
+    (format, report["items"].as_array().unwrap().len())
+}
+
+#[test]
 fn project_manifests_are_isolated() {
     let mut left = running_session();
     let mut right = running_session();
@@ -688,4 +800,202 @@ fn nesting_recovery_keeps_the_session_usable() {
         )
         .unwrap();
     assert_eq!(symbols[0]["name"], "Recovered");
+}
+
+#[test]
+fn semantic_delta_negotiates_reconstructs_and_forgets_closed_documents() {
+    let mut session = Session::default();
+    let init=session.dispatch("initialize",json!({"capabilities":{"textDocument":{"semanticTokens":{"formats":["relative"],"tokenTypes":["macro","type"],"tokenModifiers":[],"requests":{"full":{"delta":true},"range":true}}}}})).unwrap();
+    assert_eq!(
+        init["capabilities"]["semanticTokensProvider"]["full"],
+        json!({"delta":true})
+    );
+    let source = "\\textbf{A}\n".repeat(20);
+    open(&mut session, &source);
+    let uri = fixture_uri!("/project/main.tex");
+    let full = session
+        .dispatch(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":uri}}),
+        )
+        .unwrap();
+    let id = full["resultId"].as_str().unwrap();
+    let same = session
+        .dispatch(
+            "textDocument/semanticTokens/full/delta",
+            json!({"textDocument":{"uri":uri},"previousResultId":id}),
+        )
+        .unwrap();
+    assert_eq!(same["edits"], json!([]));
+    let old = full["data"].as_array().unwrap();
+    let id = same["resultId"].as_str().unwrap().to_owned();
+    session.dispatch("textDocument/didChange",json!({"textDocument":{"uri":uri,"version":1},"contentChanges":[{"range":{"start":{"line":10,"character":1},"end":{"line":10,"character":7}},"text":"emph"}]})).unwrap();
+    let delta = session
+        .dispatch(
+            "textDocument/semanticTokens/full/delta",
+            json!({"textDocument":{"uri":uri},"previousResultId":id}),
+        )
+        .unwrap();
+    let mut reconstructed = old.clone();
+    for edit in delta["edits"].as_array().unwrap().iter().rev() {
+        let start = edit["start"].as_u64().unwrap() as usize;
+        let end = start + edit["deleteCount"].as_u64().unwrap() as usize;
+        reconstructed.splice(start..end, edit["data"].as_array().unwrap().clone());
+    }
+    let full = session
+        .dispatch(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":uri}}),
+        )
+        .unwrap();
+    assert_eq!(reconstructed, *full["data"].as_array().unwrap());
+    let id = full["resultId"].as_str().unwrap().to_owned();
+    session
+        .dispatch("textDocument/didClose", json!({"textDocument":{"uri":uri}}))
+        .unwrap();
+    open(&mut session, &source);
+    let fallback = session
+        .dispatch(
+            "textDocument/semanticTokens/full/delta",
+            json!({"textDocument":{"uri":uri},"previousResultId":id}),
+        )
+        .unwrap();
+    assert!(fallback.get("data").is_some());
+    assert!(
+        session
+            .dispatch(
+                "textDocument/semanticTokens/full/delta",
+                json!({"textDocument":{"uri":uri}})
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn clients_without_delta_negotiation_do_not_create_token_baselines() {
+    let mut session = Session::default();
+    session.dispatch("initialize", json!({})).unwrap();
+    let uri = "file:///full-only.tex";
+    session.dispatch("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"latex","version":1,"text":"\\section{Title}"}})).unwrap();
+    let full = session
+        .dispatch(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":uri}}),
+        )
+        .unwrap();
+    assert!(full.get("data").is_some());
+    assert!(full.get("resultId").is_none());
+}
+
+fn delta_session() -> Session {
+    let mut session = Session::default();
+    session.dispatch("initialize", json!({"capabilities":{"textDocument":{"semanticTokens":{"formats":["relative"],"tokenTypes":["macro","type"],"tokenModifiers":[],"requests":{"full":{"delta":true}}}}}})).unwrap();
+    session
+}
+
+#[test]
+fn renamed_swapped_and_overwritten_browser_token_baselines_are_retired() {
+    let a = fixture_uri!("/project/a.tex");
+    let b = fixture_uri!("/project/b.tex");
+    for mode in ["move", "overwrite", "swap"] {
+        let mut session = delta_session();
+        for uri in if mode == "move" { vec![a] } else { vec![a, b] } {
+            session.dispatch("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"latex","version":0,"text":"\\textbf{A}\n".repeat(20)}})).unwrap();
+        }
+        let old = session
+            .dispatch(
+                "textDocument/semanticTokens/full",
+                json!({"textDocument":{"uri":a}}),
+            )
+            .unwrap();
+        let a_id = old["resultId"].as_str().unwrap().to_owned();
+        let b_id = if mode != "move" {
+            session
+                .dispatch(
+                    "textDocument/semanticTokens/full",
+                    json!({"textDocument":{"uri":b}}),
+                )
+                .unwrap()["resultId"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        } else {
+            a_id.clone()
+        };
+        let files = if mode == "swap" {
+            json!([{"oldUri":a,"newUri":b},{"oldUri":b,"newUri":a}])
+        } else {
+            json!([{"oldUri":a,"newUri":b}])
+        };
+        session
+            .dispatch("workspace/didRenameFiles", json!({"files":files}))
+            .unwrap();
+        for (uri, previous) in if mode == "swap" {
+            vec![(a, a_id.as_str()), (b, b_id.as_str())]
+        } else {
+            vec![(b, b_id.as_str())]
+        } {
+            let fresh = session
+                .dispatch(
+                    "textDocument/semanticTokens/full/delta",
+                    json!({"textDocument":{"uri":uri},"previousResultId":previous}),
+                )
+                .unwrap();
+            assert!(fresh.get("data").is_some(), "{mode}: {uri}");
+            let next = session
+                .dispatch(
+                    "textDocument/semanticTokens/full/delta",
+                    json!({"textDocument":{"uri":uri},"previousResultId":fresh["resultId"]}),
+                )
+                .unwrap();
+            assert_eq!(next["edits"], json!([]), "{mode}: {uri}");
+        }
+    }
+}
+
+#[test]
+fn closed_backing_requests_are_rejected_and_reopened_uri_retires_baselines() {
+    let mut session = delta_session();
+    let root = fixture_uri!("/project/main.tex");
+    let child = fixture_uri!("/project/child.tex");
+    open(&mut session, "\\input{child}");
+    let token = session
+        .dispatch(
+            "tex-ls/beginExternalRefresh",
+            json!({"uri":root,"kind":"files"}),
+        )
+        .unwrap()["token"]
+        .clone();
+    session.dispatch("tex-ls/applyExternalInputs", json!({"token":token,"inputs":{"kind":"files","backing":[[fixture_path!("/project/child.tex"),"\\textbf{Child}"]]}})).unwrap();
+    let closed = session.dispatch(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument":{"uri":child}}),
+    );
+    assert_eq!(closed.unwrap_err(), "Document is not open");
+    let source = "\\textbf{Child}\n".repeat(20);
+    session
+        .dispatch(
+            "textDocument/didOpen",
+            json!({"textDocument":{"uri":child,"languageId":"latex","version":0,"text":source}}),
+        )
+        .unwrap();
+    let full = session
+        .dispatch(
+            "textDocument/semanticTokens/full",
+            json!({"textDocument":{"uri":child}}),
+        )
+        .unwrap();
+    session
+        .dispatch(
+            "textDocument/didOpen",
+            json!({"textDocument":{"uri":child,"languageId":"latex","version":0,"text":source}}),
+        )
+        .unwrap();
+    let reopened = session
+        .dispatch(
+            "textDocument/semanticTokens/full/delta",
+            json!({"textDocument":{"uri":child},"previousResultId":full["resultId"]}),
+        )
+        .unwrap();
+    assert!(reopened.get("data").is_some());
 }

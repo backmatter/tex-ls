@@ -1,5 +1,5 @@
 //! Negotiated refresh requests, coalesced while queued and while awaiting a reply.
-use super::*;
+use lsp_server::{Connection, Message, Request, RequestId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Feature {

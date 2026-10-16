@@ -35,9 +35,13 @@ use crate::source::FileKind;
 /// per-file cite-key input to [`ResolvedCitations::build`]. Shared by the CLI
 /// (one-shot, non-salsa) and the `crate::incremental::file_cite_names` firewall
 /// so both feed identical data into the resolver. Kept raw (not lowercased);
-/// [`ResolvedCitations::build`] folds case when it indexes the keys.
+/// [`ResolvedCitations::build`] applies the root backend policy when indexing.
 pub fn document_cite_names(model: &BibModel) -> Vec<SmolStr> {
-    let mut names: Vec<SmolStr> = model.entries().iter().map(|e| e.key.clone()).collect();
+    let mut names: Vec<SmolStr> = model
+        .entries()
+        .iter()
+        .map(|entry| entry.key.clone())
+        .collect();
     names.sort_unstable();
     names.dedup();
     names
@@ -52,6 +56,7 @@ pub struct CiteFileFacts {
     pub bib_targets: Vec<BibTarget>,
     pub manual_keys: Vec<SmolStr>,
     pub nocite_all: bool,
+    pub case_sensitive: Option<bool>,
     pub is_document_root: bool,
 }
 
@@ -75,6 +80,9 @@ struct Component {
     /// The cite keys available in this namespace (lowercased for case-insensitive
     /// matching, as BibTeX folds key case).
     keys: HashSet<SmolStr>,
+    manual_keys: HashSet<SmolStr>,
+    case_sensitive: bool,
+    supports_aliases: bool,
     /// The analyzed `.bib` files this namespace draws keys from, sorted and deduped.
     /// Unlike [`keys`](Self::keys) (existence only), this carries provenance so
     /// go-to-definition can locate the entry behind a cite key. Parallel to
@@ -97,18 +105,21 @@ impl Component {
         wildcard: bool,
         targets: &[BibTarget],
         manual: &[SmolStr],
-        mut resolve: impl FnMut(&Path) -> Option<(&'a Path, &'a [SmolStr])>,
+        mut resolve: impl FnMut(&Path) -> Option<(&'a Path, &'a [SmolStr], &'a [SmolStr], bool)>,
     ) {
-        self.keys
-            .extend(manual.iter().map(|key| SmolStr::new(key.to_lowercase())));
+        self.manual_keys.extend(manual.iter().cloned());
         self.rooted |= rooted;
         self.wildcard |= wildcard;
         for target in targets {
             match target {
                 BibTarget::Path(path) => match resolve(path) {
-                    Some((actual, keys)) => {
-                        self.keys
-                            .extend(keys.iter().map(|key| SmolStr::from(key.to_lowercase())));
+                    Some((actual, keys, aliases, complete)) => {
+                        self.closed &= complete || !self.supports_aliases;
+                        self.keys.extend(
+                            keys.iter()
+                                .chain(aliases.iter().filter(|_| self.supports_aliases))
+                                .map(|key| identity(self.case_sensitive, key)),
+                        );
                         self.bib_paths.push(actual.to_path_buf());
                     }
                     None => self.closed = false,
@@ -177,6 +188,21 @@ impl ResolvedCitations {
             })
             .collect();
 
+        for (id, scope) in partition.scopes.iter().enumerate() {
+            components[id].closed &= !files
+                .iter()
+                .any(|facts| scope.contains(&facts.path) && facts.case_sensitive.is_none());
+            components[id].case_sensitive = files
+                .iter()
+                .any(|facts| scope.contains(&facts.path) && facts.case_sensitive != Some(false));
+            components[id].supports_aliases = files
+                .iter()
+                .any(|facts| scope.contains(&facts.path) && facts.case_sensitive == Some(true))
+                && !files
+                    .iter()
+                    .any(|facts| scope.contains(&facts.path) && facts.case_sensitive.is_none());
+        }
+
         // Gather keys, flags, and bib-resource openness per component.
         for facts in files {
             for (id, scope) in partition.scopes.iter().enumerate() {
@@ -201,9 +227,9 @@ impl ResolvedCitations {
                             .contains_key(path)
                             .then_some(path)
                             .or_else(|| bib_aliases.get(path).map(PathBuf::as_path))?;
-                        bib_keys
-                            .get_key_value(actual)
-                            .map(|(path, keys)| (path.as_path(), keys.as_slice()))
+                        bib_keys.get_key_value(actual).map(|(path, keys)| {
+                            (path.as_path(), keys.as_slice(), [].as_slice(), true)
+                        })
                     },
                 );
             }
@@ -231,6 +257,114 @@ impl ResolvedCitations {
         }
     }
 
+    /// Add literal Biber aliases to pure resolver inputs. Classic BibTeX ignores ids.
+    pub fn with_entry_aliases<'a>(
+        mut self,
+        models: impl IntoIterator<Item = (&'a Path, &'a BibModel)>,
+    ) -> Self {
+        for (path, model) in models {
+            for component in &mut self.components {
+                if component.supports_aliases && component.bib_paths.iter().any(|bib| bib == path) {
+                    Arc::make_mut(component)
+                        .keys
+                        .extend(document_cite_alias_names(model));
+                }
+            }
+        }
+        self
+    }
+    /// Crossref is classic; the other declared fields require a proven Biber scope.
+    pub fn supports_dependency(&self, origin: &Path, field: &str) -> bool {
+        field == "crossref" || self.supports_aliases(origin)
+    }
+    pub fn supports_aliases(&self, origin: &Path) -> bool {
+        self.component_of.get(origin).map_or_else(
+            || {
+                self.components
+                    .iter()
+                    .filter(|component| component.bib_paths.iter().any(|path| path == origin))
+                    .any(|component| component.supports_aliases)
+            },
+            |&id| self.components[id].supports_aliases,
+        )
+    }
+    /// Opaque alias expressions can supply additional citation identities.
+    pub fn open_bibliographies<'a>(mut self, paths: impl IntoIterator<Item = &'a Path>) -> Self {
+        let paths: HashSet<_> = paths.into_iter().collect();
+        for component in &mut self.components {
+            if component.supports_aliases
+                && component
+                    .bib_paths
+                    .iter()
+                    .any(|path| paths.contains(path.as_path()))
+            {
+                Arc::make_mut(component).closed = false;
+            }
+        }
+        self
+    }
+    /// Manual bibitems use TeX's case-sensitive control-sequence identity.
+    pub fn manual_is_defined(&self, origin: &Path, key: &str) -> bool {
+        self.component_of
+            .get(origin)
+            .is_some_and(|&id| self.components[id].manual_keys.contains(key))
+    }
+    /// Normalize a citation identity using the selected compilation scope.
+    pub fn key_identity(&self, origin: &Path, key: &str) -> SmolStr {
+        identity(self.case_sensitive(origin), key)
+    }
+    pub fn keys_equal(&self, origin: &Path, left: &str, right: &str) -> bool {
+        if self.case_sensitive(origin) {
+            left == right
+        } else {
+            left.eq_ignore_ascii_case(right)
+        }
+    }
+    pub fn case_sensitive(&self, origin: &Path) -> bool {
+        self.component_of.get(origin).map_or_else(
+            || {
+                let mut scopes = self
+                    .components
+                    .iter()
+                    .filter(|c| c.bib_paths.iter().any(|p| p == origin));
+                scopes
+                    .next()
+                    .is_some_and(|first| first.case_sensitive && scopes.all(|c| c.case_sensitive))
+            },
+            |&id| self.components[id].case_sensitive,
+        )
+    }
+    pub fn has_consistent_key_case(&self, origin: &Path) -> bool {
+        let mut policies = self
+            .components
+            .iter()
+            .filter(|c| c.bib_paths.iter().any(|p| p == origin))
+            .map(|c| c.case_sensitive);
+        policies
+            .next()
+            .is_none_or(|first| policies.all(|policy| policy == first))
+    }
+    /// Bibliographies sharing a compilation scope with this resource.
+    pub fn bibliography_resources<'a>(&'a self, origin: &'a Path) -> Vec<&'a Path> {
+        if self.component_of.contains_key(origin) {
+            return self
+                .bib_definers(origin)
+                .iter()
+                .map(PathBuf::as_path)
+                .collect();
+        }
+        let mut paths: Vec<_> = self
+            .components
+            .iter()
+            .filter(|c| c.bib_paths.iter().any(|p| p == origin))
+            .flat_map(|c| c.bib_paths.iter().map(PathBuf::as_path))
+            .chain(std::iter::once(origin))
+            .collect();
+        paths.sort_unstable();
+        paths.dedup();
+        paths
+    }
+
     /// Candidate document roots in deterministic order. Multiple roots require
     /// explicit selection for root-dependent edits.
     pub fn candidate_roots(&self, file: &Path) -> &[PathBuf] {
@@ -245,7 +379,7 @@ impl ResolvedCitations {
     pub fn bibliography_scopes<'a>(
         &'a self,
         path: &'a Path,
-    ) -> impl Iterator<Item = (&'a [PathBuf], &'a [PathBuf], bool, bool)> + 'a {
+    ) -> impl Iterator<Item = (&'a [PathBuf], &'a [PathBuf], bool, bool, bool, bool)> + 'a {
         self.components
             .iter()
             .enumerate()
@@ -256,6 +390,8 @@ impl ResolvedCitations {
                     component.bib_paths.as_slice(),
                     component.closed && component.rooted,
                     component.wildcard,
+                    component.case_sensitive,
+                    component.supports_aliases,
                 )
             })
     }
@@ -305,12 +441,13 @@ impl ResolvedCitations {
     }
 
     /// Whether cite `key` is defined anywhere in `file`'s namespace
-    /// (case-insensitive).
+    /// using the root backend policy and exact manual-bibitem names.
     pub fn is_defined(&self, file: &Path, key: &str) -> bool {
         self.component_of.get(file).is_some_and(|&id| {
-            self.components[id]
-                .keys
-                .contains(&SmolStr::from(key.to_lowercase()))
+            self.components[id].manual_keys.contains(key)
+                || self.components[id]
+                    .keys
+                    .contains(&identity(self.components[id].case_sensitive, key))
         })
     }
 
@@ -389,10 +526,20 @@ fn component_citations(
         .collect();
     let mut component = Component {
         closed: *super::root_views::closed(db, representative),
+        case_sensitive: super::root_views::members(db, representative)
+            .iter()
+            .any(|&file| file_cite_facts(db, file).case_sensitive != Some(false)),
+        supports_aliases: super::root_views::members(db, representative)
+            .iter()
+            .any(|&file| file_cite_facts(db, file).case_sensitive == Some(true))
+            && super::root_views::members(db, representative)
+                .iter()
+                .all(|&file| file_cite_facts(db, file).case_sensitive.is_some()),
         ..Default::default()
     };
     for &member in super::root_views::members(db, representative) {
         let facts = file_cite_facts(db, member);
+        component.closed &= facts.case_sensitive.is_some();
         component.include(
             *file_is_document_root(db, member),
             facts.nocite_all,
@@ -416,6 +563,8 @@ fn component_citations(
                 Some((
                     source.path(db).as_path(),
                     file_cite_names(db, source).as_slice(),
+                    crate::incremental::file_cite_alias_names(db, source).as_slice(),
+                    *crate::incremental::bib_identity_complete(db, source),
                 ))
             },
         );
@@ -424,6 +573,96 @@ fn component_citations(
     component.bib_paths.sort_unstable();
     component.bib_paths.dedup();
     Arc::new(component)
+}
+
+/// Biblatex defaults to Biber; classic BibTeX and backend=bibtex fold key case.
+/// This is a range-free source fact and never changes parsing.
+pub fn citation_case_sensitive(root: &crate::syntax::SyntaxNode) -> Option<bool> {
+    let roles = crate::external::links::FileRoleContext::new(root);
+    let mut policy = None;
+    let mut pending_unknown = false;
+    for node in root.descendants().filter(|node| roles.allows(node)) {
+        let name = crate::ast::command_name(&node);
+        if name.as_deref() == Some("PassOptionsToPackage") {
+            // Pending options can come from another included source, so order
+            // cannot be inferred independently by this range-free file fact.
+            pending_unknown |= crate::ast::nth_group_text(&node, 1).is_none_or(|names| {
+                names.split(',').any(|name| name.trim() == "biblatex")
+                    || names.chars().any(|ch| {
+                        !(ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | ',' | ' '))
+                    })
+            });
+            continue;
+        }
+        if policy.is_some() || !matches!(name.as_deref(), Some("usepackage" | "RequirePackage")) {
+            continue;
+        }
+        if !crate::ast::nth_group_text(&node, 0)
+            .is_some_and(|names| names.split(',').any(|name| name.trim() == "biblatex"))
+        {
+            continue;
+        }
+        let mut backend = Some(true);
+        for optional in node
+            .children()
+            .filter(|node| node.kind() == crate::syntax::SyntaxKind::OPTIONAL)
+        {
+            let text = optional.text().to_string();
+            if text
+                .chars()
+                .any(|ch| matches!(ch, '\\' | '#' | '%' | '$' | '&' | '^' | '~'))
+            {
+                backend = None;
+                break;
+            }
+            for option in text.trim_matches(['[', ']']).split(',') {
+                if let Some((name, value)) = option.split_once('=')
+                    && name.trim() == "backend"
+                {
+                    let value = value.trim();
+                    let value = value
+                        .strip_prefix('{')
+                        .and_then(|value| value.strip_suffix('}'))
+                        .unwrap_or(value)
+                        .trim();
+                    backend = match value {
+                        "biber" => Some(true),
+                        "bibtex" | "bibtex8" => Some(false),
+                        _ => None,
+                    };
+                }
+            }
+        }
+        // A duplicate load does not rerun package option processing.
+        policy = Some(backend);
+    }
+    if pending_unknown {
+        None
+    } else {
+        policy.unwrap_or(Some(false))
+    }
+}
+
+pub fn document_cite_identity_complete(model: &BibModel) -> bool {
+    model
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.dependencies)
+        .all(|dependency| dependency.field != "ids" || dependency.key.is_some())
+}
+
+/// Literal entry aliases, kept separate from classic BibTeX primary keys.
+pub fn document_cite_alias_names(model: &BibModel) -> Vec<SmolStr> {
+    let mut names: Vec<_> = model
+        .entries()
+        .iter()
+        .flat_map(|entry| &entry.dependencies)
+        .filter(|dependency| dependency.field == "ids")
+        .filter_map(|dependency| dependency.key.clone())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
 }
 
 #[cfg(test)]
@@ -458,6 +697,7 @@ mod tests {
 
     fn facts(path: &str, bib: &[&str], root: bool) -> CiteFileFacts {
         CiteFileFacts {
+            case_sensitive: Some(false),
             path: PathBuf::from(path),
             bib_targets: bib
                 .iter()
@@ -544,6 +784,7 @@ mod tests {
         let g = graph(&[("/p/main.tex", &[])]);
         let r = ResolvedCitations::build(
             &[CiteFileFacts {
+                case_sensitive: Some(false),
                 path: PathBuf::from("/p/main.tex"),
                 bib_targets: vec![BibTarget::Dynamic],
                 manual_keys: Vec::new(),
@@ -678,6 +919,7 @@ mod tests {
 
         let with_wildcard = ResolvedCitations::build(
             &[CiteFileFacts {
+                case_sensitive: Some(false),
                 path: PathBuf::from("/p/main.tex"),
                 bib_targets: vec![BibTarget::Path(PathBuf::from("/p/refs.bib"))],
                 manual_keys: Vec::new(),
@@ -688,5 +930,52 @@ mod tests {
             &bib,
         );
         assert!(with_wildcard.has_wildcard_nocite(Path::new("/p/main.tex")));
+    }
+}
+
+fn identity(case_sensitive: bool, key: &str) -> SmolStr {
+    if case_sensitive {
+        key.into()
+    } else {
+        key.to_ascii_lowercase().into()
+    }
+}
+
+#[cfg(test)]
+mod backend_policy_tests {
+    use super::*;
+    #[test]
+    fn pending_dynamic_and_duplicate_loads_do_not_guess_backend() {
+        for source in [
+            r"\PassOptionsToPackage{backend=bibtex}{biblatex}\usepackage{biblatex}",
+            r"\PassOptionsToPackage{backend=bibtex}{biblatex}",
+            r"\PassOptionsToPackage{backend=bibtex}{\packages}\usepackage{biblatex}",
+            r"\usepackage[\backendoption=bibtex]{biblatex}",
+        ] {
+            assert_eq!(
+                citation_case_sensitive(&crate::parser::parse(source).syntax()),
+                None,
+                "{source}"
+            );
+        }
+        for source in [
+            r"\usepackage[backend=bibtex]{biblatex}\usepackage{biblatex}",
+            r"\usepackage[backend={bibtex}]{biblatex}",
+        ] {
+            assert_eq!(
+                citation_case_sensitive(&crate::parser::parse(source).syntax()),
+                Some(false),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            citation_case_sensitive(
+                &crate::parser::parse(
+                    r"\PassOptionsToPackage{draft}{graphicx}\usepackage{biblatex}"
+                )
+                .syntax()
+            ),
+            Some(true)
+        );
     }
 }

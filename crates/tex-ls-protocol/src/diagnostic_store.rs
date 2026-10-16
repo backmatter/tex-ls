@@ -1,9 +1,22 @@
 //! One immutable snapshot report used by push, document pull and workspace pull.
-use super::*;
+use crate::{
+    convert::{byte_range_to_lsp, file_kind_for, path_to_uri},
+    diagnostics::{analyze_bib, analyze_tex},
+};
+use lsp_types::{Diagnostic, DiagnosticSeverity};
 use serde_json::{Value, json};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use tex_ls_analysis::external::{Observation, compiler::Level};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::Path,
+};
+use tex_ls_analysis::{
+    external::{Observation, compiler::Level},
+    incremental::Analysis,
+    linter::RuleSelection,
+    source::FileKind,
+    text::PositionEncoding,
+};
 
 /// Identity from explicit inputs, before running lint queries. Source revisions
 /// cache their byte digest; unrelated compilation roots do not invalidate it.
@@ -43,18 +56,6 @@ fn identity(
     if file_kind_for(path).is_latex() {
         members.extend(snapshot.command_source_files(path));
     }
-    // Local package declarations can contribute signatures and option facts.
-    members.extend(
-        snapshot
-            .project_members()
-            .iter()
-            .filter(|m| {
-                m.path
-                    .extension()
-                    .is_some_and(|e| matches!(e.to_str(), Some("sty" | "cls" | "dtx" | "def")))
-            })
-            .map(|m| m.path.clone()),
-    );
     format!("{rules:?}{enc:?}{:?}", labels.candidate_roots(path)).hash(&mut state);
     for member in &members {
         // Hash text, not Path's platform-width component representation, so
@@ -407,6 +408,93 @@ mod tests {
             )]),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn independent_package_edits_keep_other_root_reports_unchanged() {
+        for enc in [PositionEncoding::Utf8, PositionEncoding::Utf16] {
+            let mut db = IncrementalDatabase::default();
+            let main = Path::new(fixture_path!("/root-report/a/main.tex"));
+            let owned = Path::new(fixture_path!("/root-report/a/owned.sty"));
+            db.apply_change(
+                main,
+                "\\documentclass{article}\\usepackage[draft]{owned}\\custom",
+                None,
+            );
+            db.apply_change(
+                owned,
+                "\\DeclareOption{draft}{}\\ProcessOptions\\relax\\newcommand{\\custom}{}",
+                None,
+            );
+            db.apply_change(
+                Path::new(fixture_path!("/root-report/b/main.tex")),
+                "\\documentclass{article}\\usepackage{unrelated}",
+                None,
+            );
+            let unrelated = Path::new(fixture_path!("/root-report/b/unrelated.sty"));
+            db.apply_change(
+                unrelated,
+                "\\DeclareOption{draft}{}\\ProcessOptions\\relax",
+                None,
+            );
+            let before = document_diagnostics(
+                &db.snapshot(),
+                main,
+                FileKind::Tex,
+                &RuleSelection::all(),
+                enc,
+                None,
+            );
+            let previous = before["resultId"].as_str().unwrap();
+            db.apply_change(
+                unrelated,
+                "\\DeclareOption{final}{}\\ProcessOptions\\relax",
+                None,
+            );
+            let unchanged = document_diagnostics(
+                &db.snapshot(),
+                main,
+                FileKind::Tex,
+                &RuleSelection::all(),
+                enc,
+                Some(previous),
+            );
+            assert_eq!(unchanged["kind"], "unchanged", "{enc:?}: {unchanged}");
+            // Loaded options and definitions remain dependencies of this root.
+            db.apply_change(
+                owned,
+                "\\DeclareOption{final}{}\\ProcessOptions\\relax",
+                None,
+            );
+            let changed = document_diagnostics(
+                &db.snapshot(),
+                main,
+                FileKind::Tex,
+                &RuleSelection::all(),
+                enc,
+                Some(previous),
+            );
+            assert_eq!(changed["kind"], "full");
+            assert_ne!(changed["items"], before["items"]);
+            let messages = changed["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["message"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("unknown option `draft`")),
+                "{messages:?}"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .any(|message| message.contains("Unknown command `\\custom`")),
+                "{messages:?}"
+            );
+        }
     }
 
     #[test]

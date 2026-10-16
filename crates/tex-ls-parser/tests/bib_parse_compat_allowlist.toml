@@ -6,7 +6,7 @@
 #
 # The bib skeleton stops at the field level (entry types + field names), so most
 # value-internal differences never reach this gauge. Record here only deviations
-# we have consciously decided to keep. See AGENTS.md ("measure against, never match").
+# we have consciously decided to keep. Reference similarity remains a triage aid.
 
 [deviations]
 # example.bib = "reason tex-ls's skeleton intentionally differs from texlab's here"

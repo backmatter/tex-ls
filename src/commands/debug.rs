@@ -1,4 +1,27 @@
-use super::*;
+//! Formatter invariant checks and reports for the debug command.
+use super::inputs::report_discovery_error;
+use rayon::prelude::*;
+use std::{
+    path::{Path, PathBuf},
+    process::ExitCode,
+};
+use tex_ls::{
+    cli::DebugChecksArg,
+    file_discovery::{ExcludeFilter, collect_lint_files},
+    format::format_file_with_packages_sentence,
+};
+use tex_ls_analysis::source::FileKind;
+use tex_ls_formatter::formatter::{
+    FormatStyle, SentenceOptions, WrapMode,
+    perturb::{
+        ConvergenceError, DEFAULT_SINGLE_FLIP_SAMPLES, check_trivia_convergence, nontrivia_content,
+        survey_trivia_invariance,
+    },
+};
+use tex_ls_parser::{
+    declarations::ResolvedDeclarations,
+    parser::{LexConfig, parse_with_flavor},
+};
 
 // --- `debug format`: per-file invariant checks -----------------------------
 // Perturbation-based trivia checks are deliberately excluded from `--checks all`.
@@ -29,9 +52,9 @@ impl CheckKind {
     }
 }
 
-/// Every `%` comment in `text`, one per line, in document order and with trailing
-/// whitespace trimmed (the printer drops a comment's trailing spaces with the
-/// line's). Rendered as text so a divergence diffs like the other checks.
+/// Every `%` comment in `text`, one per line, in document order with its exact
+/// token bytes. Line endings are separate trivia. Rendered as text so a
+/// divergence diffs like the other checks.
 ///
 /// `DOC_MARGIN` and `GUARD` are excluded on purpose: a `.dtx` margin is
 /// re-synthesized per output line by the doc-paragraph reflow, so its count is
@@ -42,7 +65,7 @@ fn comment_sequence(text: &str, config: LexConfig) -> String {
         .descendants_with_tokens()
         .filter_map(|element| element.into_token())
         .filter(|token| token.kind() == tex_ls_parser::syntax::SyntaxKind::COMMENT)
-        .map(|token| token.text().trim_end().to_string())
+        .map(|token| token.text().to_string())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -670,9 +693,52 @@ pub(super) fn run_debug_format(
     }
 }
 
+/// `tex-ls debug echo-args`: record the trailing arguments, one per line.
+///
+/// The forward-search tests configure this as their PDF viewer, so what lands in
+/// `out` is exactly the argument vector the viewer would have been launched with.
+pub(super) fn run_debug_echo_args(out: &Path, args: &[String]) -> ExitCode {
+    let mut body = args.join("\n");
+    if !args.is_empty() {
+        body.push('\n');
+    }
+    // Stage and rename rather than writing `out` in place. The test polling for
+    // this recording lives in *another process* (the viewer runs detached), and
+    // a plain `fs::write` leaves the file existing-and-empty between its
+    // truncate and its write. A reader landing in that window reads back a
+    // complete-looking recording of zero arguments, which is indistinguishable
+    // from a viewer launched with none — the flake behind an `assert_eq!` whose
+    // left side was `[]`. A rename within one directory is atomic, so the
+    // reader sees either no file at all or the entire recording.
+    let staging = out.with_file_name(format!(
+        "{}.{}.tmp",
+        out.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    match std::fs::write(&staging, body).and_then(|()| std::fs::rename(&staging, out)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            let _ = std::fs::remove_file(&staging);
+            eprintln!("tex-ls: failed to write {}: {err}", out.display());
+            ExitCode::from(2)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comment_gate_preserves_spaces_within_comment_tokens() {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!("% keep \t{ending}% also\u{3000} ");
+            assert_eq!(
+                comment_sequence(&source, LexConfig::default()),
+                "% keep \t\n% also\u{3000} "
+            );
+        }
+    }
     #[test]
     fn sanitize_matches_the_workflow_sed_class() {
         assert_eq!(

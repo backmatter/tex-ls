@@ -1,6 +1,20 @@
 //! Conservative composition of independently safe, atomic lint fixes.
-use super::*;
-use tex_ls_analysis::linter::diagnostic::{Applicability, Fix};
+use crate::code_action;
+#[cfg(test)]
+use crate::convert::path_to_uri;
+use lsp_types::{CodeActionKind, Uri, WorkspaceEdit};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
+#[cfg(test)]
+use tex_ls_analysis::linter::Severity;
+use tex_ls_analysis::{
+    linter::diagnostic::{Applicability, Fix},
+    text::{PositionEncoding, TextBuffer},
+};
 
 fn conflicts(
     a: &tex_ls_analysis::linter::diagnostic::Edit,

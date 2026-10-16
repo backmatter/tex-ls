@@ -8,8 +8,13 @@ use crate::parser::Edit;
 
 /// Splice one WORD/NUMBER token when its lexical neighbours and grammar decisions
 /// are unchanged. Unproved edits return `None` and must use the ordinary parser.
+/// The caller must pair `text` and `base` from the same parse. The edit transform
+/// is validated here; checking arbitrary tree contents would require a full walk.
 pub fn reparse(text: &str, base: &Parse, edit: &Edit, new_text: &str) -> Option<Parse> {
-    if !edit.fits(text) || edit.insert.len() > 4096 {
+    if usize::from(base.green.text_len()) != text.len()
+        || !edit.fits(text)
+        || edit.insert.len() > 4096
+    {
         return None;
     }
     let end = edit.range.start.checked_add(edit.insert.len())?;
@@ -25,7 +30,7 @@ pub fn reparse(text: &str, base: &Parse, edit: &Edit, new_text: &str) -> Option<
     );
     let root = base.syntax();
     let leaves = if range.is_empty() {
-        root.token_at_offset(range.start()).collect::<Vec<_>>()
+        crate::syntax::token_at_offset(&root, range.start()).collect::<Vec<_>>()
     } else {
         match root.covering_element(range) {
             NodeOrToken::Token(t) => vec![t],
@@ -119,4 +124,69 @@ pub fn reparse(text: &str, base: &Parse, edit: &Edit, new_text: &str) -> Option<
         return Some(result);
     }
     None
+}
+
+#[cfg(test)]
+mod indexed_selection_tests {
+    use super::*;
+
+    #[test]
+    fn wide_bibliography_empty_word_insertions_match_full_parse() {
+        for newline in ["\n", "\r\n"] {
+            let source = (0..1024)
+                .map(|index| {
+                    format!("@article{{key{index},title={{Researchword}},year=2025}}{newline}")
+                })
+                .collect::<String>();
+            let base = super::super::parse(&source);
+            assert!(base.errors.is_empty(), "{:?}", base.errors);
+            assert_eq!(base.syntax().text().to_string(), source);
+            let retained = base.green.clone();
+            let start = source.rfind("Researchword").unwrap();
+            assert!(base.syntax().children_with_tokens().count() >= 1024);
+            for at in [start, start + 4, start + "Researchword".len()] {
+                let edit = Edit {
+                    range: at..at,
+                    insert: "x".into(),
+                };
+                let text = edit.apply(&source);
+                let spliced = reparse(&source, &base, &edit, &text)
+                    .expect("public empty WORD insertion must splice");
+                let full = super::super::parse(&text);
+                assert!(full.errors.is_empty(), "{:?}", full.errors);
+                assert_eq!(spliced.green, full.green);
+                assert_eq!(spliced.errors, full.errors);
+                assert_eq!(spliced.syntax().text().to_string(), text);
+                assert_eq!(base.green, retained);
+                assert_eq!(base.syntax().text().to_string(), source);
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_bib_lookup_matches_rowan_every_byte_and_subtree_boundary() {
+        let wide = (0..64)
+            .map(|index| {
+                format!("@article{{key{index},title={{é😀 {{nested text}}}},year=2025}}\r\n")
+            })
+            .collect::<String>();
+        for source in [
+            wide.as_str(),
+            "",
+            "@article{é,title={😀",
+            "@string{x=\"é😀\"}\n@comment{a{b}}",
+        ] {
+            let parsed = super::super::parse(source);
+            assert_eq!(parsed.syntax().text().to_string(), source);
+            for node in parsed.syntax().descendants() {
+                let range = node.text_range();
+                for offset in u32::from(range.start())..=u32::from(range.end()) {
+                    let offset = TextSize::from(offset);
+                    let indexed = crate::syntax::token_at_offset(&node, offset).collect::<Vec<_>>();
+                    let reference = node.token_at_offset(offset).collect::<Vec<_>>();
+                    assert_eq!(indexed, reference, "{source:?}: {range:?}, {offset:?}");
+                }
+            }
+        }
+    }
 }

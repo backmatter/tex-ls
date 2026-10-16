@@ -49,11 +49,11 @@
 //! explain why it is inert. Inside a `macrocode` chunk, `%` comments are ordinary
 //! and directives work as everywhere else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rowan::{NodeOrToken, TextRange, TextSize};
 
-use crate::syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
+use crate::syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
 /// Which subsystem a directive turns off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,8 +225,8 @@ fn word_end(s: &str) -> usize {
 /// The byte ranges a file's directives suppress, resolved per axis.
 ///
 /// Ranges are sorted and non-overlapping (touching ones are merged), so a
-/// consumer can test containment with a plain scan and never has to reason
-/// about nesting.
+/// consumer can find the containing predecessor by binary search without
+/// reasoning about nesting.
 #[derive(Debug, Clone, Default)]
 pub struct Suppressions {
     format: Vec<TextRange>,
@@ -262,12 +262,15 @@ impl Suppressions {
         // Regions are keyed by axis *and* rule: a `% tex-ls-lint off` covering
         // every rule is not closed by a `% tex-ls-lint on some-rule`, which
         // speaks for a strictly narrower thing.
-        let mut open: Vec<OpenRegion> = Vec::new();
+        let mut open: HashMap<(u8, Option<String>), OpenRegion> = HashMap::new();
+        let mut targets = SkipTargets::default();
         // End of the most recent directive comment. A region anchor may never
         // reach back past it — see the `Verb::Off` arm.
         let mut prev_directive_end = TextSize::new(0);
 
         for element in root.descendants_with_tokens() {
+            #[cfg(test)]
+            record_constructor_visit();
             let NodeOrToken::Token(token) = element else {
                 continue;
             };
@@ -313,7 +316,7 @@ impl Suppressions {
             match directive.verb {
                 Verb::SkipFile => record(root.text_range(), &directive.rule),
                 Verb::Skip => {
-                    if let Some(range) = skip_target(&token) {
+                    if let Some(range) = targets.resolve(&token) {
                         record(range, &directive.rule);
                     } else {
                         directives[directive_index].outcome = DirectiveOutcome::DanglingSkip;
@@ -322,8 +325,8 @@ impl Suppressions {
                 // A region opens at the same place a `skip` would target: the
                 // next meaningful thing. Anchoring to the raw byte after the
                 // comment instead looks simpler and is wrong — an own-line `%`
-                // binds *forward* into the following construct's `DOC_COMMENT`
-                // (parser decision #9), so that construct begins at the comment,
+                // binds *forward* into the following construct's `DOC_COMMENT`,
+                // so that construct begins at the comment,
                 // ahead of the region, and a consumer testing containment would
                 // find the very block the author meant to cover sticking out of
                 // it. Resolving through the tree also picks up a preceding
@@ -340,29 +343,27 @@ impl Suppressions {
                 // one. The clamp is against directives only, so an ordinary
                 // comment run above the directive is still covered.
                 Verb::Off => {
-                    let start = skip_target(&token)
+                    let start = targets
+                        .resolve(&token)
                         .map(|r| r.start())
                         .unwrap_or_else(|| token.text_range().end())
                         .max(prev_directive_end);
-                    if !open
-                        .iter()
-                        .any(|o| o.axis == directive.axis && o.rule == directive.rule)
-                    {
+                    #[cfg(test)]
+                    record_constructor_visit();
+                    open.entry(region_key(&directive)).or_insert_with(|| {
                         directives[directive_index].outcome = DirectiveOutcome::UnclosedOff;
-                        open.push(OpenRegion {
+                        OpenRegion {
                             axis: directive.axis,
                             rule: directive.rule.clone(),
                             start,
                             directive_index,
-                        });
-                    }
+                        }
+                    });
                 }
                 Verb::On => {
-                    if let Some(i) = open
-                        .iter()
-                        .position(|o| o.axis == directive.axis && o.rule == directive.rule)
-                    {
-                        let region = open.remove(i);
+                    #[cfg(test)]
+                    record_constructor_visit();
+                    if let Some(region) = open.remove(&region_key(&directive)) {
                         directives[region.directive_index].outcome = DirectiveOutcome::Honored;
                         record(
                             TextRange::new(region.start, token.text_range().start()),
@@ -378,7 +379,7 @@ impl Suppressions {
 
         // Unclosed regions run to end of file.
         let eof = root.text_range().end();
-        for region in open {
+        for region in open.into_values() {
             let range = TextRange::new(region.start, eof);
             if region.axis.covers_format() && region.rule.is_none() {
                 format.push(range);
@@ -496,57 +497,91 @@ fn merge(mut ranges: Vec<TextRange>) -> Vec<TextRange> {
     out
 }
 
-/// The range a node-scoped directive covers: the next non-trivia, non-comment
-/// element after `token`, bubbling up through parents whose remaining siblings
-/// are all trivia. A comment bound into a `DOC_COMMENT` targets the whole
-/// construct that owns it, not a sibling — walking forward from such a comment
-/// only ever finds pieces *inside* that construct (its control word, missing its
-/// arguments), never the construct as a whole.
-fn skip_target(token: &SyntaxToken) -> Option<TextRange> {
-    if let Some(parent) = token.parent()
-        && parent.kind() == SyntaxKind::DOC_COMMENT
-    {
-        return Some(parent.parent()?.text_range());
-    }
-    let mut current = token.clone();
-    loop {
-        let parent = current.parent()?;
-        if let Some(range) = first_tex_lsful_after(&parent, &NodeOrToken::Token(current.clone())) {
-            return Some(range);
+fn region_key(directive: &Directive) -> (u8, Option<String>) {
+    let axis = match directive.axis {
+        Axis::Format => 0,
+        Axis::Lint => 1,
+        Axis::Both => 2,
+    };
+    (axis, directive.rule.clone())
+}
+
+/// Cached answers for the first meaningful sibling after each child. Build an
+/// index only for parents reached by an unbound comment; DOC_COMMENT directives
+/// already name their owning construct directly.
+#[derive(Default)]
+struct SkipTargets {
+    siblings: HashMap<SyntaxNode, Vec<Option<TextRange>>>,
+    exhausted: HashMap<SyntaxNode, Option<TextRange>>,
+}
+
+impl SkipTargets {
+    fn resolve(&mut self, token: &SyntaxToken) -> Option<TextRange> {
+        if let Some(parent) = token.parent()
+            && parent.kind() == SyntaxKind::DOC_COMMENT
+        {
+            return Some(parent.parent()?.text_range());
         }
-        let grand = parent.parent()?;
-        if let Some(range) = first_tex_lsful_after(&grand, &NodeOrToken::Node(parent.clone())) {
-            return Some(range);
+        let mut current = NodeOrToken::Token(token.clone());
+        let mut climbed = Vec::new();
+        let result = loop {
+            #[cfg(test)]
+            record_constructor_visit();
+            let Some(parent) = current.parent() else {
+                break None;
+            };
+            let answers = self.siblings.entry(parent.clone()).or_insert_with(|| {
+                let mut answers = Vec::new();
+                let mut unresolved = 0;
+                for element in parent.children_with_tokens() {
+                    #[cfg(test)]
+                    record_constructor_visit();
+                    let index = answers.len();
+                    answers.push(None);
+                    if meaningful_sibling(&element) {
+                        // Each child is filled at most once. The current child
+                        // must await a later meaningful sibling of its own.
+                        answers[unresolved..index].fill(Some(element.text_range()));
+                        unresolved = index;
+                    }
+                }
+                answers
+            });
+            if let Some(range) = answers[current.index()] {
+                break Some(range);
+            }
+            // Every exhausted child shares the answer after its whole parent.
+            // Memoize that ascent too, including a dangling answer, so many EOF
+            // comments in nested malformed groups do not each climb the spine.
+            if let Some(answer) = self.exhausted.get(&parent) {
+                break *answer;
+            }
+            climbed.push(parent.clone());
+            // Ascend with the whole exhausted parent, never its first token:
+            // restarting inside it can target an earlier group on malformed input.
+            current = NodeOrToken::Node(parent);
+        };
+        for parent in climbed {
+            self.exhausted.insert(parent, result);
         }
-        // Guard against a non-progressing climb (a single-child spine).
-        if grand == parent {
-            return None;
-        }
-        current = grand.first_token()?;
+        result
     }
 }
 
-/// The range of the first non-trivia element of `parent` strictly after `after`.
-fn first_tex_lsful_after(
-    parent: &SyntaxNode,
-    after: &NodeOrToken<SyntaxNode, SyntaxToken>,
-) -> Option<TextRange> {
-    let mut past = false;
-    for element in parent.children_with_tokens() {
-        if !past {
-            past = &element == after;
-            continue;
-        }
-        match &element {
-            NodeOrToken::Token(t)
-                if matches!(
-                    t.kind(),
-                    SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
-                ) => {}
-            _ => return Some(element.text_range()),
-        }
-    }
-    None
+fn meaningful_sibling(element: &SyntaxElement) -> bool {
+    !matches!(element, NodeOrToken::Token(token) if matches!(
+        token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+    ))
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTIVE_CONSTRUCTOR_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_constructor_visit() {
+    DIRECTIVE_CONSTRUCTOR_VISITS.with(|visits| visits.set(visits.get() + 1));
 }
 
 #[cfg(test)]
@@ -970,5 +1005,177 @@ mod tests {
     #[test]
     fn clean_document_has_no_suppressions() {
         assert!(suppressions_of("\\alpha\n% an ordinary comment\n\\beta\n").is_empty());
+    }
+    #[test]
+    fn malformed_trailing_skip_never_targets_an_earlier_group() {
+        for source in [
+            "\\textbf{one ... % tex-ls-lint skip ellipsis\n",
+            "{{one ... % tex-ls-lint skip ellipsis\n",
+        ] {
+            let parsed = parse(source);
+            assert!(!parsed.errors.is_empty(), "actual unclosed groups");
+            let root = parsed.syntax();
+            assert_eq!(root.to_string(), source);
+            let comment = root
+                .descendants_with_tokens()
+                .filter_map(NodeOrToken::into_token)
+                .find(|token| token.kind() == SyntaxKind::COMMENT)
+                .unwrap();
+            assert_eq!(comment.parent().unwrap().kind(), SyntaxKind::GROUP);
+            let map = Suppressions::build(&root);
+            assert_eq!(map.directives().len(), 1);
+            assert_eq!(
+                map.directives()[0].outcome,
+                DirectiveOutcome::DanglingSkip,
+                "{source:?}"
+            );
+            assert!(map.is_empty(), "no construct follows the directive");
+        }
+    }
+
+    #[test]
+    fn trailing_directive_target_construction_has_bounded_visits() {
+        const COUNT: usize = 1024;
+        let source = "% tex-ls-lint skip ellipsis\n".repeat(COUNT);
+        let parsed = parse(&source);
+        assert!(parsed.errors.is_empty());
+        let root = parsed.syntax();
+        assert_eq!(root.to_string(), source);
+        let elements = root.descendants_with_tokens().count();
+        DIRECTIVE_CONSTRUCTOR_VISITS.with(|visits| visits.set(0));
+        let map = Suppressions::build(&root);
+        let visits = DIRECTIVE_CONSTRUCTOR_VISITS.with(std::cell::Cell::get);
+        assert_eq!(map.directives().len(), COUNT);
+        assert!(map.is_empty());
+        assert!(
+            map.directives()
+                .iter()
+                .all(|located| located.outcome == DirectiveOutcome::DanglingSkip)
+        );
+        assert!(
+            visits <= elements * 4,
+            "directive targets rescan prefixes/suffixes: {visits} visits for {elements} elements"
+        );
+    }
+
+    #[test]
+    fn distinct_directive_open_keys_have_bounded_constructor_visits() {
+        const COUNT: usize = 1024;
+        let source: String = (0..COUNT)
+            .map(|index| format!("% tex-ls-lint off custom-{index}\n\\bf word{index}\n"))
+            .collect();
+        let parsed = parse(&source);
+        assert!(parsed.errors.is_empty());
+        let root = parsed.syntax();
+        assert_eq!(root.to_string(), source);
+        let elements = root.descendants_with_tokens().count();
+        DIRECTIVE_CONSTRUCTOR_VISITS.with(|visits| visits.set(0));
+        let map = Suppressions::build(&root);
+        let visits = DIRECTIVE_CONSTRUCTOR_VISITS.with(std::cell::Cell::get);
+        assert_eq!(map.lint_rule_ranges().len(), COUNT);
+        assert_eq!(map.directives().len(), COUNT);
+        assert!(
+            map.directives()
+                .iter()
+                .all(|located| located.outcome == DirectiveOutcome::UnclosedOff)
+        );
+        for index in 0..COUNT {
+            let at = TextSize::from(source.find(&format!("\\bf word{index}\n")).unwrap() as u32);
+            let ranges = &map.lint_rule_ranges()[&format!("custom-{index}")];
+            assert_eq!(ranges.len(), 1);
+            assert!(ranges[0].contains(at));
+            assert_eq!(ranges[0].end(), root.text_range().end());
+        }
+        assert!(
+            visits <= elements * 4,
+            "open directive keys rescan regions: {visits} visits for {elements} elements"
+        );
+    }
+
+    #[test]
+    fn nested_trailing_directive_climbs_have_bounded_visits() {
+        const COUNT: usize = 1024;
+        let source = format!(
+            "{}one\n{}",
+            "{".repeat(32),
+            "% tex-ls-lint skip ellipsis\n".repeat(COUNT)
+        );
+        let parsed = parse(&source);
+        assert_eq!(parsed.errors.len(), 32);
+        let root = parsed.syntax();
+        assert_eq!(root.to_string(), source);
+        let elements = root.descendants_with_tokens().count();
+        DIRECTIVE_CONSTRUCTOR_VISITS.with(|visits| visits.set(0));
+        let map = Suppressions::build(&root);
+        let visits = DIRECTIVE_CONSTRUCTOR_VISITS.with(std::cell::Cell::get);
+        assert_eq!(map.directives().len(), COUNT);
+        assert!(map.is_empty());
+        assert!(
+            map.directives()
+                .iter()
+                .all(|located| located.outcome == DirectiveOutcome::DanglingSkip)
+        );
+        assert!(
+            visits <= elements * 8,
+            "directive ascents repeat exhausted parents: {visits} visits for {elements} elements"
+        );
+    }
+
+    #[test]
+    fn cached_directive_targets_match_forward_sibling_oracle() {
+        fn reference(token: &SyntaxToken) -> Option<TextRange> {
+            if let Some(parent) = token.parent()
+                && parent.kind() == SyntaxKind::DOC_COMMENT
+            {
+                return Some(parent.parent()?.text_range());
+            }
+            let mut current = NodeOrToken::Token(token.clone());
+            loop {
+                let mut sibling = current.next_sibling_or_token();
+                while let Some(element) = sibling {
+                    if !matches!(&element, NodeOrToken::Token(token) if matches!(
+                        token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::NEWLINE | SyntaxKind::COMMENT
+                    )) {
+                        return Some(element.text_range());
+                    }
+                    sibling = element.next_sibling_or_token();
+                }
+                current = NodeOrToken::Node(current.parent()?);
+            }
+        }
+        for source in [
+            "first % tex-ls-lint skip ellipsis\nsecond\n",
+            "% tex-ls-format off\n% note\n\\textbf{value}\n% tex-ls-format on\n",
+            "{value % tex-ls-lint skip ellipsis\n} next\n",
+            "\\textbf{{value % tex-ls-lint skip ellipsis\n}} next\n",
+            "\\begin{foo}\nvalue % tex-ls-lint skip ellipsis\n\\end{foo}\nnext\n",
+            "\\textbf{one ... % tex-ls-lint skip ellipsis\n",
+            "{{one ... % tex-ls-lint skip ellipsis\n% tex-ls-lint skip ellipsis\n",
+        ] {
+            for dtx in [false, true] {
+                let parsed = parse_with_flavor(
+                    source,
+                    LexConfig {
+                        flavor: LatexFlavor::Package,
+                        dtx,
+                    },
+                );
+                let root = parsed.syntax();
+                assert_eq!(root.to_string(), source);
+                let mut targets = SkipTargets::default();
+                let comments: Vec<_> = root
+                    .descendants_with_tokens()
+                    .filter_map(NodeOrToken::into_token)
+                    .filter(|token| token.kind() == SyntaxKind::COMMENT)
+                    .collect();
+                for token in comments.iter().chain(comments.iter().rev()) {
+                    assert_eq!(
+                        targets.resolve(token),
+                        reference(token),
+                        "{source:?}, dtx={dtx}"
+                    );
+                }
+            }
+        }
     }
 }

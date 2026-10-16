@@ -92,11 +92,7 @@ fn resolve_with_kpsewhich(query: &Path, base_dir: Option<&Path>) -> Option<PathB
     if !output.status.success() {
         return None;
     }
-    let found = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if found.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(found);
+    let path = PathBuf::from(crate::texmf::native_path_output(&output.stdout)?);
     let path = if path.is_absolute() {
         path
     } else {

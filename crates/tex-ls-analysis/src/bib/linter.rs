@@ -11,7 +11,7 @@
 //!
 //! Like the bib formatter mirrors the LaTeX formatter, this is a parallel module
 //! rather than a generalization of [`crate::linter::rules::Rule`] — "copy now,
-//! extract later" (`AGENTS.md`). A future shared linter-core crate parameterized
+//! extract later". A future shared linter-core crate parameterized
 //! over kind + context would lift both sides mechanically.
 //!
 //! **Suppression** is carried in `@comment{tex-ls-lint …}` entries (bib has no
@@ -38,3 +38,6 @@ pub use suppression::BibSuppressionMap;
 // The diagnostic surface is shared with the LaTeX linter; re-export it here so bib
 // callers don't reach across into `crate::linter`.
 pub use crate::linter::{Applicability, Diagnostic, Fix, FixOutcome, Severity, apply_fixes};
+
+#[cfg(test)]
+pub(crate) mod test_support;

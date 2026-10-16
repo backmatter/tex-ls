@@ -1,5 +1,20 @@
 //! Actions operations.
-use super::*;
+use crate::{
+    code_action,
+    convert::path_to_uri,
+    diagnostics::lint_findings,
+    fix_all,
+    navigation::proved_environment_pair,
+    workspace_edits::{finalize_rename, push_edit},
+};
+use lsp_types::{CodeActionKind, CodeActionResponse, Range, Uri};
+use std::{collections::HashMap, path::Path};
+use tex_ls_analysis::{
+    incremental::Analysis,
+    linter::RuleSelection,
+    source::FileKind,
+    text::{PositionEncoding, TextBuffer},
+};
 
 #[allow(clippy::too_many_arguments)]
 pub fn compute_code_actions(
@@ -51,6 +66,9 @@ pub fn compute_code_actions(
         Vec::new()
     };
     if latex_rules && code_action_kind_requested(&CodeActionKind::QuickFix, only) {
+        actions.extend(code_action::load_package::actions(
+            snapshot, path, range, &findings, enc,
+        ));
         actions.extend(code_action::unknown_command_ignore_actions(
             snapshot, path, uri, text, range, &findings,
         ));

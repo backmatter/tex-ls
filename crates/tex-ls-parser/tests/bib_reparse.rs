@@ -8,6 +8,9 @@ fn field_edits_preserve_errors_and_unicode_offsets() {
         "@string{journal = other}\n@article{b,title=journal}",
         "free text\n@article{a, title = \"text\"}\n",
         "@article{a,ti\n@article{b,au}",
+        "@string{}\n@article{b,title={A}}",
+        "@preamble{}\n@article{b,title={A}}",
+        "@misc{k title={T}}\n@misc{b,title={A}}",
     ] {
         let base = bib::parse(source);
         let mut landed = 0;
@@ -45,6 +48,18 @@ fn entry_type_and_stale_transform_decline() {
         insert: "title".into(),
     };
     assert!(bib::reparse::reparse(source, &base, &edit, "unrelated").is_none());
+}
+
+#[test]
+fn stale_base_tree_length_declines_before_indexed_lookup() {
+    let base = bib::parse("@misc{a}");
+    let source = "@article{key,title={long text}}";
+    let at = source.find("text").unwrap();
+    let edit = Edit {
+        range: at..at + 1,
+        insert: "X".into(),
+    };
+    assert!(bib::reparse::reparse(source, &base, &edit, &edit.apply(source)).is_none());
 }
 
 #[test]

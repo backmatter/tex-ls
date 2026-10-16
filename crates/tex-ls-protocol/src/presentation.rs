@@ -39,6 +39,9 @@ impl Default for OutlineOptions {
 pub struct HintOptions {
     pub definitions: bool,
     pub references: bool,
+    pub source_context: bool,
+    pub pages: bool,
+    pub names: bool,
     pub max_length: usize,
 }
 impl Default for HintOptions {
@@ -46,6 +49,9 @@ impl Default for HintOptions {
         Self {
             definitions: true,
             references: true,
+            source_context: false,
+            pages: false,
+            names: false,
             max_length: 32,
         }
     }
@@ -59,3 +65,6 @@ impl HintOptions {
         }
     }
 }
+
+/// Shared signature prototypes and descriptive facts.
+pub mod signatures;

@@ -1,5 +1,38 @@
 //! Completion operations over a captured analysis source.
-use super::*;
+mod citations;
+pub(super) mod context;
+mod edits;
+pub mod rank;
+pub mod resolve;
+
+use self::{
+    context as completion_context, edits as completion_edits, rank as completion_rank,
+    resolve as completion_resolve,
+};
+use crate::convert::{file_kind_for, uri_to_fs_path, uri_to_path};
+use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Position, Uri};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
+use tex_ls_analysis::{
+    bib::{
+        completion::{
+            BibCandidateKind, BibCompletionCandidate, BibCompletionContext, bib_candidates,
+            classify_bib_context,
+        },
+        semantic::Model as BibModel,
+    },
+    completion::{CandidateKind, CompletionCandidate, CompletionContext, FileArgKind},
+    incremental::Analysis,
+    project::{ResolvedCitations, ResolvedLabels, texmf::TexmfIndex},
+    source::FileKind,
+    text::PositionEncoding,
+};
+use tex_ls_parser::{
+    declarations::ResolvedDeclarations,
+    semantic::{SemanticModel, SignatureDb},
+};
 
 pub fn compute_completion(
     snapshot: &Analysis,
@@ -7,6 +40,17 @@ pub fn compute_completion(
     path: &Path,
     enc: PositionEncoding,
     position: Position,
+) -> lsp_types::CompletionList {
+    compute_completion_impl(snapshot, uri, path, enc, position, true)
+}
+
+fn compute_completion_impl(
+    snapshot: &Analysis,
+    uri: &Uri,
+    path: &Path,
+    enc: PositionEncoding,
+    position: Position,
+    use_bounded: bool,
 ) -> lsp_types::CompletionList {
     let Some(file) = snapshot.lookup_file(path) else {
         return completion_rank::rank(
@@ -20,20 +64,36 @@ pub fn compute_completion(
     let offset = snapshot
         .file_line_index(file, enc)
         .offset_at(position.line, position.character);
-    let mut items = if file_kind_for(path) == FileKind::Bib {
-        compute_bib_completion(snapshot, path, offset)
+    let context = (file_kind_for(path) != FileKind::Bib)
+        .then(|| classify_tex_context(snapshot, path, offset));
+    let bounded = use_bounded
+        .then(|| citations::for_context(snapshot, path, offset, context.as_ref()))
+        .flatten();
+    let (mut list, deferred_label_details) = if let Some(list) = bounded {
+        (list, false)
     } else {
-        compute_tex_completion_inner(snapshot, uri, path, offset, true)
+        let mut items = if let Some(context) = &context {
+            compute_tex_completion_with_context(snapshot, uri, path, offset, true, context.clone())
+        } else {
+            compute_bib_completion(snapshot, path, offset)
+        };
+        let (query, relevance, recompute, deferred_label_details) =
+            completion_context::prepare_with_context(
+                snapshot,
+                path,
+                offset,
+                context.as_ref(),
+                &mut items,
+            );
+        let list = completion_rank::rank(
+            items,
+            &query,
+            &relevance,
+            completion_rank::RESULT_LIMIT,
+            recompute,
+        );
+        (list, deferred_label_details)
     };
-    let (query, relevance, recompute, deferred_label_details) =
-        completion_context::prepare(snapshot, path, offset, &mut items);
-    let mut list = completion_rank::rank(
-        items,
-        &query,
-        &relevance,
-        completion_rank::RESULT_LIMIT,
-        recompute,
-    );
     if deferred_label_details {
         completion_context::enrich_label_details(snapshot, path, &mut list.items);
     }
@@ -48,7 +108,14 @@ pub fn compute_completion(
             data.insert("storageEpoch".into(), epoch.into());
         }
     }
-    completion_edits::attach(snapshot, path, offset, enc, &mut list.items);
+    completion_edits::attach_with_context(
+        snapshot,
+        path,
+        offset,
+        enc,
+        context.as_ref(),
+        &mut list.items,
+    );
     list
 }
 
@@ -62,6 +129,17 @@ pub fn compute_bib_completion(
         return Vec::new();
     };
     let root = snapshot.parsed_bib_tree(file);
+    if tex_ls_analysis::bib::completion::dependency_key_completion(&root, offset).is_some()
+        && tex_ls_analysis::bib::completion::dependency_key_completion_for_backend(
+            &root,
+            offset,
+            snapshot.resolve_citations().supports_aliases(path),
+        )
+        .is_some()
+    {
+        return cite_completion_items(snapshot, snapshot.resolve_citations(), path);
+    }
+
     if tex_ls_analysis::bib::completion::tex_command_prefix(&root, offset).is_some() {
         let prefix = String::new();
         let mut items: Vec<_> = tex_ls_analysis::completion::candidates_with_declarations(
@@ -102,10 +180,32 @@ pub fn compute_bib_completion(
         BibCompletionContext::ValueMacro { .. } => snapshot.bib_semantic_model(file),
         _ => &empty,
     };
-    bib_candidates(&ctx, model)
+    let mut items: Vec<_> = bib_candidates(&ctx, model)
         .into_iter()
         .map(bib_candidate_to_item)
-        .collect()
+        .collect();
+    if matches!(ctx, BibCompletionContext::ValueMacro { .. }) {
+        let mut seen: HashSet<_> = items
+            .iter()
+            .map(|item| item.label.to_ascii_lowercase())
+            .collect();
+        for path in snapshot.resolve_citations().bibliography_resources(path) {
+            let Some(file) = snapshot.lookup_file(path) else {
+                continue;
+            };
+            for site in snapshot.bib_semantic_model(file).string_defs() {
+                if seen.insert(site.name.to_string()) {
+                    items.push(CompletionItem {
+                        label: site.name.to_string(),
+                        kind: Some(CompletionItemKind::Constant),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+    }
+    items
 }
 
 pub fn compute_tex_completion(
@@ -117,6 +217,30 @@ pub fn compute_tex_completion(
     compute_tex_completion_inner(snapshot, uri, path, offset, false)
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEX_CLASSIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn classify_tex_context(
+    snapshot: &Analysis,
+    path: &Path,
+    offset: usize,
+) -> CompletionContext {
+    #[cfg(test)]
+    TEX_CLASSIFICATIONS.with(|count| count.set(count.get() + 1));
+    let Some(file) = snapshot.lookup_file(path) else {
+        return CompletionContext::None;
+    };
+    let root = snapshot.parsed_tree(file);
+    tex_ls_analysis::completion::classify_context_with_roles(
+        &root,
+        offset,
+        snapshot.declarations_for(path),
+        || snapshot.file_roles(file),
+    )
+}
+
 fn compute_tex_completion_inner(
     snapshot: &Analysis,
     uri: &Uri,
@@ -124,19 +248,34 @@ fn compute_tex_completion_inner(
     offset: usize,
     filter_candidates: bool,
 ) -> Vec<CompletionItem> {
+    let context = classify_tex_context(snapshot, path, offset);
+    compute_tex_completion_with_context(snapshot, uri, path, offset, filter_candidates, context)
+}
+
+fn compute_tex_completion_with_context(
+    snapshot: &Analysis,
+    uri: &Uri,
+    path: &Path,
+    offset: usize,
+    filter_candidates: bool,
+    mut ctx: CompletionContext,
+) -> Vec<CompletionItem> {
     let Some(file) = snapshot.lookup_file(path) else {
         return Vec::new();
     };
     let root = snapshot.parsed_tree(file);
     let declared = snapshot.declarations_for(path);
-    let mut ctx =
-        tex_ls_analysis::completion::classify_context_with_roles(&root, offset, declared, || {
-            tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
-                &root,
-                snapshot.definition_sites(file),
-                snapshot.file_operand_contexts(file),
-            )
-        });
+    let key_namespace = if matches!(
+        ctx,
+        CompletionContext::LabelDefinition { .. }
+            | CompletionContext::LabelRef { .. }
+            | CompletionContext::CitationKey { .. }
+            | CompletionContext::GlossaryKey { .. }
+    ) {
+        tex_ls_analysis::completion::key_prefix_at_offset(&root, offset, declared).unwrap_or("")
+    } else {
+        ""
+    };
     let query = completion_context::prefix(&ctx).to_owned();
     completion_context::clear_prefix(&mut ctx);
     let matcher =
@@ -150,9 +289,10 @@ fn compute_tex_completion_inner(
     } = &mut ctx
     {
         if !declared.options.contains_key(owner)
-            && crate::hover::lookup_command(snapshot.editor_signatures(file), owner).is_some_and(
-                |(_, provenance)| matches!(provenance, crate::hover::Provenance::Document),
-            )
+            && tex_ls_analysis::hover::lookup_command(snapshot.editor_signatures(file), owner)
+                .is_some_and(|(_, provenance)| {
+                    matches!(provenance, tex_ls_analysis::hover::Provenance::Document)
+                })
         {
             return Vec::new();
         }
@@ -192,21 +332,29 @@ fn compute_tex_completion_inner(
         }
     }
     let path = snapshot.file_path(file);
-    match ctx {
+    let mut items = match ctx {
         CompletionContext::FilePath { ref prefix, kind } => {
             let Some(context) = snapshot.file_path_context(file) else {
                 return Vec::new();
             };
+            let command = tex_ls_analysis::completion::cursor_ancestors(&root, offset)
+                .into_iter()
+                .filter(|node| node.kind() == tex_ls_parser::syntax::SyntaxKind::COMMAND)
+                .min_by_key(|node| node.text_range().len());
+            let Some(command) = command else {
+                return Vec::new();
+            };
+            let roles = snapshot.file_roles(file);
             let dirs: Vec<_> = context
                 .bases
                 .iter()
                 .flat_map(|base| {
-                    tex_ls_analysis::external::completion_directories(
-                        &root,
-                        offset,
+                    tex_ls_analysis::external::command_directories_with_roles(
+                        &command,
                         Some(base),
                         Some(&context.root_directory),
                         &context.graphics,
+                        roles,
                     )
                 })
                 .collect();
@@ -285,12 +433,32 @@ fn compute_tex_completion_inner(
                 snapshot,
                 matcher.as_ref(),
             );
-            if matches!(ctx, CompletionContext::CommandName { .. }) {
+            if matches!(
+                ctx,
+                CompletionContext::CommandName { .. } | CompletionContext::EnvironmentName { .. }
+            ) {
                 let symbols = snapshot.editor_symbols(file);
-                let unknown: Vec<_> = symbols
-                    .commands
+                let environment = matches!(ctx, CompletionContext::EnvironmentName { .. });
+                let (names, kind) = if environment {
+                    (
+                        &symbols.environments,
+                        tex_ls_analysis::completion::CandidateKind::Environment,
+                    )
+                } else {
+                    (
+                        &symbols.commands,
+                        tex_ls_analysis::completion::CandidateKind::Command,
+                    )
+                };
+                let unknown: Vec<_> = names
                     .iter()
-                    .filter(|name| symbols.signatures.command(name).is_none())
+                    .filter(|name| {
+                        if environment {
+                            symbols.signatures.environment(name).is_none()
+                        } else {
+                            symbols.signatures.command(name).is_none()
+                        }
+                    })
                     .filter(|name| {
                         matcher
                             .as_ref()
@@ -303,33 +471,7 @@ fn compute_tex_completion_inner(
                     items.push(candidate_to_item(
                         CompletionCandidate {
                             label: name.clone(),
-                            kind: tex_ls_analysis::completion::CandidateKind::Command,
-                            insert_text: None,
-                            snippet: false,
-                        },
-                        Some(path),
-                    ));
-                }
-            }
-            if matches!(ctx, CompletionContext::EnvironmentName { .. }) {
-                let symbols = snapshot.editor_symbols(file);
-                let unknown: Vec<_> = symbols
-                    .environments
-                    .iter()
-                    .filter(|name| symbols.signatures.environment(name).is_none())
-                    .filter(|name| {
-                        matcher
-                            .as_ref()
-                            .is_none_or(|m| m.score_text(name).is_some())
-                    })
-                    .collect();
-                let replaced: HashSet<_> = unknown.iter().map(|name| name.as_str()).collect();
-                items.retain(|item| !replaced.contains(item.label.as_str()));
-                for name in unknown {
-                    items.push(candidate_to_item(
-                        CompletionCandidate {
-                            label: name.clone(),
-                            kind: tex_ls_analysis::completion::CandidateKind::Environment,
+                            kind,
                             insert_text: None,
                             snippet: false,
                         },
@@ -339,65 +481,31 @@ fn compute_tex_completion_inner(
             }
             items
         }
+    };
+    if !key_namespace.is_empty() {
+        items.retain(|item| {
+            item.label
+                .strip_prefix(key_namespace)
+                .is_some_and(tex_ls_parser::declarations::is_literal_key_suffix)
+        });
+        for item in &mut items {
+            item.insert_text = item.label.strip_prefix(key_namespace).map(str::to_owned);
+        }
     }
+    items
 }
 
 /// Cite-key candidates: every entry in the citing file's bibliography namespace,
-/// deduped by folded key (first definer wins). The list is *not* prefix-filtered —
+/// deduped by backend key identity (first definer wins). The list is *not* prefix-filtered —
 /// each item carries full expanded key/title/author/editor search fields for the
 /// shared ranker before limiting. Mirrors
-/// [`resolve_citation_locations`] but collects all entries rather than matching a target.
+/// [`crate::navigation::resolve_citation_locations`] but collects all entries rather than matching a target.
 pub fn cite_completion_items(
     snapshot: &Analysis,
     citations: &ResolvedCitations,
     lint_path: &Path,
 ) -> Vec<CompletionItem> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut items: Vec<CompletionItem> = Vec::new();
-    for bib_path in citations.bib_definers(lint_path) {
-        let Some(file) = snapshot.lookup_file(bib_path) else {
-            continue;
-        };
-        for (key, search) in snapshot.bib_search_fields(file) {
-            // Dedup case-insensitively (BibTeX folds key case); the first definer wins.
-            if !seen.insert(key.to_lowercase()) {
-                continue;
-            }
-            items.push(CompletionItem {
-                // Carry the citing file + key so `completionItem/resolve` can re-walk
-                // the bibliography namespace and attach the entry card lazily.
-                data: completion_resolve::CompletionResolveData::Citation {
-                    lint_path: lint_path.to_path_buf(),
-                    key: key.to_string(),
-                }
-                .into_value(),
-                label: key.to_string(),
-                filter_text: Some(search.clone()),
-                kind: Some(CompletionItemKind::Reference),
-                ..Default::default()
-            });
-        }
-    }
-    for path in citations.namespace_members(lint_path) {
-        for (name, body) in crate::source_cards::manual_bodies(snapshot, path) {
-            if seen.insert(name.to_lowercase()) {
-                items.push(CompletionItem {
-                    label: name.clone(),
-                    kind: Some(CompletionItemKind::Reference),
-                    detail: Some("Manual bibliography item".into()),
-                    filter_text: Some(format!("{name} {body}")),
-                    data: completion_resolve::CompletionResolveData::Citation {
-                        lint_path: lint_path.to_owned(),
-                        key: name,
-                    }
-                    .into_value(),
-                    ..Default::default()
-                });
-            }
-        }
-    }
-    items.sort_by(|a, b| a.label.cmp(&b.label));
-    items
+    citations::exhaustive(snapshot, citations, lint_path)
 }
 
 /// Glossary/acronym key candidates: every `\newglossaryentry`/`\newacronym` key
@@ -411,28 +519,29 @@ pub fn glossary_completion_items(
     lint_path: &Path,
     prefix: &str,
 ) -> Vec<CompletionItem> {
-    let mut keys: Vec<SmolStr> = Vec::new();
-    for member in labels.namespace_members(lint_path) {
-        let Some(file) = snapshot.lookup_file(member) else {
+    let mut items = std::collections::BTreeMap::new();
+    for path in labels.namespace_members(lint_path) {
+        let Some(file) = snapshot.lookup_file(path) else {
             continue;
         };
-        keys.extend(
-            snapshot
-                .file_glossary_keys(file)
-                .iter()
-                .filter(|key| key.starts_with(prefix))
-                .cloned(),
-        );
+        for (key, search) in snapshot.glossary_search_fields(file) {
+            if !key.starts_with(prefix) {
+                continue;
+            }
+            items.entry(key.clone()).or_insert_with(|| CompletionItem {
+                label: key.to_string(),
+                filter_text: Some(search.clone()),
+                kind: Some(CompletionItemKind::Reference),
+                data: completion_resolve::CompletionResolveData::Glossary {
+                    file: lint_path.into(),
+                    key: key.to_string(),
+                }
+                .into_value(),
+                ..Default::default()
+            });
+        }
     }
-    keys.sort();
-    keys.dedup();
-    keys.into_iter()
-        .map(|key| CompletionItem {
-            label: key.to_string(),
-            kind: Some(CompletionItemKind::Reference),
-            ..Default::default()
-        })
-        .collect()
+    items.into_values().collect()
 }
 
 /// Map a neutral [`BibCompletionCandidate`] onto an `lsp_types::CompletionItem`.
@@ -451,7 +560,7 @@ pub fn bib_candidate_to_item(candidate: BibCompletionCandidate) -> CompletionIte
 
 /// Turn a classified [`CompletionContext`] into LSP items. Name/label contexts go
 /// through the pure [`tex_ls_analysis::completion::candidates`]; a file-path context reads
-/// the document's directory off disk (see [`file_completion_items`]).
+/// the document's supplied directory observations (see [`file_completion_items`]).
 pub(crate) fn build_completion_items(
     ctx: &CompletionContext,
     sigs: &SignatureDb,
@@ -707,7 +816,176 @@ pub fn has_extension(name: &str, exts: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convert::path_to_uri;
     use tex_ls_analysis::incremental::IncrementalDatabase;
+
+    #[test]
+    fn prefixed_wrapper_completion_matches_canonical_names_and_inserts_suffix() {
+        let path = Path::new(fixture_path!("/completion/wrappers.tex"));
+        let uri = path_to_uri(path).unwrap();
+        let mut db = IncrementalDatabase::default();
+        let declarations: tex_ls_parser::declarations::Declarations = serde_json::from_str(r#"{"commands":{"defkey":{"like":"label","argument-index":1,"prefix":"sec:"},"usekey":{"like":"ref","argument-index":1,"prefix":"sec:"}}}"#).unwrap();
+        db.set_declarations(declarations.resolve().unwrap());
+        let source = r"\defkey{ignored}{intro}\label{other}\usekey{ignored}{in}";
+        let file = db.apply_change(path, source, None);
+        let snapshot = db.snapshot();
+        let offset = source.len() - 1;
+        let (line, character) = snapshot
+            .file_line_index(file, PositionEncoding::Utf16)
+            .position(offset);
+        let result = compute_completion(
+            &snapshot,
+            &uri,
+            path,
+            PositionEncoding::Utf16,
+            Position::new(line, character),
+        );
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.items[0].label, "sec:intro");
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &result.items[0].text_edit
+        else {
+            panic!("replacement");
+        };
+        assert_eq!(edit.new_text, "intro");
+        let index = snapshot.file_line_index(file, PositionEncoding::Utf16);
+        let start = index.offset_at(edit.range.start.line, edit.range.start.character);
+        let end = index.offset_at(edit.range.end.line, edit.range.end.character);
+        assert_eq!(&source[start..end], "in");
+    }
+
+    #[test]
+    fn prefixed_completion_only_inserts_literal_suffixes() {
+        let path = Path::new(fixture_path!("/completion/wrappers.tex"));
+        let uri = path_to_uri(path).unwrap();
+        let mut db = IncrementalDatabase::default();
+        let declarations: tex_ls_parser::declarations::Declarations =
+            serde_json::from_str(r#"{"commands":{"wrapper":{"like":"ref","prefix":"sec:"}}}"#)
+                .unwrap();
+        db.set_declarations(declarations.resolve().unwrap());
+        let source = "\\label{sec:literal}\\label{sec:two words}\\label{sec:tab\tkey}\\label{sec:active~}\\label{sec:bracket[key]}\\wrapper{}";
+        let file = db.apply_change(path, source, None);
+        let snapshot = db.snapshot();
+        let (line, character) = snapshot
+            .file_line_index(file, PositionEncoding::Utf16)
+            .position(source.len() - 1);
+        let result = compute_completion(
+            &snapshot,
+            &uri,
+            path,
+            PositionEncoding::Utf16,
+            Position::new(line, character),
+        );
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            ["sec:literal"]
+        );
+        let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &result.items[0].text_edit
+        else {
+            panic!("replacement");
+        };
+        assert_eq!(edit.new_text, "literal");
+    }
+
+    #[test]
+    fn bibliography_dependency_completion_filters_and_replaces_one_literal_key() {
+        let path = Path::new(fixture_path!("/completion/dependencies.bib"));
+        let uri = path_to_uri(path).unwrap();
+        for value in [
+            "{pa|per}",
+            "{ | }",
+            "{pa|",
+            "\"pa|per\"",
+            "{other, pa|per , last}",
+        ] {
+            let fixture = format!(
+                "@misc{{paper,title={{A}}}}\n@misc{{other,title={{B}}}}\n@misc{{child,related={value}}}"
+            );
+            let offset = fixture.find('|').unwrap();
+            let source = fixture.replace('|', "");
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(
+                &path.with_extension("tex"),
+                r"\documentclass{article}\usepackage{biblatex}\addbibresource{dependencies.bib}",
+                None,
+            );
+            let file = db.apply_change(path, source.as_str(), None);
+            let snapshot = db.snapshot();
+            let (line, character) = snapshot
+                .file_line_index(file, PositionEncoding::Utf16)
+                .position(offset);
+            let result = compute_completion(
+                &snapshot,
+                &uri,
+                path,
+                PositionEncoding::Utf16,
+                Position::new(line, character),
+            );
+            let item = result
+                .items
+                .iter()
+                .find(|item| item.label == "paper")
+                .expect("entry candidate");
+            let Some(lsp_types::CompletionItemTextEdit::TextEdit(edit)) = &item.text_edit else {
+                panic!("exact replacement edit");
+            };
+            let index = snapshot.file_line_index(file, PositionEncoding::Utf16);
+            let start = index.offset_at(edit.range.start.line, edit.range.start.character);
+            let end = index.offset_at(edit.range.end.line, edit.range.end.character);
+            let expected = if value.contains("per") {
+                "paper"
+            } else if value.contains("pa|") {
+                "pa"
+            } else {
+                ""
+            };
+            assert_eq!(&source[start..end], expected, "{value}");
+            assert_eq!(edit.new_text, "paper");
+            if !value.contains(" | ") {
+                assert!(
+                    result.items.iter().all(|item| item.label != "other"),
+                    "query filters {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn response_reuses_one_classification_for_candidates_ranking_and_edits() {
+        let path = Path::new(fixture_path!("/completion/shared-context.tex"));
+        let uri = path_to_uri(path).unwrap();
+        for source in [
+            r"\label{label}\ref{lab}",
+            r"\bibitem{paper}\cite{pap}",
+            r"\input{chapter}",
+            r"\includegraphics[wid",
+            r"\sec",
+        ] {
+            let mut db = IncrementalDatabase::default();
+            db.apply_change(path, source, None);
+            let snapshot = db.snapshot();
+            let offset = source.len() - usize::from(source.ends_with('}'));
+            let (line, character) = snapshot
+                .file_line_index(snapshot.lookup_file(path).unwrap(), PositionEncoding::Utf16)
+                .position(offset);
+            TEX_CLASSIFICATIONS.with(|count| count.set(0));
+            let _ = compute_completion(
+                &snapshot,
+                &uri,
+                path,
+                PositionEncoding::Utf16,
+                Position::new(line, character),
+            );
+            assert_eq!(
+                TEX_CLASSIFICATIONS.with(std::cell::Cell::get),
+                1,
+                "{source}"
+            );
+        }
+    }
 
     #[test]
     fn deferred_label_details_match_eager_full_responses_with_long_titles_and_eqref() {

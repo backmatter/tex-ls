@@ -836,7 +836,7 @@ mod tests {
         );
     }
 
-    // --- declarations (`AGENTS.md` decision #12)
+    // --- declarations
     //
     // The type and its wire spellings are tested in `tex_ls_parser::declarations`;
     // what these pin is the *TOML* surface, which that crate cannot see (`toml` is

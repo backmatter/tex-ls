@@ -1,7 +1,13 @@
 //! Acquire explicit fixture observations before protocol computations run.
-use super::*;
-use tex_ls_analysis::external::*;
-use tex_ls_analysis::incremental::IncrementalDatabase;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+use tex_ls_analysis::{
+    external::*,
+    incremental::{Analysis, IncrementalDatabase},
+    project::texmf::TexmfIndex,
+};
 #[derive(Default)]
 pub struct TestHost {
     db: IncrementalDatabase,

@@ -1,4 +1,9 @@
-use super::*;
+use crate::lsp::{settings::EditorSettings, state::GlobalState};
+use crossbeam_channel::{Receiver, Sender, never, unbounded};
+use lsp_server::{Connection, Message, Request, RequestId};
+use lsp_types::{Position, Range, Request as _, ShowDocumentParams, ShowDocumentRequest};
+use std::{path::PathBuf, sync::Arc};
+use tex_ls_protocol::convert::path_to_uri;
 
 /// A bound inverse-search listener and the thread parked in its accept loop.
 pub(super) struct IpcHandle {

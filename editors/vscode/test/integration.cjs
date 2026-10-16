@@ -41,7 +41,10 @@ async function showSource(document, column) {
     await vscode.window.showTextDocument(document, { viewColumn: column, preview: false, preserveFocus: false });
     // Code-action and undo commands need editor focus, not just an active tab.
     await vscode.commands.executeCommand('workbench.action.focusActiveEditorGroup');
-    return vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString();
+    // Global undo can otherwise select an unfocused EditContext DOM handler
+    // whose execCommand('undo') returns false despite the correct active tab.
+    return vscode.window.state.focused
+      && vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString();
   });
 }
 

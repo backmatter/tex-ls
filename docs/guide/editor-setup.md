@@ -16,6 +16,12 @@ The sections below cover manual setup and advanced editor integration.
 Configure your editor's LSP client to run `tex-ls lsp` over stdio for LaTeX
 and BibTeX. Save new files to enable navigation between project files.
 
+Without client file watching, tex-ls watches workspace folders or the opened
+document's directory. If that inferred directory is a filesystem root, it watches
+only direct children. Open an explicit workspace folder or configure client file
+watching for nested dependencies of a document saved directly at the root.
+Compiler artifact candidates remain watched at any depth.
+
 ## Neovim
 
 Install tex-ls with [Homebrew, an installer, or a direct download](../../README.md#install).
@@ -196,6 +202,10 @@ Positions use zero-based LSP lines. The native server returns:
 | `ambiguousRoot` | `candidates`; configure `[build].root` |
 | `launchFailed` | `message` |
 
+Path fields contain native UTF-8 strings. Absolute paths containing other native
+bytes use `{"uri":"file:///percent-encoded-path"}`. Viewer arguments preserve the
+original native path.
+
 ### Inverse search
 
 Configure your viewer to run `tex-ls inverse-search --input "%f" --line1 "%l"`,
@@ -212,12 +222,15 @@ the longest matching workspace root wins.
 `forwardSearch.ipcDir` overrides `$TEX_LS_IPC_DIR`, the per-user runtime directory,
 and the temporary-directory fallback. Use it when the viewer and editor need a
 shared IPC location. Keep Unix socket paths short (about 100 bytes maximum).
+IPC requests and replies have a three-second frame deadline and a 64 KiB size limit.
+Connection attempts also time out, and a busy server remains discoverable for retries.
+An incomplete viewer connection cannot prevent server shutdown.
 
 ## Editing features
 
 - Completion, signature help, navigation, references, rename, diagnostics, and
   quick fixes cover LaTeX and BibTeX. Diagnostic links open the rule catalogue.
-- Semantic highlighting and folding refresh after declaration/package changes
+- Semantic full/delta highlighting and folding refresh after declaration/package changes
   when the client supports refresh requests.
 - Color pickers support literal `\definecolor`/`\providecolor` in `HTML`, `rgb`,
   `RGB`, and `gray`. Dynamic expressions are skipped. HTML/RGB use 8-bit channels;
@@ -267,6 +280,8 @@ to, but cannot be renamed automatically. Unsupported argument specifications ret
 their command or environment name without partial argument hints.
 For example, `\def\sample#1;{#1}` remains navigable but has no brace-argument snippet.
 Literal `\InputIfFileExists` paths are followed like `\input` paths.
+File-path completion includes symbolic links to directories, with a trailing `/`
+so the next request can complete a file inside the linked directory.
 Biblatex's literal `style`, `bibstyle`, and `citestyle` options support file navigation,
 completion, and highlighting. A `style` value can open both its `.bbx` and `.cbx` files.
 Style names may continue across a TeX comment and the following indentation.
@@ -281,6 +296,34 @@ Compilation is not required. Open `.ltx` and `.tikz` documents receive the same
 unknown-command checks as `.tex` documents. See
 [lint suppression comments](linting.md#rules) for package-generated commands that the
 static checker cannot recognize.
+
+An explicit **Load package** quick fix is available for an unknown command with one
+curated package provider in a plain `article`, `report`, or `book` preamble. It
+inserts the load at the document root after existing preamble loads. Package/class options, conditional or dynamic
+loads, loader overrides, and ambiguous providers prevent the action. It is not
+preferred and is excluded from fix-all. Native installations can offer the action
+when the class, packages, and preamble dependencies match audited 2025 or 2026
+source versions. The installed profiles cover default 10pt `article`, `report`,
+and `book`, plus `amsmath`, `amsfonts`, `amssymb`, `array`, and `booktabs`.
+They assume an ordinary current LaTeX format. Local overrides, changed or unknown
+source versions, source aliases, editor overlays, and failed or pending reads
+prevent the action. Installed `graphicx`, custom formats, and other unverified
+load behavior remain unsupported. The existing metadata-only fallback remains
+available. Package verification runs when requesting explicit quick fixes;
+typing does not acquire an unloaded provider for this feature.
+
+Bibliography navigation and rename include literal entry-key dependencies such as
+`crossref`. Biber keys preserve case; classic BibTeX keys fold ASCII case. Manual
+bibitems preserve case. Literal Biber `ids` aliases support lookup and completion,
+but prevent automatic key rename. Dynamic entry-key expressions also prevent rename.
+Loaded bibliography files share string definitions and uses. The server suppresses
+required-field warnings whose absence depends on unresolved inheritance; it does
+not execute sourcemaps or custom inheritance rules.
+
+The `inlayHints.sourceContext` setting adds current source descriptions to labels
+without a build. `inlayHints.pages` and `inlayHints.names` add literal page and name
+values from AUX artifacts. These settings default to false. Artifact tooltips identify
+last-build values; they do not claim that the build matches the current source.
 
 Unknown-command quick fixes can insert a suppression for one construct or the
 whole file. For a large selection, tex-ls validates up to eight construct choices
@@ -297,7 +340,8 @@ them after edits, so a long label list does not repeatedly scan the document.
 
 Source-defined commands and environments show definition links. A unique definition
 also shows nearby comment lines and a bounded source excerpt, including comments
-above declarations split across lines. Package commands link to package manuals
+above declarations split across lines. Definition links and comment excerpts support
+LF, CRLF, and CR line endings. Package commands link to package manuals
 when their provenance is known. Loaded `.dtx` macro
 and environment documentation is shown when its code association is known. Local
 redefinitions use their own source information. tex-ls does not download manuals,
@@ -320,6 +364,11 @@ Use `workspace/executeCommand` with `tex-ls.inspectProject` and
 `tex-ls.inspectAcquisition` takes no arguments and reports pending work, read
 counts, source-read failures, and installation issues. A TeX lookup times out after
 two seconds per process; local editing remains available during discovery.
+
+Inspection reports UTF-8 paths in their native spelling. Absolute paths containing
+non-UTF-8 bytes use percent-encoded file URIs when the platform permits it.
+Unrepresentable paths return an error object. Path completion skips filenames that UTF-8 source edits
+cannot name.
 
 ## Syntax and semantic highlighting
 

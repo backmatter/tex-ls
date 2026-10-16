@@ -1,5 +1,19 @@
 //! Diagnostics operations.
-use super::*;
+use crate::{
+    convert::{byte_range_to_lsp, byte_range_to_lsp_with_cursor, path_to_uri},
+    diagnostic_store,
+};
+use lsp_types::{
+    Code, CodeDescription, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
+    DiagnosticTag, Location, Range,
+};
+use std::path::Path;
+use tex_ls_analysis::{
+    incremental::Analysis,
+    linter::{RuleSelection, Severity},
+    source::FileKind,
+    text::{LineIndex, PositionEncoding},
+};
 
 /// Compute diagnostics for a `.bib` file off the snapshot: bib parse diagnostics
 /// plus root-scoped lint findings over the cached tree and bibliography model.
@@ -99,7 +113,7 @@ pub(crate) fn lint_to_lsp_with_range(
 /// `idx`; one in another file is **file-level** — a `0..0` byte range
 /// maps to the document start regardless of encoding, so we need neither that
 /// file's text nor its line index. An entry whose path cannot form a `file://`
-/// URI is skipped (mirrors [`location_for`]).
+/// URI is skipped (mirrors [`location_for`](crate::convert::location_for)).
 pub fn lint_related_to_lsp(
     idx: &LineIndex,
     self_path: &Path,

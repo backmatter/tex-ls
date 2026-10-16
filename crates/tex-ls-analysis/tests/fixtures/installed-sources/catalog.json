@@ -1,0 +1,376 @@
+[
+  {
+    "release": "2025",
+    "name": "article.cls",
+    "fixture": "2025/article.cls",
+    "bytes": 20144,
+    "sha256": "f9c8770a909e5b6526eb72284e457cd379b9bedbf3b508a96bd7f922d4cb24ec",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "report.cls",
+    "fixture": "2025/report.cls",
+    "bytes": 23203,
+    "sha256": "7aad08c51e33c67a75c4b7575fe3e88f3f6040a59e794de8c7f6ed7f75706110",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "book.cls",
+    "fixture": "2025/book.cls",
+    "bytes": 23268,
+    "sha256": "b7d17b9b72b75bbb797c8e46871dabca156492ed6e4515c7bb86e573f1208a91",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "size10.clo",
+    "fixture": "2025/size10.clo",
+    "bytes": 8448,
+    "sha256": "2896162dd5ed894689ca1f336fe2e084007114dc07f8ab17203281911479548f",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "bk10.clo",
+    "fixture": "2025/bk10.clo",
+    "bytes": 8288,
+    "sha256": "48f2efca47a5bc27a525299b43932f7efec6a612142415fee0f4e6312ae9314d",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "amsmath.sty",
+    "fixture": "2025/amsmath.sty",
+    "bytes": 88471,
+    "sha256": "4c0bfd7d67ea18214810a21244f8426da40d04af5bb90ed201b85cc5e211d321",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "amstext.sty",
+    "fixture": "2025/amstext.sty",
+    "bytes": 2444,
+    "sha256": "7a6d33e95e168f90cec6d4172aeae7da885924a8f587ccc11817e1dab4d50ba9",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "amsbsy.sty",
+    "fixture": "2025/amsbsy.sty",
+    "bytes": 2222,
+    "sha256": "c09b1b14dfe8a81b6791673b3bc5a7fd8b794fb063b6e8b5ce79fc28c7e59c8c",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "amsopn.sty",
+    "fixture": "2025/amsopn.sty",
+    "bytes": 4474,
+    "sha256": "c50239a5acc1037ff4df482878e5546be3cd9b8ac725151bc14748a103d800a8",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "amsgen.sty",
+    "fixture": "2025/amsgen.sty",
+    "bytes": 4173,
+    "sha256": "e7ef677a56e22d8da915e613c65fe2d4c2fe8744ffb283c2ccfdfc066e45e158",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2025",
+    "name": "array.sty",
+    "fixture": "2025/array.sty",
+    "bytes": 15651,
+    "sha256": "537013de60c6606caecfc2eee9b81cd95f093ebb0f99b43277775073f00d9160",
+    "provenance": {
+      "url": "https://codeload.github.com/latex3/latex2e/tar.gz/22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "commit": "22d4c5ec30bba33928a6e80dd26543daf6b438fc",
+      "tag": "release-2025-11-01",
+      "sha256": "6809addb1b56779436fa3f0a4e16e5b854a75d4849f1d80b5585d7a3e8e9ce53",
+      "bytes": 9156531
+    },
+    "generation": "tex docstrip v2.6c (2024-12-23), from official .ins/.dtx, overwrite prompts disabled"
+  },
+  {
+    "release": "2026",
+    "name": "article.cls",
+    "fixture": "2026/article.cls",
+    "bytes": 20144,
+    "sha256": "c09f5982893f8a092e69435caa151eef0d3cb4d7495abf23f08b640191cf81f6",
+    "provenance": {
+      "name": "latex-base",
+      "url": "https://mirrors.ctan.org/install/macros/latex/latex-base.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/latex-base.tds.zip",
+      "sha256": "424bcbab851723495397f0542db8722a68917f31d9f28055ebc65baa7ed35336",
+      "bytes": 49711384,
+      "last_modified": "Fri, 29 May 2026 12:21:42 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "report.cls",
+    "fixture": "2026/report.cls",
+    "bytes": 23203,
+    "sha256": "15e827454ad6316cf9a7eceea4cfdb7c28c4428b6907f01c742f5dd86fa32790",
+    "provenance": {
+      "name": "latex-base",
+      "url": "https://mirrors.ctan.org/install/macros/latex/latex-base.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/latex-base.tds.zip",
+      "sha256": "424bcbab851723495397f0542db8722a68917f31d9f28055ebc65baa7ed35336",
+      "bytes": 49711384,
+      "last_modified": "Fri, 29 May 2026 12:21:42 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "book.cls",
+    "fixture": "2026/book.cls",
+    "bytes": 23268,
+    "sha256": "ff9dcfb536554e5afd36ba4dd1fb8f15ac634c4ef108b0531475523f0d5d6762",
+    "provenance": {
+      "name": "latex-base",
+      "url": "https://mirrors.ctan.org/install/macros/latex/latex-base.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/latex-base.tds.zip",
+      "sha256": "424bcbab851723495397f0542db8722a68917f31d9f28055ebc65baa7ed35336",
+      "bytes": 49711384,
+      "last_modified": "Fri, 29 May 2026 12:21:42 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "size10.clo",
+    "fixture": "2026/size10.clo",
+    "bytes": 8448,
+    "sha256": "7a5ab9aa1794b8864e2963db211ca03b48a455c706190c7f85124c6ca9714183",
+    "provenance": {
+      "name": "latex-base",
+      "url": "https://mirrors.ctan.org/install/macros/latex/latex-base.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/latex-base.tds.zip",
+      "sha256": "424bcbab851723495397f0542db8722a68917f31d9f28055ebc65baa7ed35336",
+      "bytes": 49711384,
+      "last_modified": "Fri, 29 May 2026 12:21:42 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "bk10.clo",
+    "fixture": "2026/bk10.clo",
+    "bytes": 8288,
+    "sha256": "c44ca4b67cc1ffe7d15b3e3d838f568c64bdb8e9d783767c1099653c1eaebbe3",
+    "provenance": {
+      "name": "latex-base",
+      "url": "https://mirrors.ctan.org/install/macros/latex/latex-base.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/latex-base.tds.zip",
+      "sha256": "424bcbab851723495397f0542db8722a68917f31d9f28055ebc65baa7ed35336",
+      "bytes": 49711384,
+      "last_modified": "Fri, 29 May 2026 12:21:42 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "amsmath.sty",
+    "fixture": "2026/amsmath.sty",
+    "bytes": 88826,
+    "sha256": "8bf35130be39e123cbd0e4f0c09d3806d745d4c08ee391a543a8b9675191e6a7",
+    "provenance": {
+      "name": "amsmath",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-amsmath.tds.zip",
+      "resolved_url": "https://mirror.accum.se/mirror/CTAN/install/macros/latex/required/latex-amsmath.tds.zip",
+      "sha256": "e92455b4973c7013c2b60e57668f42d2c7ed3f7aea1d97ad679f71ad68213e1e",
+      "bytes": 2768238,
+      "last_modified": "Fri, 29 May 2026 12:30:58 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "amstext.sty",
+    "fixture": "2026/amstext.sty",
+    "bytes": 2444,
+    "sha256": "aa4458f9b4a5e6c1a79172fd670bcefbe717f3af0dfc9c18b95bc34b60afce7b",
+    "provenance": {
+      "name": "amsmath",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-amsmath.tds.zip",
+      "resolved_url": "https://mirror.accum.se/mirror/CTAN/install/macros/latex/required/latex-amsmath.tds.zip",
+      "sha256": "e92455b4973c7013c2b60e57668f42d2c7ed3f7aea1d97ad679f71ad68213e1e",
+      "bytes": 2768238,
+      "last_modified": "Fri, 29 May 2026 12:30:58 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "amsbsy.sty",
+    "fixture": "2026/amsbsy.sty",
+    "bytes": 2222,
+    "sha256": "938d9149d311b3a88836220bc76b057739958704a65422bee052696329fd41f8",
+    "provenance": {
+      "name": "amsmath",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-amsmath.tds.zip",
+      "resolved_url": "https://mirror.accum.se/mirror/CTAN/install/macros/latex/required/latex-amsmath.tds.zip",
+      "sha256": "e92455b4973c7013c2b60e57668f42d2c7ed3f7aea1d97ad679f71ad68213e1e",
+      "bytes": 2768238,
+      "last_modified": "Fri, 29 May 2026 12:30:58 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "amsopn.sty",
+    "fixture": "2026/amsopn.sty",
+    "bytes": 4474,
+    "sha256": "2d8dfd81cdb5eeffc4f03b64f5754808c809fb729d883fd4a94facada0d63765",
+    "provenance": {
+      "name": "amsmath",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-amsmath.tds.zip",
+      "resolved_url": "https://mirror.accum.se/mirror/CTAN/install/macros/latex/required/latex-amsmath.tds.zip",
+      "sha256": "e92455b4973c7013c2b60e57668f42d2c7ed3f7aea1d97ad679f71ad68213e1e",
+      "bytes": 2768238,
+      "last_modified": "Fri, 29 May 2026 12:30:58 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "amsgen.sty",
+    "fixture": "2026/amsgen.sty",
+    "bytes": 4173,
+    "sha256": "f78fa573b1596ea6589570f3c357b68a511fb8050607a3c898b25bc728571a9e",
+    "provenance": {
+      "name": "amsmath",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-amsmath.tds.zip",
+      "resolved_url": "https://mirror.accum.se/mirror/CTAN/install/macros/latex/required/latex-amsmath.tds.zip",
+      "sha256": "e92455b4973c7013c2b60e57668f42d2c7ed3f7aea1d97ad679f71ad68213e1e",
+      "bytes": 2768238,
+      "last_modified": "Fri, 29 May 2026 12:30:58 GMT"
+    }
+  },
+  {
+    "release": "2026",
+    "name": "array.sty",
+    "fixture": "2026/array.sty",
+    "bytes": 17611,
+    "sha256": "ed9d9f0235c3db06b50c4ba788f87bbc05229f5909626241c0ee49d9481677bc",
+    "provenance": {
+      "name": "latex-tools",
+      "url": "https://mirrors.ctan.org/install/macros/latex/required/latex-tools.tds.zip",
+      "resolved_url": "https://ftpmirror1.infania.net/mirror/CTAN/install/macros/latex/required/latex-tools.tds.zip",
+      "sha256": "ea6e7a882a046820750a77741f34626dea18e99f7dd9b2c75f58848798ec57b3",
+      "bytes": 8547402,
+      "last_modified": "Fri, 29 May 2026 12:28:42 GMT"
+    }
+  },
+  {
+    "release": "common",
+    "name": "booktabs.sty",
+    "fixture": "common/booktabs.sty",
+    "bytes": 6078,
+    "sha256": "3fe694a5406f84847143e56ba1841385364277cfe7694a9f4bc0072ca8656abc",
+    "provenance": {
+      "url": "https://mirrors.ctan.org/systems/texlive/tlnet/archive/booktabs.tar.xz",
+      "resolved_url": "https://mirror.bahnhof.net/pub/ctan/systems/texlive/tlnet/archive/booktabs.tar.xz",
+      "sha256": "a5a9ed5c865f6aad4cd197f189f796f87b272bf9e0ebd2851debca2eef5fb613",
+      "bytes": 2208
+    },
+    "texlive_revision": 77682
+  },
+  {
+    "release": "common",
+    "name": "amsfonts.sty",
+    "fixture": "common/amsfonts.sty",
+    "bytes": 5949,
+    "sha256": "dab8b0e621267acfd89736cf97bdcc02647c545c0719c4997be8a7d1bf98f9c3",
+    "provenance": {
+      "name": "amsfonts",
+      "url": "https://mirrors.ctan.org/install/fonts/amsfonts.tds.zip",
+      "resolved_url": "https://laotzu.ftp.acc.umu.se/mirror/CTAN/install/fonts/amsfonts.tds.zip",
+      "sha256": "dd763ca89b712d096e952ca43c3b60409bfca174f04c5743da68468d063fe7b6",
+      "bytes": 5899080,
+      "last_modified": "Fri, 25 Jan 2013 15:57:51 GMT"
+    }
+  },
+  {
+    "release": "common",
+    "name": "amssymb.sty",
+    "fixture": "common/amssymb.sty",
+    "bytes": 13829,
+    "sha256": "70838b061b56569dd3ed9f339b1bdd1c78ba185de49f27ceae331c97f48b5986",
+    "provenance": {
+      "name": "amsfonts",
+      "url": "https://mirrors.ctan.org/install/fonts/amsfonts.tds.zip",
+      "resolved_url": "https://laotzu.ftp.acc.umu.se/mirror/CTAN/install/fonts/amsfonts.tds.zip",
+      "sha256": "dd763ca89b712d096e952ca43c3b60409bfca174f04c5743da68468d063fe7b6",
+      "bytes": 5899080,
+      "last_modified": "Fri, 25 Jan 2013 15:57:51 GMT"
+    }
+  }
+]

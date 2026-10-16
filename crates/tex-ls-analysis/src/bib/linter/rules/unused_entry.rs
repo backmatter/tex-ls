@@ -14,7 +14,7 @@ impl BibRule for UnusedEntry {
         Severity::Hint
     }
     fn description(&self) -> &'static str {
-        "Hint when a bibliography entry is unused in every complete, rooted document that loads this file. Disabled by default for shared libraries. Wildcard citations count as use; incomplete or unrooted namespaces produce no hints."
+        "Hint when a bibliography entry is unused in every complete, rooted document that loads this file. Disabled by default for shared libraries. Wildcard citations and reachable literal entry dependencies count as use; incomplete or unrooted namespaces produce no hints."
     }
     fn examples(&self) -> &'static [super::Example] {
         &[super::Example {
@@ -33,7 +33,7 @@ impl BibRule for UnusedEntry {
             .model
             .entries()
             .iter()
-            .filter(|entry| !project.used.contains(&entry.key.to_lowercase()))
+            .filter(|entry| !project.used.contains(entry.key.as_str()))
         {
             sink.push(Diagnostic {
                 rule: self.id(),

@@ -1,5 +1,16 @@
 //! Identifier operations over BibTeX string definitions and literal macro uses.
-use super::*;
+use crate::{
+    convert::locations_for_ranges,
+    workspace_edits::{edits_for_locations, finalize_rename},
+};
+use lsp_types::WorkspaceEdit;
+use rowan::{TextRange, TextSize};
+use std::path::Path;
+use tex_ls_analysis::{
+    bib::semantic::Model as BibModel, incremental::Analysis, text::PositionEncoding,
+};
+
+pub use tex_ls_analysis::bib::render::expanded;
 
 pub fn target(model: &BibModel, offset: usize) -> Option<(String, TextRange)> {
     let at = TextSize::from(offset as u32);
@@ -18,27 +29,7 @@ pub fn target(model: &BibModel, offset: usize) -> Option<(String, TextRange)> {
 }
 
 pub fn occurrences(model: &BibModel, key: &str) -> Vec<(TextRange, bool)> {
-    model
-        .string_defs()
-        .iter()
-        .filter(|site| site.name.eq_ignore_ascii_case(key))
-        .map(|site| (site.range, true))
-        .chain(
-            model
-                .string_uses()
-                .iter()
-                .filter(|site| site.name.eq_ignore_ascii_case(key))
-                .map(|site| (site.range, false)),
-        )
-        .collect()
-}
-
-pub fn rename_allowed(model: &BibModel, key: &str) -> bool {
-    occurrences(model, key)
-        .iter()
-        .filter(|(_, definition)| *definition)
-        .count()
-        == 1
+    model.string_occurrences(key).collect()
 }
 
 pub fn rename(
@@ -48,31 +39,30 @@ pub fn rename(
     name: &str,
     enc: PositionEncoding,
 ) -> Option<WorkspaceEdit> {
-    let file = snapshot.lookup_file(path)?;
-    let model = snapshot.bib_semantic_model(file);
     if name.is_empty()
         || !name
             .bytes()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, b'_' | b'-' | b':'))
         || name.as_bytes()[0].is_ascii_digit()
-        || !rename_allowed(model, key)
-        || (!name.eq_ignore_ascii_case(key) && !occurrences(model, name).is_empty())
+        || !snapshot.bibliography_string_rename_allowed(path, key)
+        || (!name.eq_ignore_ascii_case(key)
+            && !snapshot
+                .bibliography_string_occurrences(path, name)
+                .is_empty())
     {
         return None;
     }
-    let uri = path_to_uri(path)?;
-    let idx = snapshot.file_line_index(file, enc);
-    let ranges: Vec<_> = occurrences(model, key)
-        .into_iter()
-        .map(|(range, _)| range)
-        .collect();
+    let sites = snapshot.bibliography_string_occurrences(path, key);
     finalize_rename(edits_for_locations(
-        lsp_ranges(&idx, &ranges).into_iter().map(|range| Location {
-            uri: uri.clone(),
-            range,
-        }),
+        locations_for_ranges(
+            snapshot,
+            sites
+                .iter()
+                .map(|site| (site.path.as_path(), site.key_range)),
+            enc,
+        )
+        .into_iter()
+        .flatten(),
         name,
     ))
 }
-
-pub use tex_ls_analysis::bib::render::expanded;

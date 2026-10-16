@@ -2,12 +2,272 @@
 //!
 //! Nothing here depends on installed editor grammars or executes TeX. Unknown
 //! option values retain a protected body instead of guessing island ownership.
-use std::collections::HashMap;
+use std::cell::OnceCell;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::ops::Deref;
+use std::rc::Rc;
 
 use smol_str::SmolStr;
 
-use super::lexer::{LexConfig, ParseCtx, Token, lex_with};
+use super::lexer::{LexConfig, ParseCtx, Token};
 use crate::syntax::SyntaxKind as K;
+
+#[cfg(test)]
+mod tests {
+    use super::super::lexer::RawReaders;
+    use super::*;
+
+    #[test]
+    fn large_setting_values_are_shared_across_clones_and_resolved_specs() {
+        let language = "literal-language-".repeat(8192);
+        let mut defaults = Settings::default();
+        defaults
+            .values
+            .insert("language".into(), language.clone().into());
+        let pointer = defaults.values["language"].as_ptr();
+        let retained = defaults.clone();
+        assert_eq!(retained.values["language"].as_ptr(), pointer);
+
+        let mut state = State {
+            listings: defaults,
+            ..State::default()
+        };
+        let plain = Spec {
+            family: Family::Listings,
+            settings: Settings::default(),
+            delegate: false,
+        };
+        let mut readers = RawReaders::new("");
+        let resolved = state.resolve(plain.clone(), "", true, &mut readers);
+        assert_eq!(resolved.settings.values["language"].as_ptr(), pointer);
+        assert_eq!(&*resolved.settings.values["language"], language.as_str());
+
+        let mut override_settings = Settings::default();
+        override_settings
+            .values
+            .insert("language".into(), "override-language-".repeat(8192).into());
+        let override_pointer = override_settings.values["language"].as_ptr();
+        state
+            .styles
+            .insert("large".into(), override_settings.clone());
+        let header = "[style=large]";
+        let mut readers = RawReaders::new(header);
+        let styled = state.resolve(plain, header, true, &mut readers);
+        assert_eq!(
+            styled.settings.values["language"].as_ptr(),
+            override_pointer
+        );
+
+        let explicit = Spec {
+            family: Family::Listings,
+            settings: override_settings,
+            delegate: false,
+        };
+        let mut readers = RawReaders::new("");
+        let overridden = state.resolve(explicit, "", true, &mut readers);
+        assert_eq!(
+            overridden.settings.values["language"].as_ptr(),
+            override_pointer
+        );
+
+        let shortcut = Spec {
+            family: Family::Minted,
+            settings: retained.clone(),
+            delegate: false,
+        };
+        state.inline.insert("cachedinline".into(), shortcut);
+        let mut readers = RawReaders::new("");
+        let minted = state.inline("cachedinline", "", &mut readers).unwrap();
+        assert_eq!(minted.settings.values["language"].as_ptr(), pointer);
+
+        state.listings.update("language=Python", &state.styles);
+        assert!(state.listings.python());
+        assert!(!resolved.settings.python());
+        assert_eq!(&*resolved.settings.values["language"], language.as_str());
+        assert_eq!(retained.values["language"].as_ptr(), pointer);
+    }
+
+    #[test]
+    fn delegate_languages_match_ascii_case_without_normalizing_owned_values() {
+        let state = State::default();
+        for language in [
+            "C",
+            "C++",
+            "Cpp",
+            "JavaScript",
+            "JS",
+            "TypeScript",
+            "TS",
+            "JSON",
+            "CSS",
+            "HTML",
+            "ÇSS",
+            "Python",
+        ] {
+            let header = format!("[language={language}]");
+            let mut readers = RawReaders::new(&header);
+            let spec = state.resolve(
+                Spec {
+                    family: Family::Listings,
+                    settings: Settings::default(),
+                    delegate: true,
+                },
+                &header,
+                false,
+                &mut readers,
+            );
+            assert_eq!(
+                spec.delegate,
+                !matches!(language, "ÇSS" | "Python"),
+                "{language}"
+            );
+            assert_eq!(&*spec.settings.values["language"], language);
+        }
+    }
+
+    #[test]
+    fn decoded_listing_delimiters_are_shared_across_resolved_settings() {
+        let opener = "opening-marker-".repeat(4096);
+        let closer = "closing-marker-".repeat(4096);
+        let source = format!("language=Python,escapeinside={{{opener}}}{{{closer}}}");
+        let mut settings = Settings::default();
+        settings.update(&source, &HashMap::new());
+        let first = settings.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!(&*first.0, opener.as_str());
+        assert_eq!(&*first.1, closer.as_str());
+        let second = settings.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!(first.0.as_ptr(), second.0.as_ptr());
+        assert_eq!(first.1.as_ptr(), second.1.as_ptr());
+
+        let retained = settings.clone();
+        let clone_pair = retained.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!(first.0.as_ptr(), clone_pair.0.as_ptr());
+        let state = State {
+            listings: settings.clone(),
+            ..State::default()
+        };
+        let mut readers = RawReaders::new("");
+        let resolved = state.inline("lstinline", "", &mut readers).unwrap();
+        let resolved_pair = resolved
+            .settings
+            .escapes(Family::Listings)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.0.as_ptr(), resolved_pair.0.as_ptr());
+
+        let mut cold = Settings::default();
+        cold.update(&source, &HashMap::new());
+        assert_eq!(
+            settings, cold,
+            "memo warmth must not affect source identity"
+        );
+        settings.update("escapeinside={A}{B}", &HashMap::new());
+        let changed = settings.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!((&*changed.0, &*changed.1), ("A", "B"));
+        assert_eq!(
+            retained
+                .escapes(Family::Listings)
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ptr(),
+            first.0.as_ptr()
+        );
+
+        settings.uncertain = true;
+        assert!(settings.escapes(Family::Listings).is_err());
+        settings.uncertain = false;
+        settings.update("mathescape=unknown", &HashMap::new());
+        assert!(settings.escapes(Family::Listings).is_err());
+    }
+    #[test]
+    fn decoded_setting_profiles_keep_errors_overrides_and_families_separate() {
+        let mut settings = Settings::default();
+        settings.update("escapeinside={AB}", &HashMap::new());
+        assert!(settings.escapes(Family::Listings).is_err());
+        let value = &settings.values["escapeinside"];
+        assert!(matches!(value.0.listing_pair.get(), Some(Err(()))));
+        let pair = settings.escapes(Family::Minted).unwrap().unwrap();
+        assert_eq!((&*pair.0, &*pair.1), ("A", "B"));
+        let fancy = settings.escapes(Family::Fancy).unwrap().unwrap();
+        assert_eq!(pair.0.as_ptr(), fancy.0.as_ptr());
+        assert!(settings.escapes(Family::Listings).is_err());
+
+        let retained = settings.clone();
+        let mut replacement = Settings::default();
+        replacement.update("escapeinside={X}{Y}", &HashMap::new());
+        settings.update(
+            "style=replacement",
+            &HashMap::from([("replacement".into(), replacement.clone())]),
+        );
+        let styled = settings.escapes(Family::Listings).unwrap().unwrap();
+        let direct = replacement.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!(styled.0.as_ptr(), direct.0.as_ptr());
+        assert!(settings.escapes(Family::Minted).is_err());
+        assert_eq!(
+            retained
+                .escapes(Family::Minted)
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ptr(),
+            pair.0.as_ptr()
+        );
+
+        let mut character = Settings::default();
+        character.update("escapechar={\\@}", &HashMap::new());
+        let pair = character.escapes(Family::Listings).unwrap().unwrap();
+        assert_eq!((&*pair.0, &*pair.1), ("@", "@"));
+        assert_eq!(pair.0.as_ptr(), pair.1.as_ptr());
+        assert_eq!(
+            pair.0.as_ptr(),
+            character
+                .escapes(Family::Minted)
+                .unwrap()
+                .unwrap()
+                .0
+                .as_ptr()
+        );
+        character.update("escapechar={\\unknown}", &HashMap::new());
+        assert!(character.escapes(Family::Listings).is_err());
+        assert!(matches!(
+            character.values["escapechar"].0.escape_character.get(),
+            Some(Err(()))
+        ));
+        assert!(character.escapes(Family::Listings).is_err());
+    }
+
+    #[test]
+    fn fancy_symbols_share_decoding_and_reject_oversized_profiles() {
+        let mut settings = Settings::default();
+        settings.update(
+            "commandchars={\\\\\\{\\}},commentchar={\\%}",
+            &HashMap::new(),
+        );
+        for key in ["commandchars", "commentchar"] {
+            let first = settings.values[key].symbols().unwrap();
+            let cloned = settings.clone();
+            let second = cloned.values[key].symbols().unwrap();
+            assert_eq!(first.as_ptr(), second.as_ptr());
+        }
+        settings.update(
+            &format!("commandchars={{{}}}", "x".repeat(65536)),
+            &HashMap::new(),
+        );
+        let mut tokens = Vec::new();
+        fancy(
+            "\\ref{protected}",
+            &settings,
+            &mut tokens,
+            &ParseCtx::default(),
+            LexConfig::default(),
+            0,
+        );
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, K::VERBATIM_BODY);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -16,9 +276,126 @@ pub(crate) enum Family {
     Fancy,
 }
 
+type EscapeDelimiters = (Rc<str>, Rc<str>);
+type EscapePair = Result<EscapeDelimiters, ()>;
+
+// Values are immutable. Cloned scopes share source and decoded results; replacing
+// a setting creates a fresh value without changing an already resolved Spec.
+#[derive(Clone)]
+struct SettingValue(Rc<SettingValueData>);
+
+struct SettingValueData {
+    source: Box<str>,
+    listing_pair: OnceCell<EscapePair>,
+    character_pair: OnceCell<EscapePair>,
+    escape_character: OnceCell<EscapePair>,
+    symbols: OnceCell<Option<Rc<str>>>,
+}
+
+impl From<&str> for SettingValue {
+    fn from(source: &str) -> Self {
+        Self::from(source.to_owned())
+    }
+}
+
+impl From<String> for SettingValue {
+    fn from(source: String) -> Self {
+        Self(Rc::new(SettingValueData {
+            source: source.into_boxed_str(),
+            listing_pair: OnceCell::new(),
+            character_pair: OnceCell::new(),
+            escape_character: OnceCell::new(),
+            symbols: OnceCell::new(),
+        }))
+    }
+}
+
+impl Deref for SettingValue {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.0.source
+    }
+}
+
+impl AsRef<str> for SettingValue {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl fmt::Debug for SettingValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self.as_ref(), f)
+    }
+}
+
+impl PartialEq for SettingValue {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || self.as_ref() == other.as_ref()
+    }
+}
+
+impl Eq for SettingValue {}
+
+impl SettingValue {
+    fn symbols(&self) -> Option<Rc<str>> {
+        self.0
+            .symbols
+            .get_or_init(|| control_symbols(unbrace(self)).map(Rc::from))
+            .clone()
+    }
+
+    fn inside(&self, family: Family) -> EscapePair {
+        if family == Family::Listings {
+            self.0
+                .listing_pair
+                .get_or_init(|| {
+                    let (a, rest) = argument(self, '{', '}').ok_or(())?;
+                    let (b, rest) = argument(rest, '{', '}').ok_or(())?;
+                    if !rest.trim().is_empty() || a.is_empty() || b.is_empty() {
+                        return Err(());
+                    }
+                    Ok((
+                        Rc::from(control_symbols(a).ok_or(())?),
+                        Rc::from(control_symbols(b).ok_or(())?),
+                    ))
+                })
+                .clone()
+        } else {
+            self.0
+                .character_pair
+                .get_or_init(|| {
+                    let decoded = self.symbols().ok_or(())?;
+                    let mut chars = decoded.chars();
+                    let a = chars.next().ok_or(())?;
+                    let b = chars.next().ok_or(())?;
+                    if chars.next().is_some() {
+                        return Err(());
+                    }
+                    Ok((Rc::from(a.to_string()), Rc::from(b.to_string())))
+                })
+                .clone()
+        }
+    }
+
+    fn character(&self) -> EscapePair {
+        self.0
+            .escape_character
+            .get_or_init(|| {
+                let decoded = self.symbols().ok_or(())?;
+                if decoded.chars().take(2).count() != 1 {
+                    return Err(());
+                }
+                Ok((decoded.clone(), decoded))
+            })
+            .clone()
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Settings {
-    values: HashMap<String, String>,
+    values: HashMap<String, SettingValue>,
     uncertain: bool,
 }
 
@@ -58,13 +435,13 @@ impl Settings {
                     | "commandchars"
                     | "commentchar"
             ) {
-                self.values.insert(key.to_owned(), value.to_owned());
+                self.values.insert(key.to_owned(), value.into());
             }
         }
     }
 
     fn flag(&self, key: &str) -> bool {
-        self.values.get(key).is_some_and(|v| v == "true")
+        self.values.get(key).is_some_and(|v| v.as_ref() == "true")
     }
 
     pub(crate) fn python(&self) -> bool {
@@ -75,7 +452,7 @@ impl Settings {
         })
     }
 
-    fn escapes(&self, family: Family) -> Result<Option<(String, String)>, ()> {
+    fn escapes(&self, family: Family) -> Result<Option<EscapeDelimiters>, ()> {
         if self.uncertain {
             return Err(());
         }
@@ -83,48 +460,16 @@ impl Settings {
             if self
                 .values
                 .get(key)
-                .is_some_and(|v| !matches!(v.as_str(), "true" | "false"))
+                .is_some_and(|v| !matches!(v.as_ref(), "true" | "false"))
             {
                 return Err(());
             }
         }
         if let Some(value) = self.values.get("escapeinside") {
-            if family == Family::Listings {
-                let (a, rest) = argument(value, '{', '}').ok_or(())?;
-                let (b, rest) = argument(rest, '{', '}').ok_or(())?;
-                if !rest.trim().is_empty() || a.is_empty() || b.is_empty() {
-                    return Err(());
-                }
-                return Ok(Some((
-                    control_symbols(a).ok_or(())?,
-                    control_symbols(b).ok_or(())?,
-                )));
-            }
-            let value = unbrace(value);
-            let decoded = control_symbols(value).ok_or(())?;
-            let mut chars = decoded.chars();
-            let a = chars.next().ok_or(())?;
-            let b = chars.next().ok_or(())?;
-            if chars.next().is_some() {
-                return Err(());
-            }
-            return Ok(Some((a.to_string(), b.to_string())));
+            return value.inside(family).map(Some);
         }
         if let Some(value) = self.values.get("escapechar") {
-            let decoded = control_symbols(unbrace(value)).ok_or(())?;
-            if decoded.chars().count() != 1 {
-                return Err(());
-            }
-            return Ok(Some((decoded.clone(), decoded)));
-        }
-        for key in ["mathescape", "texcomments", "texcl"] {
-            if self
-                .values
-                .get(key)
-                .is_some_and(|v| !matches!(v.as_str(), "true" | "false"))
-            {
-                return Err(());
-            }
+            return value.character().map(Some);
         }
         Ok(None)
     }
@@ -142,6 +487,7 @@ pub(crate) struct State {
     pub environments: HashMap<String, Spec>,
     pub inline: HashMap<String, Spec>,
     pub comments: HashMap<String, Option<bool>>,
+    pub environment_name_lengths: HashSet<usize>,
     listings: Settings,
     fancy: Settings,
     minted: HashMap<String, Settings>,
@@ -167,7 +513,13 @@ pub(crate) fn observes_settings_command(name: &str) -> bool {
 }
 
 impl State {
-    pub fn observe(&mut self, command: &str, after: &str, conditional: bool) {
+    pub fn observe(
+        &mut self,
+        command: &str,
+        after: &str,
+        conditional: bool,
+        readers: &mut super::lexer::RawReaders<'_>,
+    ) {
         match command {
             "\\lstset" | "\\fvset" => {
                 let target = if command == "\\lstset" {
@@ -175,7 +527,7 @@ impl State {
                 } else {
                     &mut self.fancy
                 };
-                if let Some((value, _)) = argument(after, '{', '}') {
+                if let Some((value, _)) = readers.embedded_argument(after, '{', '}') {
                     target.update(value, &self.styles);
                     target.uncertain |= conditional;
                 } else {
@@ -183,8 +535,9 @@ impl State {
                 }
             }
             "\\lstdefinestyle" => {
-                let Some((name, after)) =
-                    argument(after, '{', '}').filter(|(name, _)| static_setting_name(name))
+                let Some((name, after)) = readers
+                    .embedded_argument(after, '{', '}')
+                    .filter(|(name, _)| static_setting_name(name))
                 else {
                     for settings in self.styles.values_mut() {
                         settings.uncertain = true;
@@ -192,7 +545,7 @@ impl State {
                     return;
                 };
                 let mut settings = Settings::default();
-                if let Some((value, _)) = argument(after, '{', '}') {
+                if let Some((value, _)) = readers.embedded_argument(after, '{', '}') {
                     settings.update(value, &self.styles);
                     settings.uncertain |= conditional;
                 } else {
@@ -201,7 +554,9 @@ impl State {
                 self.styles.insert(name.to_owned(), settings);
             }
             "\\setminted" | "\\setmintedinline" => {
-                let (language, after) = argument(after, '[', ']').unwrap_or(("", after));
+                let (language, after) = readers
+                    .embedded_argument(after, '[', ']')
+                    .unwrap_or(("", after));
                 let target = if command == "\\setmintedinline" {
                     &mut self.minted_inline
                 } else {
@@ -212,7 +567,7 @@ impl State {
                     return;
                 }
                 let settings = target.entry(language.to_owned()).or_default();
-                if let Some((value, _)) = argument(after, '{', '}') {
+                if let Some((value, _)) = readers.embedded_argument(after, '{', '}') {
                     settings.update(value, &self.styles);
                     settings.uncertain |= conditional;
                 } else {
@@ -220,9 +575,10 @@ impl State {
                 }
             }
             "\\includecomment" | "\\excludecomment" => {
-                if let Some((name, _)) = argument(after, '{', '}')
+                if let Some((name, _)) = readers.embedded_argument(after, '{', '}')
                     && literal_name(name)
                 {
+                    self.environment_name_lengths.insert(name.len());
                     self.comments.insert(
                         name.to_owned(),
                         (!conditional).then_some(command == "\\includecomment"),
@@ -230,9 +586,10 @@ impl State {
                 }
             }
             "\\newminted" | "\\newmintinline" => {
-                let (alias, after) = argument(after, '[', ']')
+                let (alias, after) = readers
+                    .embedded_argument(after, '[', ']')
                     .map_or((None, after), |(name, rest)| (Some(name), rest));
-                let language_argument = argument(after, '{', '}');
+                let language_argument = readers.embedded_argument(after, '{', '}');
                 let declared_name = alias.map(str::to_owned).or_else(|| {
                     language_argument
                         .filter(|(language, _)| literal_name(language))
@@ -248,7 +605,7 @@ impl State {
                         })
                 });
                 if !language_argument.is_some_and(|(language, after)| {
-                    literal_name(language) && argument(after, '{', '}').is_some()
+                    literal_name(language) && readers.embedded_argument(after, '{', '}').is_some()
                 }) && let Some(name) = declared_name.filter(|name| literal_name(name))
                 {
                     let target = if command == "\\newminted" {
@@ -258,8 +615,8 @@ impl State {
                     };
                     mark_existing_spec_uncertain(target, &name);
                 }
-                if let Some((language, after)) = argument(after, '{', '}')
-                    && let Some((options, _)) = argument(after, '{', '}')
+                if let Some((language, after)) = readers.embedded_argument(after, '{', '}')
+                    && let Some((options, _)) = readers.embedded_argument(after, '{', '}')
                     && literal_name(language)
                 {
                     let mut settings = Settings::default();
@@ -277,6 +634,10 @@ impl State {
                         )
                     });
                     if literal_name(&name) {
+                        if command == "\\newminted" {
+                            self.environment_name_lengths.insert(name.len());
+                            self.environment_name_lengths.insert(name.len() + 1);
+                        }
                         let target = if command == "\\newminted" {
                             &mut self.environments
                         } else {
@@ -299,7 +660,7 @@ impl State {
                 }
             }
             "\\lstnewenvironment" | "\\DefineVerbatimEnvironment" => {
-                if let Some((name, mut after)) = argument(after, '{', '}')
+                if let Some((name, mut after)) = readers.embedded_argument(after, '{', '}')
                     && literal_name(name)
                 {
                     let family = if command == "\\lstnewenvironment" {
@@ -309,18 +670,19 @@ impl State {
                     };
                     if family == Family::Listings {
                         for _ in 0..2 {
-                            if let Some((_, rest)) = argument(after, '[', ']') {
+                            if let Some((_, rest)) = readers.embedded_argument(after, '[', ']') {
                                 after = rest;
                             }
                         }
-                    } else if let Some((_, rest)) = argument(after, '{', '}') {
+                    } else if let Some((_, rest)) = readers.embedded_argument(after, '{', '}') {
                         after = rest;
                     }
-                    if let Some((options, _)) = argument(after, '{', '}') {
+                    if let Some((options, _)) = readers.embedded_argument(after, '{', '}') {
                         let mut settings = Settings::default();
                         if family == Family::Listings {
                             if let Some(value) = options.trim().strip_prefix("\\lstset")
-                                && let Some((value, rest)) = argument(value, '{', '}')
+                                && let Some((value, rest)) =
+                                    readers.embedded_argument(value, '{', '}')
                                 && rest.trim().is_empty()
                             {
                                 settings.update(value, &self.styles);
@@ -331,6 +693,7 @@ impl State {
                             settings.update(options, &self.styles);
                         }
                         settings.uncertain |= conditional;
+                        self.environment_name_lengths.insert(name.len());
                         self.environments.insert(
                             name.to_owned(),
                             Spec {
@@ -348,7 +711,12 @@ impl State {
         }
     }
 
-    pub fn environment(&self, name: &str, header: &str) -> Option<Spec> {
+    pub fn environment(
+        &self,
+        name: &str,
+        header: &str,
+        readers: &mut super::lexer::RawReaders<'_>,
+    ) -> Option<Spec> {
         let mut spec = self.environments.get(name).cloned().or_else(|| {
             Some(Spec {
                 family: match name {
@@ -363,15 +731,20 @@ impl State {
         })?;
         if name.ends_with('*')
             && self.environments.contains_key(name)
-            && let Some((options, _)) = argument(header, '{', '}')
+            && let Some((options, _)) = readers.embedded_argument(header, '{', '}')
         {
             spec.settings.update(options, &self.styles);
-            return Some(self.resolve(spec, "", false));
+            return Some(self.resolve(spec, &header[header.len()..], false, readers));
         }
-        Some(self.resolve(spec, header, false))
+        Some(self.resolve(spec, header, false, readers))
     }
 
-    pub fn inline(&self, name: &str, header: &str) -> Option<Spec> {
+    pub fn inline(
+        &self,
+        name: &str,
+        header: &str,
+        readers: &mut super::lexer::RawReaders<'_>,
+    ) -> Option<Spec> {
         let spec = self.inline.get(name).cloned().or_else(|| {
             Some(Spec {
                 family: match name {
@@ -383,23 +756,40 @@ impl State {
                 delegate: name == "minted" || name == "lstlisting",
             })
         })?;
-        Some(self.resolve(spec, header, true))
+        Some(self.resolve(spec, header, true, readers))
     }
 
-    fn resolve(&self, spec: Spec, header: &str, inline: bool) -> Spec {
+    fn resolve(
+        &self,
+        spec: Spec,
+        header: &str,
+        inline: bool,
+        readers: &mut super::lexer::RawReaders<'_>,
+    ) -> Spec {
         let mut settings = match spec.family {
             Family::Listings => self.listings.clone(),
             Family::Fancy => self.fancy.clone(),
             Family::Minted => self.minted.get("").cloned().unwrap_or_default(),
         };
-        let (options, after) = argument(header, '[', ']').unwrap_or(("", header));
+        let (options, after) = readers
+            .embedded_argument(header, '[', ']')
+            .unwrap_or(("", header));
         let language =
             if spec.family == Family::Minted && !spec.settings.values.contains_key("language") {
-                argument(after, '{', '}')
+                readers
+                    .embedded_argument(after, '{', '}')
                     .map(|(name, _)| name)
-                    .or_else(|| spec.settings.values.get("language").map(String::as_str))
+                    .or_else(|| {
+                        spec.settings
+                            .values
+                            .get("language")
+                            .map(SettingValue::as_ref)
+                    })
             } else {
-                spec.settings.values.get("language").map(String::as_str)
+                spec.settings
+                    .values
+                    .get("language")
+                    .map(SettingValue::as_ref)
             };
         if spec.family == Family::Minted
             && let Some(language) = language
@@ -408,7 +798,13 @@ impl State {
                 settings.values.extend(defaults.values.clone());
                 settings.uncertain |= defaults.uncertain;
             }
-            settings.values.insert("language".into(), language.into());
+            let value = spec
+                .settings
+                .values
+                .get("language")
+                .cloned()
+                .unwrap_or_else(|| language.into());
+            settings.values.insert("language".into(), value);
             if inline {
                 for key in ["", language] {
                     if let Some(defaults) = self.minted_inline.get(key) {
@@ -426,10 +822,12 @@ impl State {
         let explicit = if spec.family == Family::Minted {
             language
         } else {
-            local.values.get("language").map(String::as_str)
+            local.values.get("language").map(SettingValue::as_ref)
         };
         let header_len = if spec.family == Family::Minted {
-            argument(after, '{', '}').map_or(0, |(_, tail)| header.len() - tail.len())
+            readers
+                .embedded_argument(after, '{', '}')
+                .map_or(0, |(_, tail)| header.len() - tail.len())
         } else {
             header.len() - after.len()
         };
@@ -440,21 +838,23 @@ impl State {
                 settings
                     .values
                     .get("language")
-                    .is_some_and(|name| v == name)
+                    .is_some_and(|name| v == name.as_ref())
             })
             && settings.values.get("language").is_some_and(|v| {
-                matches!(
-                    v.to_ascii_lowercase().as_str(),
-                    "c" | "c++"
-                        | "cpp"
-                        | "javascript"
-                        | "js"
-                        | "typescript"
-                        | "ts"
-                        | "json"
-                        | "css"
-                        | "html"
-                )
+                [
+                    "c",
+                    "c++",
+                    "cpp",
+                    "javascript",
+                    "js",
+                    "typescript",
+                    "ts",
+                    "json",
+                    "css",
+                    "html",
+                ]
+                .iter()
+                .any(|language| v.eq_ignore_ascii_case(language))
             })
             && settings.escapes(spec.family).is_ok_and(|v| v.is_none())
             && !settings.flag("mathescape")
@@ -699,7 +1099,7 @@ fn python(source: &str) -> Vec<(usize, usize, Class, K)> {
     result
 }
 
-fn balanced(source: &str, ctx: &ParseCtx, config: LexConfig) -> bool {
+fn balanced(source: &str, ctx: &ParseCtx, config: LexConfig, source_offset: usize) -> bool {
     // Nested foreign captures need a separate ownership proof. Declining them
     // also bounds lexer recursion before the grammar's own nesting budget.
     if source.contains("\\mint")
@@ -713,7 +1113,7 @@ fn balanced(source: &str, ctx: &ParseCtx, config: LexConfig) -> bool {
     {
         return false;
     }
-    let tokens = lex_with(source, ctx, config);
+    let tokens = super::lexer::lex_with_offset(source, ctx, config, source_offset);
     let mut depth = 0usize;
     for token in tokens {
         match token.kind {
@@ -741,12 +1141,18 @@ fn island(
     close: &str,
     ctx: &ParseCtx,
     config: LexConfig,
+    source_offset: usize,
 ) -> bool {
-    if !balanced(body, ctx, config) {
+    if !balanced(body, ctx, config, source_offset) {
         return false;
     }
     push(out, K::ESCAPE_OPEN, open);
-    out.extend(lex_with(body, ctx, config));
+    out.extend(super::lexer::lex_with_offset(
+        body,
+        ctx,
+        config,
+        source_offset,
+    ));
     push(out, K::ESCAPE_CLOSE, close);
     true
 }
@@ -757,13 +1163,14 @@ pub(crate) fn body(
     out: &mut Vec<Token>,
     ctx: &ParseCtx,
     config: LexConfig,
+    source_offset: usize,
 ) {
     if spec.settings.uncertain {
         push(out, K::VERBATIM_BODY, source);
         return;
     }
     if spec.family == Family::Fancy {
-        fancy(source, &spec.settings, out, ctx, config);
+        fancy(source, &spec.settings, out, ctx, config, source_offset);
         return;
     }
     let Ok(escape) = spec.settings.escapes(spec.family) else {
@@ -792,8 +1199,13 @@ pub(crate) fn body(
         {
             push(out, K::FOREIGN_COMMENT, &source[i..i + 1]);
             let payload = &source[i + 1..end];
-            if balanced(payload, ctx, config) {
-                out.extend(lex_with(payload, ctx, config));
+            if balanced(payload, ctx, config, source_offset + i + 1) {
+                out.extend(super::lexer::lex_with_offset(
+                    payload,
+                    ctx,
+                    config,
+                    source_offset + i + 1,
+                ));
             } else {
                 push(out, K::VERBATIM_BODY, payload);
             }
@@ -803,12 +1215,20 @@ pub(crate) fn body(
         let safe = spec.family == Family::Listings || class == Class::Code;
         if safe
             && let Some((open, close)) = &escape
-            && source[i..].starts_with(open)
+            && source[i..].starts_with(open.as_ref())
         {
             let a = i + open.len();
-            if let Some(rel) = source[a..].find(close) {
+            if let Some(rel) = source[a..].find(close.as_ref()) {
                 let b = a + rel;
-                if island(out, &source[a..b], open, close, ctx, config) {
+                if island(
+                    out,
+                    &source[a..b],
+                    open,
+                    close,
+                    ctx,
+                    config,
+                    source_offset + a,
+                ) {
                     i = b + close.len();
                     continue;
                 }
@@ -825,8 +1245,13 @@ pub(crate) fn body(
             if let Some(rel) = source[i + 1..].find('$') {
                 let b = i + 1 + rel;
                 let math = &source[i..=b];
-                if balanced(math, ctx, config) {
-                    out.extend(lex_with(math, ctx, config));
+                if balanced(math, ctx, config, source_offset + i) {
+                    out.extend(super::lexer::lex_with_offset(
+                        math,
+                        ctx,
+                        config,
+                        source_offset + i,
+                    ));
                     i = b + 1;
                     continue;
                 }
@@ -842,7 +1267,7 @@ pub(crate) fn body(
             if safe
                 && escape
                     .as_ref()
-                    .is_some_and(|(a, _)| source[pos..].starts_with(a))
+                    .is_some_and(|(a, _)| source[pos..].starts_with(a.as_ref()))
                 || spec.settings.flag("mathescape")
                     && (spec.family == Family::Listings || class == Class::Comment)
                     && source[pos..].starts_with('$')
@@ -862,21 +1287,22 @@ fn fancy(
     out: &mut Vec<Token>,
     ctx: &ParseCtx,
     config: LexConfig,
+    source_offset: usize,
 ) {
     let chars = settings
         .values
         .get("commandchars")
-        .and_then(|v| control_symbols(unbrace(v)));
+        .and_then(SettingValue::symbols);
     let chars = chars.as_deref().unwrap_or("");
-    let list: Vec<_> = chars.chars().collect();
+    let list: Vec<_> = chars.chars().take(4).collect();
     let comment = settings
         .values
         .get("commentchar")
-        .and_then(|v| control_symbols(unbrace(v)));
+        .and_then(SettingValue::symbols);
     if list.is_empty()
         && let Some(comment) = comment
             .as_ref()
-            .filter(|v| v.chars().count() == 1)
+            .filter(|v| v.chars().take(2).count() == 1)
             .and_then(|v| v.chars().next())
     {
         for line in source.split_inclusive(['\n', '\r']) {
@@ -899,7 +1325,9 @@ fn fancy(
         || list[0] == list[2]
         || list[1] == list[2]
         || settings.values.contains_key("commentchar")
-            && comment.as_ref().is_none_or(|c| c.chars().count() != 1)
+            && comment
+                .as_ref()
+                .is_none_or(|c| c.chars().take(2).count() != 1)
     {
         push(out, K::VERBATIM_BODY, source);
         return;
@@ -915,6 +1343,7 @@ fn fancy(
         comment,
         ctx,
         config,
+        source_offset,
     ));
 }
 
@@ -940,6 +1369,7 @@ pub(crate) const FULL_REPARSE_SIGNALS: &[&str] = &[
     "\\UndefineShortVerb",
     "{alltt}",
     "\\detokenize",
+    "\\DoNotIndex",
     "\\input",
     "\\DefineVerbatimEnvironment",
     "\\includecomment",
@@ -958,6 +1388,7 @@ pub(crate) fn needs_full_parse(source: &str) -> bool {
 pub(crate) struct ReparseGuard {
     pub full: bool,
     pub local_modes: bool,
+    pub letter_short_verbs: bool,
 }
 
 pub(crate) const LOCAL_REPARSE_SIGNALS: &[&str] = &[
@@ -972,8 +1403,25 @@ pub(crate) const LOCAL_REPARSE_SIGNALS: &[&str] = &[
 
 impl ReparseGuard {
     pub fn for_source(source: &str) -> Self {
+        let full = needs_full_parse(source);
         Self {
-            full: needs_full_parse(source),
+            full,
+            // Only an ASCII letter delimiter can affect an ASCII-letter WORD
+            // edit. Use the lexer's exact operand reader and conservatively
+            // include every source occurrence, even inactive/commented ones.
+            letter_short_verbs: full
+                && [
+                    "\\DefineShortVerb",
+                    "\\MakeShortVerb",
+                    "\\DeleteShortVerb",
+                    "\\UndefineShortVerb",
+                ]
+                .iter()
+                .any(|signal| {
+                    source.match_indices(signal).any(|(start, _)| {
+                        super::lexer::may_declare_letter_short_verb(&source[start + signal.len()..])
+                    })
+                }),
             local_modes: LOCAL_REPARSE_SIGNALS
                 .iter()
                 .any(|signal| source.contains(signal)),

@@ -14,6 +14,7 @@ pub mod fix;
 pub mod rules;
 pub mod settings;
 pub mod suppression;
+pub(crate) mod suppression_meta;
 
 pub use check::{check_document, check_document_fixable, lint_document, lint_document_with_kind};
 pub use diagnostic::{Applicability, Diagnostic, Edit, Fix, RelatedInfo, Severity};
@@ -21,4 +22,7 @@ pub use fix::{FixOutcome, MultiFixOutcome, apply_fixes, apply_fixes_multi};
 pub use rules::RuleSelection;
 
 pub mod render;
-pub use render::{OutputMode, render_findings};
+pub use render::{OutputMode, render_findings, render_json};
+
+#[cfg(test)]
+pub(crate) mod test_support;

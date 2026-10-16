@@ -5,6 +5,7 @@ pub mod config;
 pub mod file_discovery;
 pub mod ipc;
 pub mod lsp;
+mod native_path;
 pub mod texmf;
 use tex_ls_analysis::{bib, incremental, linter, project, text};
 use tex_ls_formatter::formatter;

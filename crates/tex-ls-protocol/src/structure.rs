@@ -1,5 +1,12 @@
 //! Structure operations over the source owned by an analysis snapshot.
-use super::*;
+use crate::{
+    convert::{lsp_range_with_cursor, path_to_uri},
+    folding, selection_range,
+};
+use lsp_types::{DocumentLink, FoldingRange, Position, SelectionRange, Uri};
+use rowan::TextSize;
+use std::path::Path;
+use tex_ls_analysis::{incremental::Analysis, source::FileKind, text::PositionEncoding};
 
 pub fn compute_folding(
     snapshot: &Analysis,

@@ -2,24 +2,26 @@
 
 ## Unreleased
 
-- Preserve printed `includeonly` arguments during file rename after local overrides or inside inert source. Keep conditional and dynamic listing settings from exposing unproved TeX references, and stop FancyVerb comments at bare CR line endings.
-- Keep copied and inspected command names navigable without executing their argument roles. Preserve ambient text or math parsing, nested real commands, and rename targets; apply local reader overrides in source order. Generated listing declarations cannot override readers after their factory has been redefined.
-- Cache label descriptions per source file so completion lists reuse section, caption, and ownership facts instead of rescanning the document for every candidate. Empty label queries render long titles only for the selected results.
-- Reuse proved operand ownership across source queries, editor declarations, hover, and lint checks. Keep first-use and post-edit requests from rebuilding the same definition and token indexes in each consumer. Table-column action probes reuse source signatures and request them only inside a table.
-- Speed up multi-cursor selection, Fix All, BibTeX range formatting, color pickers, and file-rename previews by batching positions and reusing source facts. Run native file-rename previews on the read pool with cancellation. Clamp oversized columns safely on 32-bit hosts.
-- Batch bulk quick-fix edits and competing-edit checks. Bound suppression suggestions to eight construct alternatives and one file-wide alternative, avoiding repeated full-file validation for every finding in a large selection.
-- Return InvalidParams for malformed range-formatting requests instead of terminating the native server.
-- Avoid stack overflow when detecting cycles in deeply nested include or package dependencies.
-- Publish acquired source membership and location catalogs once per batch, preserving overlays and stale-read guards without repeatedly cloning and sorting growing projects.
-- Index root membership, unresolved includes, and reverse subfile-parent relationships to avoid repeated workspace-wide searches during project construction. Resolve and encode semantic-token ranges only on requested lines while retaining full-document ownership and typography facts.
-- Remove repeated document scans from highlighting and graphics-path lookup. Reuse counted Unicode prefixes when encoding semantic tokens, outlines, diagnostics, navigation, document links, folds, and hints. Convert navigation ranges once per file without changing response order. Keep definition byte spans and batch declaration-container lookup for large result sets. Index command declaration ranges once per request and check glossary rename roots once per affected file. Use binary search for dependency aliases. Share inherited graphics directories across child files so prose edits do not rescan the root for every child. Reuse source mode and definition queries, keep cursor ownership checks local, coalesce identical token purposes, and remap semantic tokens without duplicating the payload. Cache lexical reparse guards and retain proven local edits in files with scoped control-word alphabets. Reject unclosed edited verbatim captures and shortverb edits whose boundaries cannot be proved.
-- Distinguish ordinary text, literal content, resource paths, and math structure in semantic highlighting. Keep printed numbers and BibTeX text and dates neutral. Report accurate standard roles for parameters, keywords, functions, TikZ operations, and BibTeX directives; editors choose their colors.
-- Add declaration and nested prose typography modifiers. Fix VS Code neutral-text and combined-font fallbacks without prescribing theme colors, and keep fallback parameter and operator patterns out of prose.
-- Color Python listings in both native and browser hosts. Allow client grammars for explicit C, C++, JavaScript, TypeScript, JSON, CSS, and HTML headers. Stop embedded grammars at LaTeX closers even when foreign strings or comments are unfinished.
-- Parse minted shortcuts, listing TeX escapes, Fancyvrb command characters, and included or excluded comment environments. Preserve authored listing layout, separate package defaults, and honor local overrides and explicit project declarations.
-- Protect literal URLs, unfinished inline verbatim, `\detokenize` token lists, and the token printed by `\string` from active TeX features. Preserve definition-bound parameters, subsequent active source, and literal layout; keep `alltt` commands active.
-- Restore known lexical switches and literal catcodes at group boundaries. Keep ambiguous language selectors, dynamic listing settings, and unknown conditional catcodes protected. Reparse settings edits fully when body ownership can change.
-- Share file-command override checks across highlighting, navigation, completion, and dependency collection. Honor local `\includeonly` overrides without discarding earlier filters. Preserve nested keyval boundaries and keep printed option values neutral.
+- Reduce repeated parsing and project scans during completion, highlighting,
+  diagnostics, navigation, formatting, and bulk edits. Bound retained request caches
+  and reuse source facts after incremental updates.
+- Improve lossless parsing and full/incremental equivalence for malformed input,
+  macro definitions, docstrip sources, literal bodies, and embedded code.
+- Distinguish prose, literal content, paths, and math in semantic highlighting.
+  Add declaration and text-style modifiers, Python listing colors, and embedded
+  grammar support for explicit C, C++, JavaScript, TypeScript, JSON, CSS, and HTML.
+- Preserve comments and protected layout during formatting. Batch safe fixes and
+  range edits without changing their meaning or splitting Unicode characters.
+- Improve bibliography key and string navigation, completion, rename, and
+  diagnostics across loaded resources, including literal entry dependencies and
+  Biber aliases. Decline edits when resolution is ambiguous.
+- Offer package-load quick fixes for supported commands in plain `article`,
+  `report`, and `book` documents with verified installed package sources. Recognize
+  `.clo` files and refresh package assistance after installation changes.
+- Add semantic-token delta responses and extend native/browser parity coverage.
+  Reject malformed requests safely and cancel stale native rename previews.
+- Fix project discovery, source acquisition, watcher refresh, compiler diagnostics,
+  source relocation, and cleanup across native and browser hosts.
 
 ## [0.1.3](https://github.com/backmatter/tex-ls/compare/v0.1.2...v0.1.3) - 2026-10-01
 

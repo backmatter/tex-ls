@@ -1,0 +1,585 @@
+{
+  "nativeConfig": "",
+  "initialize": {
+    "rootUri": "file:///architecture-settings/source",
+    "capabilities": {
+      "workspace": {
+        "applyEdit": true
+      },
+      "textDocument": {
+        "diagnostic": {},
+        "codeAction": {
+          "codeActionLiteralSupport": {
+            "codeActionKind": {
+              "valueSet": []
+            }
+          },
+          "isPreferredSupport": true
+        }
+      }
+    },
+    "initializationOptions": {
+      "texmf": {
+        "enabled": true,
+        "explicitOnly": true,
+        "useKpsewhich": false,
+        "roots": [
+          "/architecture-settings/installed"
+        ]
+      }
+    }
+  },
+  "files": {
+    "source/main.tex": "\\documentclass{article}\\usepackage{array}\\begin{document}\\dfrac{1}{2}\\end{document}",
+    "installed/amsgen.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsgen.sty"
+    },
+    "installed/amstext.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amstext.sty"
+    },
+    "installed/amsbsy.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsbsy.sty"
+    },
+    "installed/amsmath.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsmath.sty"
+    },
+    "installed/array.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/array.sty"
+    },
+    "installed/amsopn.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsopn.sty"
+    },
+    "installed/bk10.clo": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/bk10.clo"
+    },
+    "installed/size10.clo": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/size10.clo"
+    },
+    "installed/report.cls": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/report.cls"
+    },
+    "installed/book.cls": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/book.cls"
+    },
+    "installed/article.cls": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/article.cls"
+    },
+    "installed/amsfonts.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/amsfonts.sty"
+    },
+    "installed/amssymb.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/amssymb.sty"
+    },
+    "installed/booktabs.sty": {
+      "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/booktabs.sty"
+    }
+  },
+  "events": [
+    {
+      "method": "textDocument/didOpen",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex",
+          "languageId": "latex",
+          "version": 1,
+          "text": "\\documentclass{article}\\usepackage{array}\\begin{document}\\dfrac{1}{2}\\end{document}"
+        }
+      }
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "installed"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 1
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 1,
+        "inputs": {
+          "kind": "installed",
+          "value": {
+            "state": "present",
+            "value": {
+              "toolchain": "fixture",
+              "files": {
+                "amsgen.sty": "/architecture-settings/installed/amsgen.sty",
+                "amstext.sty": "/architecture-settings/installed/amstext.sty",
+                "amsbsy.sty": "/architecture-settings/installed/amsbsy.sty",
+                "amsmath.sty": "/architecture-settings/installed/amsmath.sty",
+                "array.sty": "/architecture-settings/installed/array.sty",
+                "amsopn.sty": "/architecture-settings/installed/amsopn.sty",
+                "bk10.clo": "/architecture-settings/installed/bk10.clo",
+                "size10.clo": "/architecture-settings/installed/size10.clo",
+                "report.cls": "/architecture-settings/installed/report.cls",
+                "book.cls": "/architecture-settings/installed/book.cls",
+                "article.cls": "/architecture-settings/installed/article.cls",
+                "amsfonts.sty": "/architecture-settings/installed/amsfonts.sty",
+                "amssymb.sty": "/architecture-settings/installed/amssymb.sty",
+                "booktabs.sty": "/architecture-settings/installed/booktabs.sty"
+              }
+            }
+          }
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      }
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 2
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 2,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings/source",
+              {
+                "kind": {
+                  "state": "present",
+                  "value": "directory"
+                },
+                "directory": {
+                  "state": "present",
+                  "value": {
+                    "complete": true,
+                    "entries": {
+                      "main.tex": "file"
+                    }
+                  }
+                }
+              }
+            ]
+          ],
+          "backing": [
+            [
+              "/architecture-settings/installed/amsgen.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsgen.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amstext.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amstext.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amsbsy.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsbsy.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amsmath.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsmath.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/array.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/array.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amsopn.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsopn.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/bk10.clo",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/bk10.clo"
+              }
+            ],
+            [
+              "/architecture-settings/installed/size10.clo",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/size10.clo"
+              }
+            ],
+            [
+              "/architecture-settings/installed/report.cls",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/report.cls"
+              }
+            ],
+            [
+              "/architecture-settings/installed/book.cls",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/book.cls"
+              }
+            ],
+            [
+              "/architecture-settings/installed/article.cls",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/article.cls"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amsfonts.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/amsfonts.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/amssymb.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/amssymb.sty"
+              }
+            ],
+            [
+              "/architecture-settings/installed/booktabs.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/common/booktabs.sty"
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "expectedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "expectedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 3
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 3,
+        "inputs": {
+          "kind": "files",
+          "backing": [
+            [
+              "/architecture-settings/installed/amsgen.sty",
+              "%%\n%% This is file `amsgen.sty',\n%% generated with the docstrip utility.\n%%\n%% The original source files were:\n%%\n%% amsgen.dtx \n%% \n%% Copyright (C) 1995, 1999 American Mathematical Society.\n%% Copyright (C) 2016-2025  LaTeX Project and American Mathematical Society.\n%% \n%% This work may be distributed and/or modified under the\n%% conditions of the LaTeX Project Public License, either version 1.3c\n%% of this license or (at your option) any later version.\n%% The latest version of this license is in\n%%   https://www.latex-project.org/lppl.txt\n%% and version 1.3c or later is part of all distributions of LaTeX\n%% version 2005/12/01 or later.\n%% \n%% This work has the LPPL maintenance status `maintained'.\n%% \n%% The Current Maintainer of this work is the LaTeX Project.\n%% \n\\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)\n[1994/12/01]% LaTeX date must December 1994 or later\n\\ProvidesFile{amsgen.sty}[1999/11/30 v2.0 generic functions]\n\\providecommand{\\@saveprimitive}[2]{\\begingroup\\escapechar`\\\\\\relax\n  \\edef\\@tempa{\\string#1}\\edef\\@tempb{\\meaning#1}%\n  \\ifx\\@tempa\\@tempb \\global\\let#2#1%\n  \\else\n    \\edef\\@tempb{\\meaning#2}%\n    \\ifx\\@tempa\\@tempb\n    \\else\n      \\@latex@error{Unable to properly define \\string#2; primitive\n      \\noexpand#1no longer primitive}\\@eha\n    \\fi\n  \\fi\n  \\endgroup}\n\\let\\@xp=\\expandafter\n\\let\\@nx=\\noexpand\n\\newtoks\\@emptytoks\n\\def\\@oparg#1[#2]{\\@ifnextchar[{#1}{#1[#2]}}\n\\long\\def\\@ifempty#1{\\@xifempty#1@@..\\@nil}\n\\long\\def\\@xifempty#1#2@#3#4#5\\@nil{%\n  \\ifx#3#4\\@xp\\@firstoftwo\\else\\@xp\\@secondoftwo\\fi}\n\\long\\def\\@ifnotempty#1{\\@ifempty{#1}{}}\n\\def\\FN@{\\futurelet\\@let@token}\n\\def\\DN@{\\def\\next@}\n\\def\\RIfM@{\\relax\\ifmmode}\n\\def\\setboxz@h{\\setbox\\z@\\hbox}\n\\def\\wdz@{\\wd\\z@}\n\\def\\boxz@{\\box\\z@}\n\\def\\relaxnext@{\\let\\@let@token\\relax}\n\\long\\def\\new@ifnextchar#1#2#3{%\n  \\let\\reserved@d= #1%\n  \\def\\reserved@a{#2}\\def\\reserved@b{#3}%\n  \\futurelet\\@let@token\\new@ifnch\n}\n\\def\\new@ifnch{%\n  \\ifx\\@let@token\\reserved@d \\let\\reserved@b\\reserved@a \\fi\n  \\reserved@b\n}\n\\def\\@ifstar#1#2{\\new@ifnextchar *{\\def\\reserved@a*{#1}\\reserved@a}{#2}}\n\\@ifundefined{every@math@size}{%\n\\let\\every@math@size=\\every@size\n\\def\\glb@settings{%\n     \\expandafter\\ifx\\csname S@\\f@size\\endcsname\\relax\n       \\calculate@math@sizes\n     \\fi\n     \\csname S@\\f@size\\endcsname\n      \\ifmath@fonts\n        \\begingroup\n          \\escapechar\\m@ne\n          \\csname mv@\\math@version \\endcsname\n          \\globaldefs\\@ne\n          \\let \\glb@currsize \\f@size\n          \\math@fonts\n        \\endgroup\n        \\the\\every@math@size\n      \\else\n      \\fi\n}\n\\def\\set@fontsize#1#2#3{%\n    \\@defaultunits\\@tempdimb#2pt\\relax\\@nnil\n    \\edef\\f@size{\\strip@pt\\@tempdimb}%\n    \\@defaultunits\\@tempskipa#3pt\\relax\\@nnil\n    \\edef\\f@baselineskip{\\the\\@tempskipa}%\n    \\edef\\f@linespread{#1}%\n    \\let\\baselinestretch\\f@linespread\n      \\def\\size@update{%\n        \\baselineskip\\f@baselineskip\\relax\n        \\baselineskip\\f@linespread\\baselineskip\n        \\normalbaselineskip\\baselineskip\n        \\setbox\\strutbox\\hbox{%\n          \\vrule\\@height.7\\baselineskip\n                \\@depth.3\\baselineskip\n                \\@width\\z@}%\n%%%     \\the\\every@size\n        \\let\\size@update\\relax}%\n  }\n}{}% end \\@ifundefined test\n\\newdimen\\ex@\n\\addto@hook\\every@math@size{\\compute@ex@}\n\\def\\compute@ex@{%\n  \\begingroup\n  \\dimen@-\\f@size\\p@\n  \\ifdim\\dimen@<-20\\p@\n    \\global\\ex@ 1.5\\p@\n  \\else\n    \\advance\\dimen@10\\p@ \\multiply\\dimen@\\tw@\n    \\edef\\@tempa{\\ifdim\\dimen@>\\z@ -\\fi}%\n    \\dimen@ \\ifdim\\dimen@<\\z@ -\\fi \\dimen@\n    \\advance\\dimen@-\\@m sp % fudge factor\n    \\vfuzz\\p@\n    \\def\\do{\\ifdim\\dimen@>\\z@\n      \\vfuzz=.97\\vfuzz\n      \\advance\\dimen@ -\\p@\n      \\@xp\\do \\fi}%\n    \\do\n    \\dimen@\\p@ \\advance\\dimen@-\\vfuzz\n    \\global\\ex@\\p@\n    \\global\\advance\\ex@ \\@tempa\\dimen@\n  \\fi\n  \\endgroup\n}\n\\def\\@addpunct#1{\\ifnum\\spacefactor>\\@m \\else#1\\fi}\n\\def\\frenchspacing{\\sfcode`\\.1006\\sfcode`\\?1005\\sfcode`\\!1004%\n  \\sfcode`\\:1003\\sfcode`\\;1002\\sfcode`\\,1001 }\n\\def\\nomath@env{\\@amsmath@err{%\n  \\string\\begin{\\@currenvir} allowed only in paragraph mode%\n}\\@ehb% \"You've lost some text\"\n}\n\\def\\Invalid@@{Invalid use of \\string}\n\\def\\usepackage#1{}\n\\endinput\n%%\n%% End of file `amsgen.sty'.\n"
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "installed/amsgen.sty": "%%\n%% This is file `amsgen.sty',\n%% generated with the docstrip utility.\n%%\n%% The original source files were:\n%%\n%% amsgen.dtx \n%% \n%% Copyright (C) 1995, 1999 American Mathematical Society.\n%% Copyright (C) 2016-2025  LaTeX Project and American Mathematical Society.\n%% \n%% This work may be distributed and/or modified under the\n%% conditions of the LaTeX Project Public License, either version 1.3c\n%% of this license or (at your option) any later version.\n%% The latest version of this license is in\n%%   https://www.latex-project.org/lppl.txt\n%% and version 1.3c or later is part of all distributions of LaTeX\n%% version 2005/12/01 or later.\n%% \n%% This work has the LPPL maintenance status `maintained'.\n%% \n%% The Current Maintainer of this work is the LaTeX Project.\n%% \n\\NeedsTeXFormat{LaTeX2e}% LaTeX 2.09 can't be used (nor non-LaTeX)\n[1994/12/01]% LaTeX date must December 1994 or later\n\\ProvidesFile{amsgen.sty}[1999/11/30 v2.0 generic functions]\n\\providecommand{\\@saveprimitive}[2]{\\begingroup\\escapechar`\\\\\\relax\n  \\edef\\@tempa{\\string#1}\\edef\\@tempb{\\meaning#1}%\n  \\ifx\\@tempa\\@tempb \\global\\let#2#1%\n  \\else\n    \\edef\\@tempb{\\meaning#2}%\n    \\ifx\\@tempa\\@tempb\n    \\else\n      \\@latex@error{Unable to properly define \\string#2; primitive\n      \\noexpand#1no longer primitive}\\@eha\n    \\fi\n  \\fi\n  \\endgroup}\n\\let\\@xp=\\expandafter\n\\let\\@nx=\\noexpand\n\\newtoks\\@emptytoks\n\\def\\@oparg#1[#2]{\\@ifnextchar[{#1}{#1[#2]}}\n\\long\\def\\@ifempty#1{\\@xifempty#1@@..\\@nil}\n\\long\\def\\@xifempty#1#2@#3#4#5\\@nil{%\n  \\ifx#3#4\\@xp\\@firstoftwo\\else\\@xp\\@secondoftwo\\fi}\n\\long\\def\\@ifnotempty#1{\\@ifempty{#1}{}}\n\\def\\FN@{\\futurelet\\@let@token}\n\\def\\DN@{\\def\\next@}\n\\def\\RIfM@{\\relax\\ifmmode}\n\\def\\setboxz@h{\\setbox\\z@\\hbox}\n\\def\\wdz@{\\wd\\z@}\n\\def\\boxz@{\\box\\z@}\n\\def\\relaxnext@{\\let\\@let@token\\relax}\n\\long\\def\\new@ifnextchar#1#2#3{%\n  \\let\\reserved@d= #1%\n  \\def\\reserved@a{#2}\\def\\reserved@b{#3}%\n  \\futurelet\\@let@token\\new@ifnch\n}\n\\def\\new@ifnch{%\n  \\ifx\\@let@token\\reserved@d \\let\\reserved@b\\reserved@a \\fi\n  \\reserved@b\n}\n\\def\\@ifstar#1#2{\\new@ifnextchar *{\\def\\reserved@a*{#1}\\reserved@a}{#2}}\n\\@ifundefined{every@math@size}{%\n\\let\\every@math@size=\\every@size\n\\def\\glb@settings{%\n     \\expandafter\\ifx\\csname S@\\f@size\\endcsname\\relax\n       \\calculate@math@sizes\n     \\fi\n     \\csname S@\\f@size\\endcsname\n      \\ifmath@fonts\n        \\begingroup\n          \\escapechar\\m@ne\n          \\csname mv@\\math@version \\endcsname\n          \\globaldefs\\@ne\n          \\let \\glb@currsize \\f@size\n          \\math@fonts\n        \\endgroup\n        \\the\\every@math@size\n      \\else\n      \\fi\n}\n\\def\\set@fontsize#1#2#3{%\n    \\@defaultunits\\@tempdimb#2pt\\relax\\@nnil\n    \\edef\\f@size{\\strip@pt\\@tempdimb}%\n    \\@defaultunits\\@tempskipa#3pt\\relax\\@nnil\n    \\edef\\f@baselineskip{\\the\\@tempskipa}%\n    \\edef\\f@linespread{#1}%\n    \\let\\baselinestretch\\f@linespread\n      \\def\\size@update{%\n        \\baselineskip\\f@baselineskip\\relax\n        \\baselineskip\\f@linespread\\baselineskip\n        \\normalbaselineskip\\baselineskip\n        \\setbox\\strutbox\\hbox{%\n          \\vrule\\@height.7\\baselineskip\n                \\@depth.3\\baselineskip\n                \\@width\\z@}%\n%%%     \\the\\every@size\n        \\let\\size@update\\relax}%\n  }\n}{}% end \\@ifundefined test\n\\newdimen\\ex@\n\\addto@hook\\every@math@size{\\compute@ex@}\n\\def\\compute@ex@{%\n  \\begingroup\n  \\dimen@-\\f@size\\p@\n  \\ifdim\\dimen@<-20\\p@\n    \\global\\ex@ 1.5\\p@\n  \\else\n    \\advance\\dimen@10\\p@ \\multiply\\dimen@\\tw@\n    \\edef\\@tempa{\\ifdim\\dimen@>\\z@ -\\fi}%\n    \\dimen@ \\ifdim\\dimen@<\\z@ -\\fi \\dimen@\n    \\advance\\dimen@-\\@m sp % fudge factor\n    \\vfuzz\\p@\n    \\def\\do{\\ifdim\\dimen@>\\z@\n      \\vfuzz=.97\\vfuzz\n      \\advance\\dimen@ -\\p@\n      \\@xp\\do \\fi}%\n    \\do\n    \\dimen@\\p@ \\advance\\dimen@-\\vfuzz\n    \\global\\ex@\\p@\n    \\global\\advance\\ex@ \\@tempa\\dimen@\n  \\fi\n  \\endgroup\n}\n\\def\\@addpunct#1{\\ifnum\\spacefactor>\\@m \\else#1\\fi}\n\\def\\frenchspacing{\\sfcode`\\.1006\\sfcode`\\?1005\\sfcode`\\!1004%\n  \\sfcode`\\:1003\\sfcode`\\;1002\\sfcode`\\,1001 }\n\\def\\nomath@env{\\@amsmath@err{%\n  \\string\\begin{\\@currenvir} allowed only in paragraph mode%\n}\\@ehb% \"You've lost some text\"\n}\n\\def\\Invalid@@{Invalid use of \\string}\n\\def\\usepackage#1{}\n\\endinput\n%%\n%% End of file `amsgen.sty'.\n"
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "excludedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 4
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 4,
+        "inputs": {
+          "kind": "files",
+          "backing": [
+            [
+              "/architecture-settings/installed/amsgen.sty",
+              {
+                "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsgen.sty"
+              }
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "installed/amsgen.sty": {
+          "sourceFixture": "../../crates/tex-ls-analysis/tests/fixtures/installed-sources/2025/amsgen.sty"
+        }
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "expectedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 5
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 5,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings/source/size10.clo",
+              {
+                "kind": {
+                  "state": "present",
+                  "value": "file"
+                },
+                "directory": {
+                  "state": "unknown"
+                }
+              }
+            ]
+          ],
+          "backing": [
+            [
+              "/architecture-settings/source/size10.clo",
+              "\\def\\usepackage#1{}"
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "source/size10.clo": "\\def\\usepackage#1{}"
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "excludedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    },
+    {
+      "method": "tex-ls/beginExternalRefresh",
+      "params": {
+        "uri": "file:///architecture-settings/source/main.tex",
+        "kind": "files"
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "token": 6
+      }
+    },
+    {
+      "method": "tex-ls/applyExternalInputs",
+      "params": {
+        "token": 6,
+        "inputs": {
+          "kind": "files",
+          "locations": [
+            [
+              "/architecture-settings/source/size10.clo",
+              {
+                "kind": {
+                  "state": "absent"
+                },
+                "directory": {
+                  "state": "unknown"
+                }
+              }
+            ]
+          ],
+          "backing": [
+            [
+              "/architecture-settings/source/size10.clo",
+              null
+            ]
+          ]
+        }
+      },
+      "embeddedOnly": true,
+      "expected": {
+        "applied": true
+      },
+      "files": {
+        "source/size10.clo": null
+      }
+    },
+    {
+      "method": "textDocument/codeAction",
+      "params": {
+        "textDocument": {
+          "uri": "file:///architecture-settings/source/main.tex"
+        },
+        "range": {
+          "start": {
+            "line": 0,
+            "character": 0
+          },
+          "end": {
+            "line": 0,
+            "character": 83
+          }
+        },
+        "context": {
+          "diagnostics": [],
+          "only": [
+            "quickfix"
+          ]
+        }
+      },
+      "request": true,
+      "expectedActionTitle": "Load package `amsmath` for `\\dfrac`"
+    }
+  ]
+}

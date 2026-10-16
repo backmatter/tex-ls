@@ -31,10 +31,39 @@ pub fn demo_diagnostics(source: &str) -> Vec<Diagnostic> {
     let root = parse(source).syntax();
     let model = Model::build(&root);
     // Explicit fixture: one complete root loads this resource with no uses.
-    let project = super::project::ProjectFacts {
-        complete: true,
-        ..Default::default()
-    };
+    let tex_path = std::path::Path::new("example.tex");
+    let tex_root =
+        crate::parser::parse("\\documentclass{article}\\bibliography{references}").syntax();
+    let tex_model = crate::semantic::SemanticModel::build(&tex_root);
+    let graph = crate::project::IncludeGraph::build(
+        &[crate::project::graph::FileFacts {
+            path: tex_path.into(),
+            include_edges: Vec::new(),
+            include_only: Default::default(),
+        }],
+        None,
+    );
+    let citations = crate::project::ResolvedCitations::build(
+        &[crate::project::citations::CiteFileFacts {
+            path: tex_path.into(),
+            bib_targets: vec![crate::project::BibTarget::Path(path.clone())],
+            manual_keys: Vec::new(),
+            nocite_all: false,
+            case_sensitive: Some(false),
+            is_document_root: true,
+        }],
+        &graph,
+        &std::collections::HashMap::from([(
+            path.clone(),
+            crate::project::citations::document_cite_names(&model),
+        )]),
+    );
+    let project = super::project::ProjectFacts::build(
+        &path,
+        &citations,
+        [(tex_path, &tex_model)],
+        [(path.as_path(), &model)],
+    );
     lint_document_with_project(&path, &root, &model, Some(&project))
 }
 

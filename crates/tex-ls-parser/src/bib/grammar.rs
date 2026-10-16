@@ -272,6 +272,12 @@ impl<'t> Parser<'t> {
                 self.bump();
             }
             self.close();
+            self.skip_trivia_and_comments();
+            if self.kind().is_some_and(|kind| {
+                kind != closer && !matches!(kind, SyntaxKind::COMMA | SyntaxKind::AT)
+            }) {
+                self.error("expected `,` after the cite key");
+            }
         }
 
         // Fields must be `,`-separated. After parsing one, a comma is required
@@ -379,6 +385,7 @@ impl<'t> Parser<'t> {
             self.skip_trivia_and_comments();
             // Defend against a `#` with nothing after it before the closer/EOF.
             if self.at_end() || self.kind() == Some(closer) {
+                self.error("expected a value");
                 break;
             }
         }
@@ -458,7 +465,7 @@ impl<'t> Parser<'t> {
         self.skip_trivia_and_comments();
         if self.at_name() {
             self.field(closer);
-        } else if self.kind() != Some(closer) && !self.at_end() {
+        } else {
             self.error("expected `name = value` in @string");
         }
         self.expect_close(closer);
@@ -467,9 +474,7 @@ impl<'t> Parser<'t> {
     /// `@preamble{ value }`: a lone value, then the closer.
     fn preamble_body(&mut self, closer: SyntaxKind) {
         self.skip_trivia_and_comments();
-        if self.kind() != Some(closer) && !self.at_end() {
-            self.value(closer);
-        }
+        self.value(closer);
         self.expect_close(closer);
     }
 

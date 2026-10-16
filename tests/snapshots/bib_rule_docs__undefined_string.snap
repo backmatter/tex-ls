@@ -4,7 +4,7 @@ expression: render_rule_doc(rule.as_ref())
 ---
 ## `undefined-string`
 
-Report a string macro with no definition in the file. The twelve month macros `jan` through `dec` are predefined. Cross-file string resolution is not supported, so a definition in another bibliography may produce a false positive. No automatic fix is offered.
+Report a string macro used in a field or preamble with no definition in its loaded bibliography resources. The twelve month macros `jan` through `dec` are predefined. Incomplete rooted projects suppress this warning; standalone files check local definitions. No automatic fix is offered.
 
 This rule is **enabled by default**.
 

@@ -13,7 +13,8 @@ use smol_str::SmolStr;
 
 use super::RIGHT_CMD;
 use crate::parser::conditional;
-use crate::parser::lexer::{ExplToggle, ParseCtx, Token, definition_name_slots, expl_toggle};
+use crate::parser::lexer::{ExplToggle, ParseCtx, Token, expl_toggle};
+use crate::parser::reader_facts::definition_name_slots;
 use crate::syntax::SyntaxKind;
 
 /// Everything [`super::Parser::new`] needs to know about the token stream up

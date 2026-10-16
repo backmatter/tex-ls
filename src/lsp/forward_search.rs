@@ -23,15 +23,16 @@
 //! the command, nor the result shape, nor [`pdf_path`], nor any `[build]` key.
 //!
 //! There is deliberately **no** `trait ForwardSearchBackend` yet: a trait with a
-//! single implementor is the premature re-modelling `AGENTS.md` pushes back on,
+//! single implementor adds no backend choice,
 //! and promoting this free function to a trait method later is a one-line change
 //! at one call site.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-
 use crate::config::BuildConfig;
 use serde::{Deserialize, Serialize};
+use std::{
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 /// The sole argument to `tex-ls.forwardSearch` (LSP positions are zero-based).
 #[derive(Debug, Deserialize)]
@@ -45,16 +46,20 @@ pub(crate) struct ForwardSearchParams {
 #[serde(tag = "outcome", rename_all = "camelCase")]
 pub(crate) enum ForwardSearchOutcome {
     Launched {
+        #[serde(with = "crate::native_path::path")]
         source: PathBuf,
+        #[serde(with = "crate::native_path::path")]
         pdf: PathBuf,
         line1: u32,
     },
     Unconfigured,
     MissingPdf {
+        #[serde(with = "crate::native_path::path")]
         path: PathBuf,
     },
     UnsupportedSource,
     AmbiguousRoot {
+        #[serde(with = "crate::native_path::paths")]
         candidates: Vec<PathBuf>,
     },
     LaunchFailed {
@@ -124,38 +129,47 @@ pub(crate) fn pdf_path(root: &Path, build: &BuildConfig) -> Option<PathBuf> {
 ///   percent is surprising, but matching it is what keeps existing viewer
 ///   recipes portable;
 /// - a trailing lone `%` emits `%`.
-fn substitute(arg: &str, tex: &str, pdf: &str, line: u32) -> String {
+fn substitute(
+    arg: &str,
+    tex: &std::ffi::OsStr,
+    pdf: &std::ffi::OsStr,
+    line: u32,
+) -> std::ffi::OsString {
     if arg.len() >= 2 && arg.starts_with('"') && arg.ends_with('"') {
-        return arg[1..arg.len() - 1].to_owned();
+        return arg[1..arg.len() - 1].into();
     }
-    let mut out = String::with_capacity(arg.len());
-    let mut chars = arg.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            out.push(ch);
-            continue;
+    let mut out = std::ffi::OsString::with_capacity(arg.len());
+    let mut rest = arg;
+    while let Some(index) = rest.find('%') {
+        out.push(&rest[..index]);
+        let after = &rest[index + 1..];
+        let Some(ch) = after.chars().next() else {
+            out.push("%");
+            return out;
+        };
+        match ch {
+            'f' => out.push(tex),
+            'p' => out.push(pdf),
+            'l' => out.push(line.to_string()),
+            _ => out.push(&after[..ch.len_utf8()]),
         }
-        match chars.next() {
-            Some('f') => out.push_str(tex),
-            Some('p') => out.push_str(pdf),
-            Some('l') => out.push_str(&line.to_string()),
-            Some(other) => out.push(other),
-            None => out.push('%'),
-        }
+        rest = &after[ch.len_utf8()..];
     }
+    out.push(rest);
     out
 }
 
-/// [`substitute`] over every configured argument.
-///
-/// Paths go through [`Path::to_string_lossy`] rather than `Display`: a viewer
-/// argument is data we hand to another process, so the lossy-but-defined
-/// conversion is the right one for a non-UTF-8 path.
-pub(crate) fn viewer_args(args: &[String], target: &SearchTarget) -> Vec<String> {
-    let tex = target.tex.to_string_lossy();
-    let pdf = target.pdf.to_string_lossy();
+/// Substitute placeholders while preserving native source and PDF path bytes.
+pub(crate) fn viewer_args(args: &[String], target: &SearchTarget) -> Vec<std::ffi::OsString> {
     args.iter()
-        .map(|arg| substitute(arg, &tex, &pdf, target.line))
+        .map(|arg| {
+            substitute(
+                arg,
+                target.tex.as_os_str(),
+                target.pdf.as_os_str(),
+                target.line,
+            )
+        })
         .collect()
 }
 
@@ -222,6 +236,89 @@ pub(crate) fn spawn_viewer(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn forward_outcomes_roundtrip_non_utf8_native_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let source = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/project/main\xff.tex".to_vec(),
+        ));
+        let pdf = PathBuf::from(std::ffi::OsString::from_vec(
+            b"/project/main\xfe.pdf".to_vec(),
+        ));
+        for outcome in [
+            ForwardSearchOutcome::Launched {
+                source: source.clone(),
+                pdf: pdf.clone(),
+                line1: 42,
+            },
+            ForwardSearchOutcome::MissingPdf { path: pdf.clone() },
+            ForwardSearchOutcome::AmbiguousRoot {
+                candidates: vec![PathBuf::from("/normal.tex"), source.clone()],
+            },
+        ] {
+            let value =
+                serde_json::to_value(&outcome).expect("native paths have a JSON representation");
+            assert_eq!(
+                serde_json::from_value::<ForwardSearchOutcome>(value).unwrap(),
+                outcome
+            );
+        }
+        let value =
+            serde_json::to_value(ForwardSearchOutcome::MissingPdf { path: pdf.clone() }).unwrap();
+        assert_eq!(
+            value["path"]["uri"],
+            tex_ls_protocol::path_to_uri(&pdf).unwrap().as_str()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn viewer_arguments_preserve_native_path_bytes_and_literal_escapes() {
+        use std::os::unix::ffi::OsStringExt;
+        let target = SearchTarget {
+            tex: PathBuf::from(std::ffi::OsString::from_vec(
+                b"/project/main\xff.tex".to_vec(),
+            )),
+            pdf: PathBuf::from(std::ffi::OsString::from_vec(
+                b"/project/main\xfe.pdf".to_vec(),
+            )),
+            line: 42,
+        };
+        let args = ["α:%f:%l", "%p", "\"%f\"", "%%f%z%"].map(String::from);
+        let actual = viewer_args(&args, &target);
+        let mut expected = "α:".as_bytes().to_vec();
+        expected.extend_from_slice(target.tex.as_os_str().as_encoded_bytes());
+        expected.extend_from_slice(b":42");
+        assert_eq!(
+            std::ffi::OsStr::new(&actual[0]).as_encoded_bytes(),
+            expected
+        );
+        assert_eq!(std::ffi::OsStr::new(&actual[1]), target.pdf.as_os_str());
+        assert_eq!(std::ffi::OsStr::new(&actual[2]), std::ffi::OsStr::new("%f"));
+        assert_eq!(
+            std::ffi::OsStr::new(&actual[3]),
+            std::ffi::OsStr::new("%fz%")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn viewer_arguments_preserve_unpaired_native_utf16_units() {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let tex = std::ffi::OsString::from_wide(&[b'a' as u16, 0xd800, b'b' as u16]);
+        let target = SearchTarget {
+            tex: PathBuf::from(tex.clone()),
+            pdf: PathBuf::from("out.pdf"),
+            line: 42,
+        };
+        let actual = viewer_args(&["prefix:%f:suffix".into()], &target);
+        let mut expected: Vec<_> = "prefix:".encode_utf16().collect();
+        expected.extend(tex.encode_wide());
+        expected.extend(":suffix".encode_utf16());
+        assert_eq!(actual[0].encode_wide().collect::<Vec<_>>(), expected);
+    }
+
     fn target() -> SearchTarget {
         SearchTarget {
             tex: PathBuf::from("chapter.tex"),
@@ -230,8 +327,13 @@ mod tests {
         }
     }
 
-    fn subst(arg: &str) -> String {
-        substitute(arg, "chapter.tex", "main.pdf", 42)
+    fn subst(arg: &str) -> std::ffi::OsString {
+        substitute(
+            arg,
+            std::ffi::OsStr::new("chapter.tex"),
+            std::ffi::OsStr::new("main.pdf"),
+            42,
+        )
     }
 
     #[test]

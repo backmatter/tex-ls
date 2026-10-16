@@ -11,7 +11,7 @@ use smol_str::SmolStr;
 
 use crate::bib::ast;
 use crate::bib::semantic::Model;
-use crate::bib::semantic::entry::{Entry, StringDef, StringUse};
+use crate::bib::semantic::entry::{Entry, EntryDependency, StringDef, StringUse};
 use crate::bib::syntax::{SyntaxKind, SyntaxNode};
 
 /// Month abbreviations BibTeX/biber predefine as `@string` macros. A bare use of one
@@ -31,6 +31,14 @@ pub fn build(root: &SyntaxNode) -> Model {
         match node.kind() {
             SyntaxKind::ENTRY => collect_entry(&node, &mut model),
             SyntaxKind::STRING_ENTRY => collect_string(&node, &mut model),
+            SyntaxKind::PREAMBLE_ENTRY => {
+                for value in node
+                    .children()
+                    .filter(|child| child.kind() == SyntaxKind::VALUE)
+                {
+                    collect_value_uses(&value, &mut model);
+                }
+            }
             _ => continue,
         }
         // BibTeX entries cannot nest entries; collect_entry/string already read
@@ -81,6 +89,7 @@ fn collect_entry(entry: &SyntaxNode, model: &mut Model) {
             key_range,
             range: entry.text_range(),
             duplicate: false,
+            dependencies: entry_dependencies(entry),
         });
     }
 }
@@ -126,7 +135,7 @@ fn resolve(model: &mut Model) {
     // Duplicate cite keys (case-insensitive; the first occurrence stays `false`).
     let mut seen: HashSet<SmolStr> = HashSet::new();
     for entry in &mut model.entries {
-        let folded = SmolStr::new(entry.key.to_lowercase());
+        let folded = SmolStr::new(entry.key.to_ascii_lowercase());
         if !seen.insert(folded) {
             entry.duplicate = true;
         }
@@ -139,6 +148,63 @@ fn resolve(model: &mut Model) {
     for string_use in &mut model.string_uses {
         string_use.resolved = defined.contains(&string_use.name);
     }
+}
+
+/// Never infer a dependency from a concatenation or a string macro's expansion.
+pub(super) fn entry_dependencies(entry: &SyntaxNode) -> Vec<EntryDependency> {
+    let mut result = Vec::new();
+    for field in ast::fields(entry) {
+        let Some(name) = ast::field_name(&field).map(|name| name.to_lowercase()) else {
+            continue;
+        };
+        if !matches!(
+            name.as_str(),
+            "crossref" | "xref" | "xdata" | "related" | "entryset" | "ids"
+        ) {
+            continue;
+        }
+        let Some(value) = ast::field_value(&field) else {
+            continue;
+        };
+        let raw = value.text().to_string();
+        let leading = raw.len() - raw.trim_start().len();
+        let trimmed = raw.trim();
+        let literal = if value.children().count() == 1 {
+            trimmed
+                .strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .or_else(|| trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+        } else {
+            None
+        };
+        let Some(inner) = literal.filter(|s| {
+            !(matches!(name.as_str(), "crossref" | "xref") && s.contains(','))
+                && !s
+                    .chars()
+                    .any(|c| matches!(c, '{' | '}' | '\\' | '#' | '%' | '"'))
+        }) else {
+            result.push(EntryDependency {
+                field: name.into(),
+                key: None,
+                range: value.text_range(),
+            });
+            continue;
+        };
+        let mut start = usize::from(value.text_range().start()) + leading + 1;
+        for part in inner.split(',') {
+            let key = part.trim();
+            let at = start + part.len() - part.trim_start().len();
+            let range = rowan::TextRange::new((at as u32).into(), ((at + key.len()) as u32).into());
+            let valid = !key.is_empty() && !key.chars().any(char::is_whitespace);
+            result.push(EntryDependency {
+                field: name.clone().into(),
+                key: valid.then(|| key.into()),
+                range,
+            });
+            start += part.len() + 1;
+        }
+    }
+    result
 }
 
 #[cfg(test)]

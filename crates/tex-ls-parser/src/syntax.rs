@@ -137,6 +137,20 @@ pub fn token_at_offset<L: rowan::Language>(
     }
 }
 
+/// Candidate tokens for a left-first cursor search. An interior token fills
+/// both slots; a token boundary supplies the distinct left and right tokens.
+/// Empty syntax has no candidates. Callers retain their own ownership filters.
+pub fn token_candidates_at_offset<L: rowan::Language>(
+    root: &rowan::SyntaxNode<L>,
+    at: rowan::TextSize,
+) -> Option<[rowan::SyntaxToken<L>; 2]> {
+    match token_at_offset(root, at) {
+        rowan::TokenAtOffset::None => None,
+        rowan::TokenAtOffset::Single(token) => Some([token.clone(), token]),
+        rowan::TokenAtOffset::Between(left, right) => Some([left, right]),
+    }
+}
+
 /// Whitespace and newlines are the only trivia the formatter rewrites; comments
 /// are preserved verbatim and so are *not* collapsible. A shared shape
 /// predicate: the formatter's gap normalization and the semantic layer's expl3
@@ -199,5 +213,74 @@ mod lookup_tests {
         ] {
             check(crate::bib::parse(source).syntax());
         }
+    }
+
+    #[test]
+    fn indexed_lookup_matches_rowan_in_wide_nested_paragraphs() {
+        let source = format!(
+            "\\begin{{document}}\n{}\\end{{document}}\n",
+            "Ordinary é😀 words and $alphabet + x^2_i$.\n\n".repeat(64)
+        );
+        let parsed = crate::parser::parse(&source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let root = parsed.syntax();
+        assert_eq!(root.text().to_string(), source);
+        assert!(
+            root.descendants()
+                .filter(|node| node.kind() == SyntaxKind::PARAGRAPH)
+                .count()
+                >= 64,
+            "fixture must exercise a wide parent"
+        );
+        check(root);
+    }
+}
+
+/// Comma-separated nonempty names with byte ranges in the original source.
+/// Callers decide whether comments and other syntax are eligible before splitting.
+pub fn comma_separated_spans(
+    text: &str,
+    start: rowan::TextSize,
+) -> impl Iterator<Item = (&str, rowan::TextRange)> {
+    text.split(',')
+        .scan(0usize, |offset, segment| {
+            let segment_offset = *offset;
+            *offset += segment.len() + 1;
+            Some((segment_offset, segment))
+        })
+        .filter_map(move |(offset, segment)| {
+            let name = segment.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let lead = segment.len() - segment.trim_start().len();
+            let name_start = start + rowan::TextSize::new((offset + lead) as u32);
+            Some((
+                name,
+                rowan::TextRange::at(name_start, (name.len() as u32).into()),
+            ))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn comma_names_keep_unicode_byte_offsets_and_drop_empty_segments() {
+        let source = "prefix{, \u{2003}ä ,,, 日本\t, }suffix";
+        let start = source.find('{').unwrap() + 1;
+        let end = source.find('}').unwrap();
+        let spans: Vec<_> =
+            super::comma_separated_spans(&source[start..end], (start as u32).into()).collect();
+        assert_eq!(
+            spans.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["ä", "日本"]
+        );
+        for (name, range) in spans {
+            assert_eq!(
+                &source[usize::from(range.start())..usize::from(range.end())],
+                name
+            );
+        }
+        assert_eq!(super::comma_separated_spans(" , , ", 0.into()).count(), 0);
     }
 }

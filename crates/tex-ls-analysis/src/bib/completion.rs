@@ -11,8 +11,8 @@
 //! Entry types and field names are drawn from the bib field/entry DB
 //! ([`builtin`]); `@string` macro names from the
 //! per-file [`Model`] (its `@string` definitions) plus the predefined month macros.
-//! Cite *keys* are a `.tex`-side concern (see [`crate::completion`]); they are not
-//! completed in `.bib` (a key is user-authored), so a key position yields
+//! Entry declarations remain user-authored, while literal entry dependencies
+//! offer loaded-key completion. An entry declaration key position yields
 //! [`BibCompletionContext::None`].
 
 use rowan::{TextSize, TokenAtOffset};
@@ -62,7 +62,7 @@ pub struct BibCompletionCandidate {
 /// Classify what the cursor at byte `offset` is positioned to complete.
 pub fn classify_bib_context(root: &SyntaxNode, offset: usize) -> BibCompletionContext {
     let offset = TextSize::new(offset.min(u32::MAX as usize) as u32);
-    let (left, right) = match root.token_at_offset(offset) {
+    let (left, right) = match tex_ls_parser::syntax::token_at_offset(root, offset) {
         TokenAtOffset::None => return BibCompletionContext::None,
         TokenAtOffset::Single(t) => (Some(t.clone()), Some(t)),
         TokenAtOffset::Between(l, r) => (Some(l), Some(r)),
@@ -335,8 +335,7 @@ pub fn tex_command_completion(
     {
         return None;
     }
-    let token = root
-        .token_at_offset(TextSize::from(start as u32))
+    let token = tex_ls_parser::syntax::token_at_offset(root, TextSize::from(start as u32))
         .right_biased()?;
     let ancestors: Vec<_> = token.parent_ancestors().collect();
     if !ancestors
@@ -367,6 +366,94 @@ pub fn tex_command_completion(
             source[name..offset].into(),
         )
     })
+}
+
+/// A literal entry dependency at the cursor, including an empty or unfinished
+/// braced value. The owning VALUE is found by indexed ancestry. The returned
+/// span covers one list item and excludes its delimiters and surrounding trivia.
+pub fn dependency_key_completion(
+    root: &SyntaxNode,
+    offset: usize,
+) -> Option<(rowan::TextRange, String)> {
+    dependency_key_completion_for_backend(root, offset, true)
+}
+
+pub fn dependency_key_completion_for_backend(
+    root: &SyntaxNode,
+    offset: usize,
+    biber: bool,
+) -> Option<(rowan::TextRange, String)> {
+    let at = TextSize::from(u32::try_from(offset).ok()?);
+    let tokens = tex_ls_parser::syntax::token_at_offset(root, at);
+    let (left, right) = match tokens {
+        TokenAtOffset::None => return None,
+        TokenAtOffset::Single(token) => (Some(token), None),
+        TokenAtOffset::Between(left, right) => (Some(left), Some(right)),
+    };
+    for token in [left, right].into_iter().flatten() {
+        let Some(value) = token
+            .parent_ancestors()
+            .find(|node| node.kind() == SyntaxKind::VALUE)
+        else {
+            continue;
+        };
+        let field = value.parent()?;
+        let name = ast::field_name(&field)?.to_ascii_lowercase();
+        if !matches!(
+            name.as_str(),
+            "crossref" | "xref" | "xdata" | "related" | "entryset"
+        ) || (name != "crossref" && !biber)
+        {
+            continue;
+        }
+        let mut pieces = value.children();
+        let piece = pieces.next()?;
+        if pieces.next().is_some()
+            || !matches!(piece.kind(), SyntaxKind::BRACE_GROUP | SyntaxKind::QUOTED)
+        {
+            continue;
+        }
+        let raw = piece.text().to_string();
+        let closing = if piece.kind() == SyntaxKind::BRACE_GROUP {
+            '}'
+        } else {
+            '"'
+        };
+        let body = raw.get(1..)?.strip_suffix(closing).unwrap_or(&raw[1..]);
+        if body
+            .chars()
+            .any(|ch| matches!(ch, '{' | '}' | '"' | '\\' | '#' | '%'))
+        {
+            continue;
+        }
+        if matches!(name.as_str(), "crossref" | "xref") && body.contains(',') {
+            continue;
+        }
+        let mut start = usize::from(piece.text_range().start()) + 1;
+        for part in body.split(',') {
+            let end = start + part.len();
+            if start <= offset && offset <= end {
+                let key = part.trim();
+                if key.chars().any(char::is_whitespace) {
+                    return None;
+                }
+                let first = start + part.len() - part.trim_start().len();
+                let last = end - (part.len() - part.trim_end().len());
+                let range =
+                    rowan::TextRange::new((first as u32).into(), (last.max(first) as u32).into());
+                let prefix_end = offset.clamp(first, last.max(first));
+                let prefix = raw
+                    .get(
+                        first - usize::from(piece.text_range().start())
+                            ..prefix_end - usize::from(piece.text_range().start()),
+                    )?
+                    .to_owned();
+                return Some((range, prefix));
+            }
+            start = end + 1;
+        }
+    }
+    None
 }
 
 #[cfg(test)]

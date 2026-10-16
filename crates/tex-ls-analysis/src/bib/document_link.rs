@@ -7,7 +7,7 @@
 //! `10.1000/xyz`, which resolves under `https://doi.org/`) and a `url` holds a full
 //! address. We surface each as a link over the value span.
 //!
-//! Purely syntactic and hermetic (AGENTS.md non-goals): the target is a pure string
+//! Purely syntactic and hermetic: the target is a pure string
 //! transform of the field value—no network, no environment. Conservative by
 //! construction: only a single braced or quoted value piece is linked (a
 //! macro-concatenated `#` value or a bare `@string` reference is skipped, since its

@@ -13,15 +13,37 @@
 //! via the shared [`super::byte_range_to_lsp`] — the fix owns *what* to rewrite,
 //! never *how* to lay it out (tenet 1).
 
-use std::collections::HashMap;
+pub mod load_package;
+
+#[cfg(test)]
+use crate::convert::path_to_uri;
+use crate::{
+    convert::{
+        byte_range_to_lsp, byte_range_to_lsp_with_cursor, byte_ranges_to_lsp, file_kind_for,
+    },
+    diagnostics::{self, lint_to_lsp},
+    fix_all,
+};
+#[cfg(test)]
+use lsp_types::Position;
+use lsp_types::{
+    CodeAction, CodeActionKind, CodeActionResponse, Range, TextEdit, Uri, WorkspaceEdit,
+};
+use rowan::TextSize;
 #[cfg(test)]
 use std::path::PathBuf;
-
-use super::*;
-use lsp_types::{CodeAction, CodeActionKind, CodeActionResponse};
-
-use tex_ls_parser::ast::{AstNode, Command, Environment, Group, children};
-use tex_ls_parser::syntax::SyntaxElement;
+use std::{collections::HashMap, path::Path};
+#[cfg(test)]
+use tex_ls_analysis::linter::Severity;
+use tex_ls_analysis::{
+    incremental::Analysis,
+    text::{LineIndex, PositionEncoding, TextBuffer},
+};
+use tex_ls_parser::{
+    ast::{AstNode, Command, Environment, Group, children},
+    semantic::SignatureDb,
+    syntax::{SyntaxElement, SyntaxKind, SyntaxNode},
+};
 
 /// Build the quick-fix actions for the findings overlapping `request_range`.
 ///

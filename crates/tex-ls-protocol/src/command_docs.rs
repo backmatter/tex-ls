@@ -1,8 +1,19 @@
 //! Editor documentation only. These descriptions never affect parsing or arity.
 //! Reference manuals: <https://www.latex-project.org/help/documentation/> and
 //! <https://tug.ctan.org/systems/doc/etex/etex_ref.html>. Wording is original.
-use super::*;
-use tex_ls_analysis::name_refs::{NameKind, NameTarget};
+use crate::convert::path_to_uri;
+#[cfg(test)]
+use lsp_types::Position;
+use rowan::{TextRange, TextSize};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use tex_ls_analysis::{
+    incremental::Analysis,
+    name_refs::{NameKind, NameTarget},
+};
+#[cfg(test)]
+use tex_ls_analysis::{project::texmf::TexmfIndex, text::PositionEncoding};
 
 const LATEX: &str = "https://www.latex-project.org/help/documentation/";
 const ETEX: &str = "https://tug.ctan.org/systems/doc/etex/etex_ref.html";
@@ -305,11 +316,7 @@ fn primitive(name: &str) -> Option<Entry> {
 
 /// Render source text as code, never as executable Markdown supplied by a file.
 fn literal(text: &str) -> String {
-    crate::source_cards::excerpt(text)
-        .lines()
-        .map(|line| format!("    {line}"))
-        .collect::<Vec<_>>()
-        .join("\n")
+    crate::source_cards::literal(text)
 }
 
 pub fn source_details(snapshot: &Analysis, origin: &Path, name: &str, environment: bool) -> String {
@@ -331,7 +338,8 @@ pub fn source_details(snapshot: &Analysis, origin: &Path, name: &str, environmen
         };
         let text = snapshot.file_text(*file);
         let start = usize::from(range.start());
-        let line = text[..start].bytes().filter(|b| *b == b'\n').count() + 1;
+        let index = snapshot.file_line_index(*file, tex_ls_analysis::text::PositionEncoding::Utf8);
+        let line = index.position(start).0 as usize + 1;
         let filename = path
             .file_name()
             .and_then(|value| value.to_str())
@@ -367,7 +375,8 @@ pub fn source_details(snapshot: &Analysis, origin: &Path, name: &str, environmen
         // Leading comment trivia may also belong to the declaration's node.
         let declaration_start = site.map_or(start, |site| {
             let root = snapshot.parsed_tree(*file);
-            let mut token = root.token_at_offset(site.range.start()).right_biased();
+            let mut token =
+                tex_ls_parser::syntax::token_at_offset(&root, site.range.start()).right_biased();
             while let Some(current) = token {
                 if !tex_ls_parser::syntax::is_trivia(current.kind()) {
                     return usize::from(current.text_range().start());
@@ -376,11 +385,11 @@ pub fn source_details(snapshot: &Analysis, origin: &Path, name: &str, environmen
             }
             usize::from(site.range.start())
         });
-        let line_start = text[..declaration_start].rfind('\n').map_or(0, |at| at + 1);
-        let mut comments: Vec<_> = text[..line_start]
-            .lines()
+        let declaration_line = index.position(declaration_start).0 as usize;
+        let mut comments: Vec<_> = (0..declaration_line)
             .rev()
             .take(16)
+            .map(|line| &text[index.line_start(line)..index.line_start(line + 1)])
             .map(str::trim)
             .take_while(|line| line.starts_with('%'))
             .map(|line| line.trim_start_matches('%').trim_start())
@@ -398,7 +407,7 @@ pub fn source_details(snapshot: &Analysis, origin: &Path, name: &str, environmen
         }
         if !comments.is_empty() {
             out.push_str("\n\nSource comments:\n\n");
-            out.push_str(&literal(&comments.join("\n")));
+            out.push_str(&crate::source_cards::literal_comment_lines(&comments));
         }
         if let Some(site) = site {
             out.push_str("\n\nDefinition:\n\n");
@@ -429,8 +438,9 @@ pub fn card(snapshot: &Analysis, path: &Path, name: &str, environment: bool) -> 
             "    \\begin{{{name}}} … \\end{{{name}}}\n\nDefined environment; argument signature is unknown."
         )
     } else if environment {
-        let (sig, provenance) = crate::hover::lookup_environment(&symbols.signatures, name)?;
-        crate::hover::render_environment(name, sig, &provenance)
+        let (sig, provenance) =
+            tex_ls_analysis::hover::lookup_environment(&symbols.signatures, name)?;
+        crate::presentation::signatures::render_environment(name, sig, &provenance)
     } else if known && symbols.signatures.command(name).is_none() {
         format!("    \\{name}\n\nDefined command; argument signature is unknown.")
     } else if let Some(doc) =
@@ -441,8 +451,10 @@ pub fn card(snapshot: &Analysis, path: &Path, name: &str, environment: bool) -> 
             doc.summary, doc.manual
         )
     } else {
-        if let Some((sig, provenance)) = crate::hover::lookup_command(&symbols.signatures, name) {
-            crate::hover::render_command(name, sig, &provenance)
+        if let Some((sig, provenance)) =
+            tex_ls_analysis::hover::lookup_command(&symbols.signatures, name)
+        {
+            crate::presentation::signatures::render_command(name, sig, &provenance)
         } else if entry(name, false).is_some() {
             format!("    \\{name}\n\nCommand")
         } else {
@@ -627,6 +639,52 @@ mod tests {
         assert!(value.contains("    Formats a custom value."), "{value}");
         assert!(value.contains("Source comments:"));
     }
+    #[test]
+    fn source_cards_count_and_collect_all_physical_line_endings() {
+        for newline in ["\n", "\r\n", "\r"] {
+            let source = format!(
+                "% First documentation line.{newline}% Second documentation line.{newline}\\newcommand{newline}  {{\\custom}}[1]{{#1}}{newline}\\custom{{value}}"
+            );
+            let (db, path) = database(&source);
+            let value = card(&db.snapshot(), &path, "custom", false).unwrap();
+            assert!(value.contains("line 4]"), "{newline:?}: {value}");
+            assert!(
+                value.contains("    First documentation line."),
+                "{newline:?}: {value}"
+            );
+            assert!(
+                value.contains("    Second documentation line."),
+                "{newline:?}: {value}"
+            );
+        }
+    }
+    #[test]
+    fn literal_source_indents_every_physical_line() {
+        let source = "First\r[link](command:example)\r\nLast\n";
+        assert_eq!(
+            literal(source),
+            "    First\n    [link](command:example)\n    Last"
+        );
+    }
+
+    #[test]
+    fn comment_cards_copy_only_the_visible_excerpt() {
+        let comment = "😀".repeat(262_144);
+        let source = format!("% {comment}\n\\newcommand{{\\custom}}[1]{{#1}}\n\\custom{{value}}");
+        let (db, path) = database(&source);
+        crate::source_cards::COMMENT_CARD_COPY_BYTES.with(|bytes| bytes.set(0));
+        let value = source_details(&db.snapshot(), &path, "custom", false);
+        assert!(
+            value.contains(&format!("    {}…", "😀".repeat(1200))),
+            "visible excerpt missing"
+        );
+        let copied = crate::source_cards::COMMENT_CARD_COPY_BYTES.with(std::cell::Cell::get);
+        assert!(
+            copied <= 4 * 1201,
+            "copied {copied} source bytes for one excerpt"
+        );
+    }
+
     #[test]
     fn package_commands_and_environments_link_their_reference_manuals() {
         let (db, path) = database("");

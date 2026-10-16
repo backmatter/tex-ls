@@ -1,5 +1,24 @@
 //! Formatting edits computed against one analysis snapshot.
-use super::*;
+use crate::convert::{byte_range_to_lsp, lsp_range_with_cursor};
+use lsp_types::{Position, Range, TextEdit};
+use rowan::{TextRange, TextSize};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
+use tex_ls_analysis::{
+    bib::format_node as bib_format_node,
+    incremental::Analysis,
+    source::FileKind,
+    text::{LineIndex, PositionEncoding},
+};
+use tex_ls_formatter::formatter::{
+    FormatStyle, SentenceOptions, format_node_range_with_signatures_sentence,
+    format_node_with_signatures_sentence,
+};
+use tex_ls_parser::{
+    semantic::SignatureDb,
+    syntax::{SyntaxKind, SyntaxNode},
+};
 
 /// Format a captured source, refusing malformed input and returning no edit for
 /// unchanged text. Cancellation propagates to the host's response boundary.
@@ -178,7 +197,9 @@ pub fn range_edits_for_root(
 /// that closes an inline group (e.g. `\textbf{x}`) or that *opens* an environment
 /// (`\begin{…}`) returns `false`.
 pub fn closes_multiline_construct(root: &SyntaxNode, text: &str, offset: u32) -> bool {
-    let Some(brace) = root.token_at_offset(TextSize::new(offset)).left_biased() else {
+    let Some(brace) =
+        tex_ls_parser::syntax::token_at_offset(root, TextSize::new(offset)).left_biased()
+    else {
         return false;
     };
     if brace.kind() != SyntaxKind::R_BRACE {
@@ -203,7 +224,26 @@ pub fn closes_multiline_construct(root: &SyntaxNode, text: &str, offset: u32) ->
     };
     let range = unit.text_range();
     let (lo, hi) = (usize::from(range.start()), usize::from(range.end()));
-    text.get(lo..hi).is_some_and(|s| s.contains('\n'))
+    text.get(lo..hi).is_some_and(|s| s.contains(['\r', '\n']))
+}
+
+#[cfg(test)]
+mod physical_line_tests {
+    #[test]
+    fn on_type_closers_recognize_all_physical_line_endings() {
+        for newline in ["\n", "\r\n", "\r"] {
+            for source in [
+                format!("{{{newline}word{newline}}}"),
+                format!("\\begin{{itemize}}{newline}\\item word{newline}\\end{{itemize}}"),
+            ] {
+                let root = tex_ls_parser::parser::parse(&source).syntax();
+                assert!(
+                    super::closes_multiline_construct(&root, &source, source.len() as u32),
+                    "{source:?}"
+                );
+            }
+        }
+    }
 }
 
 /// Expand a selection to whole document-level-block boundaries: the cover of every
@@ -244,22 +284,7 @@ pub fn expand_to_document_blocks(root: &SyntaxNode, sel: TextRange) -> Option<Te
     acc
 }
 
-/// Whether `range` lies wholly between a canonical `document` environment's
-/// delimiters. Only this built-in no-indent environment is transparent here;
-/// custom and specialized environments keep their full structural context.
-pub fn document_body_contains(node: &SyntaxNode, range: TextRange) -> bool {
-    let Some(environment) = Environment::cast(node.clone()) else {
-        return false;
-    };
-    if environment.name().as_deref() != Some("document") {
-        return false;
-    }
-    let (Some(begin), Some(end)) = (environment.begin(), environment.end()) else {
-        return false;
-    };
-    range.start() >= begin.syntax().text_range().end()
-        && range.end() <= end.syntax().text_range().start()
-}
+pub use tex_ls_formatter::formatter::document_body_contains;
 
 pub fn cover_overlapping_children(container: &SyntaxNode, sel: TextRange) -> Option<TextRange> {
     container

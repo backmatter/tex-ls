@@ -4,14 +4,16 @@
 //! descent, which emits events + errors) → `build_tree` (the green tree).
 //! Syntax errors ride a side channel and never abort the parse.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rowan::GreenNode;
 use smol_str::SmolStr;
 
 use crate::declarations::ResolvedDeclarations;
 use crate::parser::grammar;
-use crate::parser::lexer::{LatexFlavor, LexConfig, ParseCtx, lex_with, lex_with_implicit_expl};
+use crate::parser::lexer::{
+    LatexFlavor, LexConfig, ParseCtx, lex_with, lex_with_implicit_expl_offset,
+};
 use crate::parser::tree_builder::build_tree;
 use crate::semantic::define::{DefSiteKind, scan_definition_sites, scan_definitions_with_operands};
 use crate::semantic::signature::builtin;
@@ -35,16 +37,13 @@ impl Parse {
 
 /// Parse LaTeX source into a lossless CST.
 ///
-/// A bounded two-pass parse handles user-defined verbatim-argument commands
-/// (`\newcommand`/xparse definitions that other a special char's catcode — see
-/// [`crate::semantic::define`]): the lexer needs to know such commands *before* it
-/// tokenizes their call sites, but they are only discoverable from the parsed tree.
-/// So pass 1 parses with built-in verbatim knowledge only, scans the result for
-/// catcode-verbatim definitions, and — *only* when it finds any — pass 2 re-parses
-/// with those commands fed into the lexer so their arguments become opaque `VERB`
-/// tokens. Two passes is a conservative bound: a definition visible
-/// only after the second pass's re-tokenization is a tolerated false negative. The
-/// common case is a single parse.
+/// A bounded two-pass parse discovers source-dependent reader roles, including
+/// user-defined verbatim arguments, reader overrides, environment aliases and
+/// kernel release headers. Pass 1 uses built-in readers and explicit project
+/// declarations. Its tree supplies the additional context; pass 2 runs only when
+/// that context differs from the initial context. See [`crate::semantic::define`]
+/// for definition ownership. A definition visible only after the second pass's
+/// retokenization is a tolerated false negative. Ordinary source uses one parse.
 pub fn parse(input: &str) -> Parse {
     parse_with_flavor(input, LatexFlavor::Document)
 }
@@ -62,7 +61,7 @@ pub fn parse_with_flavor(input: &str, config: impl Into<LexConfig>) -> Parse {
 
 /// Parse LaTeX source under an explicit [`LexConfig`] *and* a project's
 /// [declarations](crate::declarations) — the one input to the tree that is not
-/// the text (`AGENTS.md` decision #12).
+/// the text.
 ///
 /// The declarations are applied to **pass 1**, so a declaring project pays no
 /// extra parse: they are known before a byte is lexed, unlike the file's own
@@ -106,7 +105,7 @@ pub fn parse_with_declarations_resolved(
     seed.reparse_guard = super::embedded::ReparseGuard::for_source(input);
 
     let pass1 = parse_with(input, &seed, config);
-    let mut ctx = parse_ctx(&pass1.syntax());
+    let mut ctx = parse_ctx(input, config, &pass1.syntax());
     // Declared wins over scanned, so the overlay is applied *after* the scan.
     ctx.overlay_declarations(declared);
     ctx.reparse_guard = seed.reparse_guard;
@@ -135,9 +134,10 @@ pub(crate) fn parse_fragment_with_ctx(
     ctx: &ParseCtx,
     config: LexConfig,
     implicit_expl: bool,
+    source_offset: usize,
 ) -> Parse {
-    let tokens = lex_with_implicit_expl(input, ctx, config, implicit_expl);
-    let (events, errors) = grammar::parse(&tokens, ctx);
+    let tokens = lex_with_implicit_expl_offset(input, ctx, config, implicit_expl, source_offset);
+    let (events, errors) = grammar::parse_with_offset(&tokens, ctx, source_offset);
     let green = build_tree(&tokens, &events);
     Parse { green, errors }
 }
@@ -160,22 +160,88 @@ pub(crate) fn parse_fragment_with_ctx(
 /// `COMMAND` node, so a called alias always has two or more, and the worst a
 /// `\renewcommand` can do is admit an unused alias (one wasted pass, never a missed
 /// pairing).
-fn parse_ctx(root: &SyntaxNode) -> ParseCtx {
+fn parse_ctx(input: &str, config: LexConfig, root: &SyntaxNode) -> ParseCtx {
     let sites = scan_definition_sites(root);
     let operands =
         crate::semantic::context::PrimitiveOperandContexts::from_definition_sites(root, &sites);
     let db = scan_definitions_with_operands(root, &operands);
     let mut ctx = ParseCtx::default();
+    ctx.verbatim_comment_start = super::source_profiles::verbatim_comment_start(root, &sites);
+    ctx.release_header_start =
+        super::source_profiles::release_header_start(input, config.dtx, root, &sites, &operands);
+    let mut inline_factories = HashSet::new();
+    let mut literal_bindings = HashSet::new();
+    if !sites.is_empty() {
+        let owners: HashSet<_> = sites
+            .iter()
+            .filter(|site| site.kind == DefSiteKind::Command)
+            .map(|site| site.range.start())
+            .collect();
+        for command in root.descendants().filter(|node| {
+            node.kind() == crate::syntax::SyntaxKind::COMMAND
+                && owners.contains(&node.text_range().start())
+        }) {
+            let Some(token) = command.first_token() else {
+                continue;
+            };
+            let Some(name) = token.text().strip_prefix('\\') else {
+                continue;
+            };
+            if name == "newmintinline" {
+                inline_factories.insert(command.text_range().start());
+            }
+            if super::reader_facts::literal_definition_name_slots(name) > 0
+                || matches!(
+                    name,
+                    "let"
+                        | "futurelet"
+                        | "newif"
+                        | "NewCommandCopy"
+                        | "RenewCommandCopy"
+                        | "DeclareCommandCopy"
+                )
+            {
+                literal_bindings.insert(command.text_range().start());
+            }
+        }
+    }
+    let inline_names: HashSet<_> = sites
+        .iter()
+        .filter(|site| {
+            site.kind == DefSiteKind::Command && inline_factories.contains(&site.range.start())
+        })
+        .map(|site| site.name.as_str())
+        .collect();
     // Editor-only declaration shapes can replace a primitive or listing
     // factory without contributing a source signature. The already-proved
     // sites are authoritative for these overrides in the second parse.
     for site in &sites {
+        // The factory introduces a raw profile; it does not retire its target.
+        // Retain this distinction even when a later malformed profile has no
+        // usable signature in the final source DB.
+        if inline_factories.contains(&site.range.start()) {
+            continue;
+        }
+        let source_raw_binding = (inline_names.contains(site.name.as_str())
+            && !inline_factories.contains(&site.range.start()))
+            || literal_bindings.contains(&site.range.start())
+                && db.command(&site.name).is_some_and(|sig| sig.verbatim);
         if site.kind == DefSiteKind::Command
-            && (matches!(site.name.as_str(), "string" | "detokenize")
-                || super::lexer::primitive_operand_reader(&site.name)
+            && (site.name == "string"
+                || super::reader_facts::token_list_reader(&site.name)
+                || super::reader_facts::primitive_operand_reader(&site.name)
+                || super::reader_facts::short_verb_observer(&site.name)
+                || super::reader_facts::raw_builtin_reader(&site.name)
+                || source_raw_binding
+                || super::reader_facts::stored_definition_reader(&site.name)
                 || super::embedded::observes_settings_command(&site.name))
         {
-            if super::lexer::primitive_operand_reader(&site.name) {
+            if super::reader_facts::primitive_operand_reader(&site.name)
+                || super::reader_facts::short_verb_observer(&site.name)
+                || super::reader_facts::raw_builtin_reader(&site.name)
+                || source_raw_binding
+                || super::reader_facts::stored_definition_reader(&site.name)
+            {
                 ctx.suppress_reader_after(site.name.clone(), usize::from(site.name_range.start()));
             } else {
                 ctx.suppress(site.name.clone());
@@ -188,11 +254,11 @@ fn parse_ctx(root: &SyntaxNode) -> ParseCtx {
             // Redefined non-verbatim but shadowing a built-in raw-argument command:
             // suppress the built-in capture.
             Some(_)
-                if matches!(name, "detokenize" | "string")
-                    || super::embedded::observes_settings_command(name)
-                    || builtin().command(name).is_some_and(|sig| {
-                        sig.verbatim || sig.args.iter().any(|arg| arg.verbatim)
-                    }) =>
+                if name == "string"
+                    || super::reader_facts::token_list_reader(name)
+                    || !ctx.has_reader_override(name)
+                        && (super::embedded::observes_settings_command(name)
+                            || super::reader_facts::raw_builtin_reader(name)) =>
             {
                 ctx.suppress(SmolStr::new(name));
             }
@@ -200,6 +266,13 @@ fn parse_ctx(root: &SyntaxNode) -> ParseCtx {
         }
     }
     for name in db.environment_names() {
+        if db.environment(name).is_some_and(|sig| !sig.verbatim_arg)
+            && builtin()
+                .environment(name)
+                .is_some_and(|sig| sig.verbatim_arg)
+        {
+            ctx.suppress_environment_arg(SmolStr::new(name));
+        }
         if let Some(sig) = db.environment(name).filter(|sig| sig.verbatim_body) {
             ctx.insert_environment(SmolStr::new(name), sig.args.to_vec());
         } else {
@@ -257,6 +330,67 @@ pub fn reconstruct(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fragment_readers_use_absolute_offsets_in_lexer_and_grammar() {
+        for newline in ["\n", "\r\n"] {
+            let prefix = format!("ordinary prose{newline}{newline}");
+            let fragment = r"\meaning\begin{equation}x\end{equation}";
+            let source = format!("{prefix}{fragment}");
+            let mut ctx = ParseCtx::default();
+            ctx.suppress_reader_after("meaning".into(), prefix.len() - 1);
+            let full = parse_with(&source, &ctx, LexConfig::default());
+            let partial =
+                parse_fragment_with_ctx(fragment, &ctx, LexConfig::default(), false, prefix.len());
+            assert_eq!(partial.syntax().to_string(), fragment);
+            assert!(partial.errors.is_empty(), "{:?}", partial.errors);
+            let environment = |parsed: &Parse| {
+                parsed
+                    .syntax()
+                    .descendants()
+                    .find(|node| node.kind() == crate::syntax::SyntaxKind::ENVIRONMENT)
+                    .map(|node| node.green().to_owned())
+            };
+            assert!(environment(&full).is_some());
+            assert_eq!(environment(&partial), environment(&full));
+
+            // A future retirement must not disable an earlier operand reader.
+            let mut future_ctx = ParseCtx::default();
+            future_ctx.suppress_reader_after("meaning".into(), source.len() + 1);
+            let earlier = parse_fragment_with_ctx(
+                fragment,
+                &future_ctx,
+                LexConfig::default(),
+                false,
+                prefix.len(),
+            );
+            assert_eq!(
+                environment(&earlier),
+                environment(&parse_with(&source, &future_ctx, LexConfig::default()))
+            );
+
+            let raw = r"\code{a_b}";
+            let mut raw_ctx = ParseCtx::default();
+            raw_ctx.suppress_reader_after("code".into(), prefix.len() - 1);
+            let partial =
+                parse_fragment_with_ctx(raw, &raw_ctx, LexConfig::default(), false, prefix.len());
+            let full = parse_with(&format!("{prefix}{raw}"), &raw_ctx, LexConfig::default());
+            for parsed in [&partial, &full] {
+                assert!(
+                    parsed
+                        .syntax()
+                        .descendants_with_tokens()
+                        .any(|element| element.kind() == crate::syntax::SyntaxKind::UNDERSCORE)
+                );
+                assert!(
+                    !parsed
+                        .syntax()
+                        .descendants_with_tokens()
+                        .any(|element| element.kind() == crate::syntax::SyntaxKind::VERB)
+                );
+            }
+        }
+    }
 
     #[test]
     fn reconstruct_is_identity() {

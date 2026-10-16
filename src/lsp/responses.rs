@@ -1,12 +1,85 @@
-use super::*;
+use crate::{
+    config::BuildConfig,
+    incremental::Analysis,
+    lsp::{
+        forward_search::{self, ForwardSearchOutcome},
+        messages::Outbound,
+    },
+    text::PositionEncoding,
+};
+#[cfg(test)]
+use crate::{incremental::IncrementalDatabase, linter::RuleSelection};
+use crossbeam_channel::Sender;
+#[cfg(test)]
+use crossbeam_channel::unbounded;
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
+use lsp_types::{
+    CompletionItem, CompletionResponse, Diagnostic, DocumentSymbolResponse, Notification as _,
+    Position, PrepareRenameResult, PublishDiagnosticsNotification, PublishDiagnosticsParams, Uri,
+};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{
+    panic::AssertUnwindSafe,
+    path::{Path, PathBuf},
+};
+use tex_ls_analysis::source::FileKind;
+use tex_ls_protocol::{
+    completion::{compute_completion, resolve as completion_resolve},
+    convert::uri_to_path,
+    hover,
+    navigation::{
+        compute_document_highlight, compute_goto_definition, compute_linked_editing,
+        compute_prepare_rename, compute_references, compute_rename,
+    },
+    signature_help,
+    structure::{compute_document_link, compute_folding, compute_selection_range},
+    symbols::{compute_projects_workspace_symbols, compute_symbols},
+};
 
-fn read_result<T>(id: RequestId, compute: impl FnOnce() -> T) -> Result<T, Response> {
-    match std::panic::catch_unwind(AssertUnwindSafe(compute)) {
-        Ok(result) => Ok(result),
+fn read_result<T: serde::Serialize>(
+    id: RequestId,
+    check: impl FnOnce(),
+    compute: impl FnOnce() -> T,
+) -> Result<serde_json::Value, Response> {
+    match std::panic::catch_unwind(AssertUnwindSafe(|| serde_json::to_value(compute()))) {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => {
+            log::error!("Language response {id:?} could not be serialized: {error}");
+            Err(Response::new_err(
+                id,
+                ErrorCode::InternalError as i32,
+                "Language response could not be serialized".into(),
+            ))
+        }
         Err(payload) => {
             let (code, message) = match payload.downcast::<salsa::Cancelled>() {
                 Ok(reason) => {
-                    let code = match *reason {
+                    let reason = match *reason {
+                        salsa::Cancelled::PropagatedPanic => {
+                            // A query owner cancelled by a writer can propagate
+                            // this variant to waiters. Recheck the same retained
+                            // snapshots; genuine query panics stay internal errors.
+                            match std::panic::catch_unwind(AssertUnwindSafe(check)) {
+                                Ok(()) => salsa::Cancelled::PropagatedPanic,
+                                Err(payload) => match payload.downcast::<salsa::Cancelled>() {
+                                    Ok(reason) => match *reason {
+                                        reason @ (salsa::Cancelled::PendingWrite
+                                        | salsa::Cancelled::Local) => reason,
+                                        _ => salsa::Cancelled::PropagatedPanic,
+                                    },
+                                    Err(_) => {
+                                        log::error!(
+                                            "Language response {id:?} revision check panicked"
+                                        );
+                                        salsa::Cancelled::PropagatedPanic
+                                    }
+                                },
+                            }
+                        }
+                        reason => reason,
+                    };
+                    let code = match reason {
                         salsa::Cancelled::PendingWrite | salsa::Cancelled::Local => {
                             ErrorCode::ContentModified
                         }
@@ -25,13 +98,26 @@ fn read_result<T>(id: RequestId, compute: impl FnOnce() -> T) -> Result<T, Respo
 }
 
 /// Send one response and distinguish a cancelled read from an empty result.
+#[cfg(test)]
 pub(super) fn respond<T: serde::Serialize>(
     id: RequestId,
     out_tx: &Sender<Outbound>,
     compute: impl FnOnce() -> T,
 ) {
-    let response = match read_result(id.clone(), compute) {
-        Ok(result) => Response::new_ok(id, result),
+    respond_with_cancellation_check(id, out_tx, || {}, compute);
+}
+
+pub(super) fn respond_with_cancellation_check<T: serde::Serialize>(
+    id: RequestId,
+    out_tx: &Sender<Outbound>,
+    check: impl FnOnce(),
+    compute: impl FnOnce() -> T,
+) {
+    let response = match read_result(id.clone(), check, compute) {
+        Ok(result) => Response {
+            id,
+            response_result: Ok(result),
+        },
         Err(response) => response,
     };
     let _ = out_tx.send(Outbound::Response(response));
@@ -39,13 +125,26 @@ pub(super) fn respond<T: serde::Serialize>(
 
 /// Diagnostic pulls have an explicit retry contract for a superseding write.
 /// Client cancellation is completed by the request ledger before this boundary.
+#[cfg(test)]
 pub(super) fn respond_diagnostic<T: serde::Serialize>(
     id: RequestId,
     out_tx: &Sender<Outbound>,
     compute: impl FnOnce() -> T,
 ) {
-    let response = match read_result(id.clone(), compute) {
-        Ok(result) => Response::new_ok(id, result),
+    respond_diagnostic_with_cancellation_check(id, out_tx, || {}, compute);
+}
+
+pub(super) fn respond_diagnostic_with_cancellation_check<T: serde::Serialize>(
+    id: RequestId,
+    out_tx: &Sender<Outbound>,
+    check: impl FnOnce(),
+    compute: impl FnOnce() -> T,
+) {
+    let response = match read_result(id.clone(), check, compute) {
+        Ok(result) => Response {
+            id,
+            response_result: Ok(result),
+        },
         Err(mut response) => {
             if let Err(error) = &mut response.response_result
                 && error.code == ErrorCode::ContentModified as i32
@@ -70,15 +169,20 @@ pub(super) fn run_symbols(
     hierarchical: bool,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        if kind == FileKind::Bib {
-            tex_ls_protocol::compute_bib_symbol_response(snapshot, path, encoding, hierarchical)
-        } else {
-            DocumentSymbolResponse::DocumentSymbolList(compute_symbols(
-                snapshot, path, encoding, options,
-            ))
-        }
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || {
+            if kind == FileKind::Bib {
+                tex_ls_protocol::compute_bib_symbol_response(snapshot, path, encoding, hierarchical)
+            } else {
+                DocumentSymbolResponse::DocumentSymbolList(compute_symbols(
+                    snapshot, path, encoding, options,
+                ))
+            }
+        },
+    );
 }
 
 pub(super) fn run_workspace_symbols(
@@ -90,22 +194,31 @@ pub(super) fn run_workspace_symbols(
     active: Option<&Path>,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_projects_workspace_symbols(
-            snapshots,
-            query,
-            enc,
-            &|path| {
-                options
-                    .iter()
-                    .filter(|(scope, _)| path.starts_with(scope))
-                    .max_by_key(|(scope, _)| scope.components().count())
-                    .map(|(_, options)| options.clone())
-                    .unwrap_or_default()
-            },
-            active,
-        )
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || {
+            for snapshot in snapshots {
+                snapshot.check_revision_cancelled();
+            }
+        },
+        || {
+            compute_projects_workspace_symbols(
+                snapshots,
+                query,
+                enc,
+                &|path| {
+                    options
+                        .iter()
+                        .filter(|(scope, _)| path.starts_with(scope))
+                        .max_by_key(|(scope, _)| scope.components().count())
+                        .map(|(_, options)| options.clone())
+                        .unwrap_or_default()
+                },
+                active,
+            )
+        },
+    );
 }
 
 pub(super) fn run_folding(
@@ -116,9 +229,12 @@ pub(super) fn run_folding(
     kind: FileKind,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_folding(snapshot, path, encoding, kind)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_folding(snapshot, path, encoding, kind),
+    );
 }
 
 pub(super) fn run_selection_range(
@@ -130,9 +246,12 @@ pub(super) fn run_selection_range(
     positions: &[Position],
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_selection_range(snapshot, path, encoding, kind, positions)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_selection_range(snapshot, path, encoding, kind, positions),
+    );
 }
 
 pub(super) fn run_document_link(
@@ -143,9 +262,12 @@ pub(super) fn run_document_link(
     kind: FileKind,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_document_link(snapshot, path, encoding, kind)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_document_link(snapshot, path, encoding, kind),
+    );
 }
 
 pub(super) fn run_completion(
@@ -156,15 +278,20 @@ pub(super) fn run_completion(
     position: Position,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        CompletionResponse::CompletionList(compute_completion(
-            snapshot,
-            uri,
-            &uri_to_path(uri),
-            enc,
-            position,
-        ))
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || {
+            CompletionResponse::CompletionList(compute_completion(
+                snapshot,
+                uri,
+                &uri_to_path(uri),
+                enc,
+                position,
+            ))
+        },
+    );
 }
 
 pub(super) fn run_completion_resolve(
@@ -173,7 +300,12 @@ pub(super) fn run_completion_resolve(
     item: CompletionItem,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || completion_resolve::resolve(snapshot, item));
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || completion_resolve::resolve(snapshot, item),
+    );
 }
 
 /// Describe the command/environment, `\cite` key, or `\label`/`\ref` key under the
@@ -187,9 +319,12 @@ pub(super) fn run_hover(
     position: Position,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        hover::compute_hover(snapshot, path, encoding, position)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || hover::compute_hover(snapshot, path, encoding, position),
+    );
 }
 
 /// Locate the cursor file's compiled PDF, launch the configured viewer at
@@ -217,35 +352,40 @@ pub(super) fn run_forward_search(
     args: &[String],
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        let resolution = snapshot.resolve_labels();
-        let root = if let Some(root) = &build.root {
-            root.clone()
-        } else {
-            match resolution.candidate_roots(path) {
-                [] => path.to_path_buf(),
-                [root] => root.clone(),
-                roots => {
-                    return ForwardSearchOutcome::AmbiguousRoot {
-                        candidates: roots.to_vec(),
-                    };
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || {
+            let resolution = snapshot.resolve_labels();
+            let root = if let Some(root) = &build.root {
+                root.clone()
+            } else {
+                match resolution.candidate_roots(path) {
+                    [] => path.to_path_buf(),
+                    [root] => root.clone(),
+                    roots => {
+                        return ForwardSearchOutcome::AmbiguousRoot {
+                            candidates: roots.to_vec(),
+                        };
+                    }
                 }
+            };
+            match forward_search::pdf_path(&root, build) {
+                Some(pdf) if pdf.is_file() => forward_search::spawn_viewer(
+                    executable,
+                    args,
+                    &forward_search::SearchTarget {
+                        tex: path.to_path_buf(),
+                        pdf,
+                        line,
+                    },
+                ),
+                Some(path) => ForwardSearchOutcome::MissingPdf { path },
+                None => ForwardSearchOutcome::UnsupportedSource,
             }
-        };
-        match forward_search::pdf_path(&root, build) {
-            Some(pdf) if pdf.is_file() => forward_search::spawn_viewer(
-                executable,
-                args,
-                &forward_search::SearchTarget {
-                    tex: path.to_path_buf(),
-                    pdf,
-                    line,
-                },
-            ),
-            Some(path) => ForwardSearchOutcome::MissingPdf { path },
-            None => ForwardSearchOutcome::UnsupportedSource,
-        }
-    });
+        },
+    );
 }
 
 /// Describe the command/environment whose argument the cursor is typing in and
@@ -259,9 +399,12 @@ pub(super) fn run_signature_help(
     enc: PositionEncoding,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        signature_help::compute_signature_help(snapshot, path, position, enc)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || signature_help::compute_signature_help(snapshot, path, position, enc),
+    );
 }
 
 pub(super) fn run_goto_definition(
@@ -272,9 +415,12 @@ pub(super) fn run_goto_definition(
     enc: PositionEncoding,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_goto_definition(snapshot, path, position, enc)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_goto_definition(snapshot, path, position, enc),
+    );
 }
 
 pub(super) fn run_references(
@@ -286,9 +432,12 @@ pub(super) fn run_references(
     enc: PositionEncoding,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_references(snapshot, path, position, include_declaration, enc)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_references(snapshot, path, position, include_declaration, enc),
+    );
 }
 
 pub(super) fn run_document_highlight(
@@ -299,9 +448,12 @@ pub(super) fn run_document_highlight(
     position: Position,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_document_highlight(snapshot, path, enc, position)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_document_highlight(snapshot, path, enc, position),
+    );
 }
 
 pub(super) fn run_prepare_rename(
@@ -312,14 +464,19 @@ pub(super) fn run_prepare_rename(
     position: Position,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_prepare_rename(snapshot, path, enc, position).map(|(range, placeholder)| {
-            PrepareRenameResult::PrepareRenamePlaceholder(lsp_types::PrepareRenamePlaceholder {
-                range,
-                placeholder,
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || {
+            compute_prepare_rename(snapshot, path, enc, position).map(|(range, placeholder)| {
+                PrepareRenameResult::PrepareRenamePlaceholder(lsp_types::PrepareRenamePlaceholder {
+                    range,
+                    placeholder,
+                })
             })
-        })
-    });
+        },
+    );
 }
 
 pub(super) fn run_rename(
@@ -331,9 +488,12 @@ pub(super) fn run_rename(
     enc: PositionEncoding,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_rename(snapshot, path, position, new_name, enc)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_rename(snapshot, path, position, new_name, enc),
+    );
 }
 
 pub(super) fn run_linked_editing(
@@ -344,9 +504,12 @@ pub(super) fn run_linked_editing(
     position: Position,
     out_tx: &Sender<Outbound>,
 ) {
-    respond(id, out_tx, || {
-        compute_linked_editing(snapshot, path, enc, position)
-    });
+    respond_with_cancellation_check(
+        id,
+        out_tx,
+        || snapshot.check_revision_cancelled(),
+        || compute_linked_editing(snapshot, path, enc, position),
+    );
 }
 
 /// Send a `publishDiagnostics` notification.

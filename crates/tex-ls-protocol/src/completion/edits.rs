@@ -1,11 +1,33 @@
 //! Exact replacement spans and source-aware structural insertion.
-use super::*;
+use super::context as completion_context;
+use crate::convert::{byte_range_to_lsp, file_kind_for, lsp_range};
+use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, TextEdit};
+use rowan::{TextRange, TextSize};
+use std::path::Path;
+use tex_ls_analysis::{
+    completion::CompletionContext, incremental::Analysis, source::FileKind, text::PositionEncoding,
+};
+use tex_ls_parser::syntax::SyntaxKind;
 
-pub fn attach(
+#[cfg(test)]
+pub(super) fn attach(
     snapshot: &Analysis,
     path: &Path,
     offset: usize,
     enc: PositionEncoding,
+    items: &mut [CompletionItem],
+) {
+    let context = (file_kind_for(path) != FileKind::Bib)
+        .then(|| super::classify_tex_context(snapshot, path, offset));
+    attach_with_context(snapshot, path, offset, enc, context.as_ref(), items);
+}
+
+pub(super) fn attach_with_context(
+    snapshot: &Analysis,
+    path: &Path,
+    offset: usize,
+    enc: PositionEncoding,
+    context: Option<&CompletionContext>,
     items: &mut [CompletionItem],
 ) {
     let Some(file) = snapshot.lookup_file(path) else {
@@ -20,27 +42,20 @@ pub fn attach(
     } else {
         None
     };
-    let context = if file_kind_for(path) == FileKind::Bib {
-        bib_command
-            .as_ref()
-            .map(|(_, prefix)| CompletionContext::CommandName {
-                prefix: prefix.clone(),
-            })
-    } else {
-        let root = snapshot.parsed_tree(file);
-        Some(tex_ls_analysis::completion::classify_context_with_roles(
-            &root,
+    let bib_dependency = if file_kind_for(path) == FileKind::Bib {
+        tex_ls_analysis::bib::completion::dependency_key_completion(
+            &snapshot.parsed_bib_tree(file),
             offset,
-            snapshot.declarations_for(path),
-            || {
-                tex_ls_analysis::external::links::FileRoleContext::from_definition_sites_and_operands(
-                    &root,
-                    snapshot.definition_sites(file),
-                    snapshot.file_operand_contexts(file),
-                )
-            },
-        ))
+        )
+    } else {
+        None
     };
+    let bib_context = bib_command
+        .as_ref()
+        .map(|(_, prefix)| CompletionContext::CommandName {
+            prefix: prefix.clone(),
+        });
+    let context = context.or(bib_context.as_ref());
     let command = matches!(context, Some(CompletionContext::CommandName { .. }));
     let key = matches!(
         context,
@@ -54,16 +69,7 @@ pub fn attach(
     let file_path = matches!(context, Some(CompletionContext::FilePath { .. }));
     let role = if file_path {
         let root = snapshot.parsed_tree(file);
-        root.descendants()
-            .filter(|node| {
-                node.kind() == SyntaxKind::COMMAND
-                    && node
-                        .text_range()
-                        .contains_inclusive(TextSize::new(offset as u32))
-            })
-            .min_by_key(|node| node.text_range().len())
-            .and_then(|node| tex_ls_parser::ast::command_name(&node))
-            .and_then(|name| tex_ls_parser::semantic::roles::file_role(&name))
+        completion_context::file_role_at(&root, offset)
     } else {
         None
     };
@@ -83,18 +89,20 @@ pub fn attach(
     // Bare filenames have no brace delimiter. Their CST range separates the
     // filename from the command head and from following prose/trivia.
     let bounds = if file_path {
-        snapshot.parsed_tree(file).descendants().find_map(|node| {
-            (node.kind() == SyntaxKind::BARE_ARGUMENT
-                && node
-                    .text_range()
-                    .contains_inclusive(TextSize::from(offset as u32)))
-            .then(|| {
-                (
-                    usize::from(node.text_range().start()),
-                    usize::from(node.text_range().end()),
-                )
+        tex_ls_analysis::completion::cursor_ancestors(&snapshot.parsed_tree(file), offset)
+            .into_iter()
+            .find_map(|node| {
+                (node.kind() == SyntaxKind::BARE_ARGUMENT
+                    && node
+                        .text_range()
+                        .contains_inclusive(TextSize::from(offset as u32)))
+                .then(|| {
+                    (
+                        usize::from(node.text_range().start()),
+                        usize::from(node.text_range().end()),
+                    )
+                })
             })
-        })
     } else {
         None
     };
@@ -113,7 +121,10 @@ pub fn attach(
     let (start, end) = bib_command.map_or((start, end), |(range, _)| {
         (usize::from(range.start()), usize::from(range.end()))
     });
-    let (start, end) = match &context {
+    let (start, end) = bib_dependency.map_or((start, end), |(range, _)| {
+        (usize::from(range.start()), usize::from(range.end()))
+    });
+    let (start, end) = match context {
         Some(CompletionContext::Option { range, .. }) => {
             (usize::from(range.start()), usize::from(range.end()))
         }
@@ -198,9 +209,14 @@ pub fn attach(
 
 #[cfg(test)]
 mod tests {
+    use super::super::{compute_completion, resolve as completion_resolve};
     use super::*;
+    use crate::{ResponsePolicy, convert::path_to_uri};
+    use lsp_types::{Position, Range};
     use serde_json::{Value, json};
     use tex_ls_analysis::incremental::IncrementalDatabase;
+    use tex_ls_analysis::text::LineIndex;
+    use tex_ls_parser::syntax::SyntaxNode;
 
     fn item(marked: &str, label: &str, enc: PositionEncoding, rich: bool) -> (String, Value) {
         let cursor = marked.find('|').unwrap();

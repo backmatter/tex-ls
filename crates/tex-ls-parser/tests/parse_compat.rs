@@ -5,7 +5,7 @@
 //! is a parse-side differential gauge, and is subordinate to the
 //! same principle: a divergence from texlab is **never a bug by itself**. tex-ls is
 //! a deliberately *generic* TeX-surface parser; texlab is *semantically enriched*.
-//! AGENTS.md is explicit that these references are "measured against, never matched."
+//! Reference similarity is a triage aid, not a shape-equivalence requirement.
 //!
 //! It is `#[ignore]`d so it does not run in `cargo test`; invoke it explicitly:
 //!
@@ -25,13 +25,16 @@
 #[path = "support/parse_skeleton.rs"]
 mod parse_skeleton;
 
+#[path = "support/compat.rs"]
+mod compat;
+
+use compat::{dice, lcs_len};
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use parse_skeleton::{
-    TexLs, dice, lcs_len, project, project_texlab, render_lines, texlab_has_error,
-};
+use parse_skeleton::{TexLs, project, project_texlab, render_lines, texlab_has_error};
 use tex_ls_parser::parser::parse;
 
 /// One corpus file's outcome.
@@ -160,45 +163,18 @@ fn collect_corpus() -> Vec<(String, PathBuf)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("corpus");
-    let mut files = Vec::new();
-    if let Ok(entries) = fs::read_dir(&dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("tex") {
-                let key = path.file_name().unwrap().to_string_lossy().into_owned();
-                files.push((key, path));
-            }
-        }
-    }
-    files.sort();
-    files
+    compat::collect_corpus(&dir, "tex")
 }
 
 // --- allowlist ------------------------------------------------------------
 
 /// Loads the deviations allowlist: `key = "reason"` lines (a simple TOML subset,
-/// hand-parsed to avoid a dev-dependency). Mirrors `air_compat.rs`.
+/// hand-parsed to avoid a dev-dependency).
 fn load_allowlist() -> BTreeMap<String, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("parse_compat_allowlist.toml");
-    let mut map = BTreeMap::new();
-    let Ok(text) = fs::read_to_string(&path) else {
-        return map;
-    };
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = key.trim().trim_matches('"').to_string();
-        let value = value.trim().trim_matches('"').to_string();
-        map.insert(key, value);
-    }
-    map
+    compat::load_allowlist(&path)
 }
 
 // --- triage dump (PARSE_COMPAT_DUMP) --------------------------------------
@@ -311,7 +287,7 @@ fn render_report(
          groups, math, verbatim — names but not roles) and measures how structurally \
          close they are. A divergence is never a bug by itself: it is either a deliberate, \
          recorded deviation or an open question (tex-ls models TeX surface syntax; texlab \
-         resolves semantics). AGENTS.md: measure against, never match.\n\n",
+         resolves semantics). Reference similarity is a triage aid, not a shape-equivalence requirement.\n\n",
     );
     s.push_str(&format!("- **Corpus:** {corpus_label}\n"));
     s.push_str(&format!(

@@ -1,6 +1,5 @@
 //! Analysis writer and immutable read contexts. Salsa handles stay private.
 use super::*;
-use std::collections::HashSet;
 use std::ops::Deref;
 
 #[path = "external_inputs.rs"]
@@ -370,6 +369,11 @@ impl Analysis {
             std::panic::resume_unwind(Box::new(salsa::Cancelled::Local));
         }
     }
+    /// Check request cancellation and whether a writer supersedes this snapshot.
+    pub fn check_revision_cancelled(&self) {
+        self.check_cancelled();
+        salsa::Database::unwind_if_revision_cancelled(&self.inner);
+    }
     pub fn file_alias(&self, path: &Path) -> Option<&Path> {
         self.check_cancelled();
         self.inner.file_alias_in(self.project, path)
@@ -383,6 +387,35 @@ impl Analysis {
     pub fn source_text(&self, source: SourceId) -> &Arc<SourceText> {
         self.check_cancelled();
         self.inner.input(source, self.project).text(&self.inner)
+    }
+
+    /// An editor overlay changes the effective shared physical source even when
+    /// the editor belongs to another project. Provenance consumers must refuse it.
+    pub fn source_has_overlay(&self, source: SourceId) -> bool {
+        self.check_cancelled();
+        self.inner
+            .source_layers
+            .get(&source)
+            .is_some_and(|layers| layers.overlay.is_some())
+    }
+
+    pub fn installed_source_identity(
+        &self,
+        source: SourceId,
+    ) -> Option<crate::project::installed_source::InstalledSourceId> {
+        self.check_cancelled();
+        *super::queries::installed_source_identity(
+            &self.inner,
+            self.inner.input(source, self.project),
+        )
+    }
+
+    pub fn standard_package_source(
+        &self,
+        source: SourceId,
+    ) -> Option<&'static crate::project::installed_source::InstalledSourceProfile> {
+        self.installed_source_identity(source)
+            .map(crate::project::installed_source::profile)
     }
 
     pub fn revision(&self) -> AnalysisRevision {
@@ -399,7 +432,8 @@ impl Analysis {
         self.inner.query_log()
     }
 
-    /// Storage identity changes on membership shrink, not on ordinary edits.
+    /// Storage identity changes when memberships or observations are retired,
+    /// not on ordinary edits.
     pub fn epoch(&self) -> u64 {
         self.check_cancelled();
         self.inner.epoch
@@ -456,6 +490,10 @@ impl Analysis {
         self.check_cancelled();
         let file = self.inner.input(file, self.project);
         file.text(&self.inner).line_index(encoding)
+    }
+    pub fn manual_bib_body_ends(&self, file: SourceId) -> &[rowan::TextSize] {
+        self.check_cancelled();
+        manual_bib_body_ends(&self.inner, self.inner.input(file, self.project))
     }
     pub fn name_occurrences(&self, file: SourceId) -> &crate::name_refs::NameOccurrences {
         self.check_cancelled();
@@ -564,6 +602,15 @@ impl Analysis {
         self.check_cancelled();
         self.inner.declarations_for_in(self.project, path)
     }
+
+    /// Explicit source metadata, even when its value equals project defaults.
+    /// Inherited defaults return `None`; the path is normalized within this
+    /// snapshot's selected project.
+    pub fn source_declaration_override(&self, path: &Path) -> Option<&ResolvedDeclarations> {
+        self.check_cancelled();
+        self.inner
+            .source_declaration_override_in(self.project, path)
+    }
     pub fn declarations(&self) -> &ResolvedDeclarations {
         self.check_cancelled();
         self.inner.project(self.project).declarations(&self.inner)
@@ -626,6 +673,19 @@ impl Analysis {
         self.check_cancelled();
         resolved_labels(&self.inner, self.inner.project(self.project))
     }
+    /// The same inclusion roots used by label resolution, without label facts.
+    pub fn document_roots(&self, path: &Path) -> &[PathBuf] {
+        self.check_cancelled();
+        crate::project::root_views::candidate_roots(
+            &self.inner,
+            self.inner.project(self.project),
+            path,
+        )
+    }
+    pub fn document_scope_is_closed(&self, path: &Path) -> bool {
+        self.check_cancelled();
+        crate::project::root_views::is_closed(&self.inner, self.inner.project(self.project), path)
+    }
     pub fn resolve_citations(&self) -> &ResolvedCitations {
         self.check_cancelled();
         resolved_citations(&self.inner, self.inner.project(self.project))
@@ -674,6 +734,18 @@ impl Analysis {
         self.check_cancelled();
         super::bib_search_fields(&self.inner, self.inner.input(id, self.project))
     }
+    pub fn file_roles(&self, id: SourceId) -> &crate::external::links::FileRoleContext {
+        self.check_cancelled();
+        super::file_role_contexts(&self.inner, self.inner.input(id, self.project))
+    }
+    pub fn glossary_search_fields(&self, id: SourceId) -> &[(SmolStr, String)] {
+        self.check_cancelled();
+        super::glossary_search_fields(&self.inner, self.inner.input(id, self.project))
+    }
+    pub fn file_bibliography_targets(&self, id: SourceId) -> &[BibTarget] {
+        self.check_cancelled();
+        super::file_bibliography_targets(&self.inner, self.inner.input(id, self.project))
+    }
     pub fn file_cite_facts(&self, id: SourceId) -> &FileCiteFacts {
         self.check_cancelled();
         super::file_cite_facts(&self.inner, self.inner.input(id, self.project))
@@ -685,235 +757,31 @@ impl Analysis {
 }
 
 impl Analysis {
-    /// All supported static definitions, retaining ambiguity in namespace order.
-    pub fn name_definitions(
+    /// Cached source-local names whose generated or literal uses prevent rename.
+    pub(crate) fn uneditable_command_names(
         &self,
-        origin: &Path,
-        target: &crate::name_refs::NameTarget,
-    ) -> Vec<(SourceId, rowan::TextRange)> {
+        file: SourceId,
+    ) -> &std::collections::BTreeSet<SmolStr> {
         self.check_cancelled();
-        let want = match target.kind {
-            crate::name_refs::NameKind::Command => crate::semantic::DefSiteKind::Command,
-            crate::name_refs::NameKind::Environment => crate::semantic::DefSiteKind::Environment,
-        };
-        let mut result = Vec::new();
-        for member in
-            crate::name_refs::macro_namespace(self.resolve_labels(), self.package_graph(), origin)
-        {
-            let Some(file) = self.lookup_file(&member) else {
-                continue;
-            };
-            if want == crate::semantic::DefSiteKind::Command
-                && uneditable_command_names(&self.inner, self.inner.input(file, self.project))
-                    .contains(&target.name)
-            {
-                // Literal alias sources and generated names need edits beyond
-                // this target's ordinary control-sequence occurrences.
-                return Vec::new();
-            }
-            result.extend(
-                self.definition_sites(file)
-                    .iter()
-                    .filter(|site| site.kind == want && site.name == target.name)
-                    .filter(|site| {
-                        !self.definition_sites(file).iter().any(|other| {
-                            other.name_range == site.name_range && other.name != site.name
-                        })
-                    })
-                    .filter(|site| {
-                        site.kind != crate::semantic::DefSiteKind::Command
-                            || self.file_text(file)[site.name_range] == format!("\\{}", site.name)
-                    })
-                    .map(|site| (file, site.name_range)),
-            );
-        }
-        result
+        super::uneditable_command_names(&self.inner, self.inner.input(file, self.project))
     }
 
-    /// Root-scoped and acquired format sources that affect command diagnostics.
-    pub fn command_source_files(&self, origin: &Path) -> Vec<PathBuf> {
+    /// Borrow cached command-scope paths without rebuilding a path index.
+    pub(crate) fn command_scope_paths(&self, file: SourceId) -> impl Iterator<Item = &Path> + '_ {
         self.check_cancelled();
-        let Some(file) = self.lookup_file(origin) else {
-            return Vec::new();
-        };
-        let mut sources: std::collections::BTreeSet<_> =
-            command_scope(&self.inner, self.inner.input(file, self.project))
-                .iter()
-                .map(|input| input.path(&self.inner).clone())
-                .collect();
-        for path in self.format_source_paths() {
-            let actual = self.file_alias(&path).unwrap_or(&path);
-            if let Some(file) = self.lookup_file(actual) {
-                sources.extend(
-                    command_scope(&self.inner, self.inner.input(file, self.project))
-                        .iter()
-                        .map(|input| input.path(&self.inner).clone()),
-                );
-            }
-            sources.insert(path);
-        }
-        sources.into_iter().collect()
+        super::command_scope(&self.inner, self.inner.input(file, self.project))
+            .iter()
+            .map(|input| input.path(&self.inner).as_path())
     }
 
-    /// Navigation also follows acquired installed sources. Keep this separate
-    /// from rename, which requires a project-owned definition.
-    pub fn navigation_definitions(
+    /// Cached command-scope membership without exposing Salsa inputs to features.
+    pub(crate) fn command_scope_files(
         &self,
-        origin: &Path,
-        target: &crate::name_refs::NameTarget,
-    ) -> Vec<(SourceId, rowan::TextRange)> {
-        let want = match target.kind {
-            crate::name_refs::NameKind::Command => crate::semantic::DefSiteKind::Command,
-            crate::name_refs::NameKind::Environment => crate::semantic::DefSiteKind::Environment,
-        };
-        // Navigation is read-only: the extra alias checks required by rename
-        // do not affect which definition sites we may show here.
-        let mut local = Vec::new();
-        for member in
-            crate::name_refs::macro_namespace(self.resolve_labels(), self.package_graph(), origin)
-        {
-            let Some(file) = self.lookup_file(&member) else {
-                continue;
-            };
-            local.extend(
-                self.definition_sites(file)
-                    .iter()
-                    .filter(|site| site.kind == want && site.name == target.name)
-                    .map(|site| (file, site.name_range)),
-            );
-        }
-        let roots =
-            crate::name_refs::macro_roots(self.resolve_labels(), self.package_graph(), origin);
-        if !local.is_empty() && roots.len() <= 1 {
-            return local;
-        }
-        let mut result = local;
-        let Some(file) = self.lookup_file(origin) else {
-            return result;
-        };
-        let mut origins = vec![file];
-        if roots.len() > 1 {
-            origins.extend(roots.iter().filter_map(|path| self.lookup_file(path)));
-        }
-        let inputs: std::collections::HashSet<_> = origins
-            .into_iter()
-            .flat_map(|file| command_scope(&self.inner, self.inner.input(file, self.project)))
-            .collect();
-        for input in inputs {
-            self.check_cancelled();
-            let file = *input.identity(&self.inner);
-            result.extend(
-                self.definition_sites(file)
-                    .iter()
-                    .filter(|site| site.kind == want && site.name == target.name)
-                    .map(|site| (file, site.name_range)),
-            );
-        }
-        if result.is_empty() {
-            for path in self.format_source_paths() {
-                let Some(file) = self.lookup_file(&path).or_else(|| {
-                    self.file_alias(&path)
-                        .and_then(|actual| self.lookup_file(actual))
-                }) else {
-                    continue;
-                };
-                for input in command_scope(&self.inner, self.inner.input(file, self.project)) {
-                    let file = *input.identity(&self.inner);
-                    result.extend(
-                        self.definition_sites(file)
-                            .iter()
-                            .filter(|site| site.kind == want && site.name == target.name)
-                            .map(|site| (file, site.name_range)),
-                    );
-                }
-            }
-        }
-        if result.is_empty() && target.kind == crate::name_refs::NameKind::Environment {
-            // TeX environments can be implemented as \name / \endname macros.
-            let command = crate::name_refs::NameTarget {
-                kind: crate::name_refs::NameKind::Command,
-                ..target.clone()
-            };
-            let end = crate::name_refs::NameTarget {
-                name: format!("end{}", target.name).into(),
-                ..command.clone()
-            };
-            if !self.navigation_definitions(origin, &end).is_empty() {
-                result = self.navigation_definitions(origin, &command);
-            }
-        }
-        result.sort_by_key(|(file, range)| {
-            (self.file_path(*file).to_owned(), range.start(), range.end())
-        });
-        result.dedup();
-        result
-    }
-
-    /// References and rename consume the same exact current occurrence set.
-    pub fn name_references(
-        &self,
-        origin: &Path,
-        target: &crate::name_refs::NameTarget,
-        include_declaration: bool,
-    ) -> Vec<(SourceId, rowan::TextRange)> {
+        file: SourceId,
+    ) -> impl Iterator<Item = SourceId> + '_ {
         self.check_cancelled();
-        let mut result = Vec::new();
-        for member in
-            crate::name_refs::macro_namespace(self.resolve_labels(), self.package_graph(), origin)
-        {
-            let Some(file) = self.lookup_file(&member) else {
-                continue;
-            };
-            let definitions = self.definition_sites(file);
-            let occurrences = self.name_occurrences(file);
-            match target.kind {
-                crate::name_refs::NameKind::Command => {
-                    let occurrences = occurrences.commands(&target.name);
-                    if occurrences.is_empty() {
-                        continue;
-                    }
-                    let definition_ranges: HashSet<_> = if include_declaration {
-                        HashSet::new()
-                    } else {
-                        definitions
-                            .iter()
-                            .filter(|site| {
-                                site.kind == crate::semantic::DefSiteKind::Command
-                                    && site.name == target.name
-                            })
-                            .map(|site| site.name_range)
-                            .collect()
-                    };
-                    result.extend(
-                        occurrences
-                            .iter()
-                            .filter(|range| {
-                                include_declaration || !definition_ranges.contains(*range)
-                            })
-                            .map(|range| (file, *range)),
-                    );
-                }
-                crate::name_refs::NameKind::Environment => {
-                    result.extend(
-                        occurrences
-                            .environments(&target.name)
-                            .iter()
-                            .map(|range| (file, *range)),
-                    );
-                    if include_declaration {
-                        result.extend(
-                            definitions
-                                .iter()
-                                .filter(|site| {
-                                    site.kind == crate::semantic::DefSiteKind::Environment
-                                        && site.name == target.name
-                                })
-                                .map(|site| (file, site.name_range)),
-                        );
-                    }
-                }
-            }
-        }
-        result
+        super::command_scope(&self.inner, self.inner.input(file, self.project))
+            .iter()
+            .map(|input| *input.identity(&self.inner))
     }
 }

@@ -195,3 +195,72 @@ fn stray_at_starts_new_entry() {
 fn missing_entry_type() {
     insta::assert_snapshot!(tree("@ {oops}"));
 }
+
+#[test]
+fn empty_required_bib_bodies_are_rejected_without_losing_bytes() {
+    for body in [
+        "@string{}",
+        "@string()",
+        "@preamble{}",
+        "@preamble()",
+        "@string{ % empty\n}",
+        "@preamble{ % empty\n}",
+    ] {
+        for ending in ["\n", "\r\n", "\r"] {
+            let source = format!(
+                "{}{ending}@misc{{kept,title={{T}}}}",
+                body.replace('\n', ending)
+            );
+            let parsed = parse(&source);
+            assert_eq!(parsed.syntax().to_string(), source);
+            assert!(!parsed.errors.is_empty(), "{source:?}");
+            assert_eq!(
+                parsed
+                    .syntax()
+                    .children()
+                    .filter(|node| node.kind() == tex_ls_parser::bib::syntax::SyntaxKind::ENTRY)
+                    .count(),
+                1
+            );
+        }
+    }
+    for source in [
+        "@string{x={}}",
+        "@string{x=\"\"}",
+        "@preamble{{}}",
+        "@preamble{\"\"}",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(parsed.errors.is_empty(), "{source}: {:?}", parsed.errors);
+    }
+}
+
+#[test]
+fn missing_bib_key_field_separator_is_rejected() {
+    for source in [
+        "@misc{k title={T}}",
+        "@misc(k title={T})",
+        "@misc{k % note\n title={T}}",
+    ] {
+        let parsed = parse(source);
+        assert_eq!(parsed.syntax().to_string(), source);
+        assert!(
+            parsed
+                .errors
+                .iter()
+                .any(|error| error.message == "expected `,` after the cite key"),
+            "{source}: {:?}",
+            parsed.errors
+        );
+    }
+    // BibTeX accepts empty keys and key-only entries. Preserve that surface.
+    for source in [
+        "@misc{}",
+        "@misc{,title={T}}",
+        "@misc{k}",
+        "@misc{k,title={T}}",
+    ] {
+        assert!(parse(source).errors.is_empty(), "{source}");
+    }
+}

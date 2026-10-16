@@ -32,8 +32,7 @@ impl BibRule for DuplicateKey {
 
     fn description(&self) -> &'static str {
         "Report repeated citation keys within a bibliography or across one root's bibliography \
-         resources and manual `\\bibitem` definitions. Keys are compared case-insensitively. Every \
-         definition after the first is reported. No fix is offered because the author must choose \
+         resources and manual `\\bibitem` definitions. Biber keys and manual items are case-sensitive; classic BibTeX database keys fold ASCII case. Standalone resources use classic identity until a loading root establishes a backend. Repeated definitions are reported. No fix is offered because the author must choose \
          which entry to rename or remove."
     }
 
@@ -44,7 +43,7 @@ impl BibRule for DuplicateKey {
     fn check_file(&self, ctx: &BibRuleContext<'_>, sink: &mut Vec<Diagnostic>) {
         if let Some(project) = ctx.project {
             for entry in ctx.model.entries() {
-                if let Some(definitions) = project.duplicates.get(&entry.key.to_lowercase()) {
+                if let Some(definitions) = project.duplicates.get(entry.key.as_str()) {
                     sink.push(Diagnostic {
                         rule: self.id(),
                         severity: self.default_severity(),
@@ -71,7 +70,15 @@ impl BibRule for DuplicateKey {
                 }
             }
         }
-        for entry in ctx.model.duplicate_keys() {
+        for entry in ctx.model.entries().iter().filter(|entry| {
+            ctx.project
+                .filter(|project| project.scoped)
+                .map_or(entry.duplicate, |project| {
+                    project
+                        .local_duplicates
+                        .contains(&usize::from(entry.key_range.start()))
+                })
+        }) {
             sink.push(Diagnostic {
                 rule: self.id(),
                 severity: self.default_severity(),
@@ -89,24 +96,13 @@ impl BibRule for DuplicateKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bib::parse;
-    use crate::bib::semantic::Model;
 
     fn findings(src: &str) -> Vec<Diagnostic> {
-        let root = parse(src).syntax();
-        let model = Model::build(&root);
-        let ctx = BibRuleContext {
-            project: None,
-            path: std::path::Path::new("x.bib"),
-            root: &root,
-            source: src,
-            model: &model,
-            db: crate::bib::semantic::builtin(),
-            suppressions: &crate::bib::linter::suppression::BibSuppressionMap::build(&root),
-        };
-        let mut out = Vec::new();
-        DuplicateKey.check_file(&ctx, &mut out);
-        out
+        crate::bib::linter::test_support::with_context(src, |_root, ctx| {
+            let mut out = Vec::new();
+            DuplicateKey.check_file(ctx, &mut out);
+            out
+        })
     }
 
     #[test]

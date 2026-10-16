@@ -4,7 +4,7 @@ expression: render_rule_doc(rule.as_ref())
 ---
 ## `missing-required-field`
 
-Report fields required by the biblatex entry type but missing from an entry. Alternatives such as `date` or `year` and aliases such as `journal` for `journaltitle` are accepted. Unknown entry types are excluded. No fix can supply the missing content.
+Report fields required by the biblatex entry type but missing from an entry. Alternatives such as `date` or `year` and aliases such as `journal` for `journaltitle` are accepted. Unknown entry types and entries using crossref/xdata inheritance are excluded. No fix can supply the missing content.
 
 This rule is **enabled by default**.
 

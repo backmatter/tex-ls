@@ -215,24 +215,14 @@ pub fn load_option_args(command: &SyntaxNode) -> Option<Vec<OptionArg>> {
         text.push_str(token.text());
     }
 
-    let mut args = Vec::new();
-    let mut offset = 0usize;
-    for segment in text.split(',') {
-        let trimmed = segment.trim();
-        if !trimmed.is_empty() {
-            let lead = segment.len() - segment.trim_start().len();
-            let start = base + offset + lead;
-            args.push(OptionArg {
-                text: SmolStr::from(trimmed),
-                range: TextRange::new(
-                    (start as u32).into(),
-                    ((start + trimmed.len()) as u32).into(),
-                ),
-            });
-        }
-        offset += segment.len() + 1;
-    }
-    Some(args)
+    Some(
+        crate::syntax::comma_separated_spans(&text, (base as u32).into())
+            .map(|(text, range)| OptionArg {
+                text: SmolStr::from(text),
+                range,
+            })
+            .collect(),
+    )
 }
 
 /// Resolve one load-target name exactly as the edge extractor does: default the
