@@ -48,7 +48,7 @@ jobs:
       - name: Show Marketplace identity
         run: |
           identity=$(az rest --method GET --url 'https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1' --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id --output tsv)
-          echo "Marketplace identity ID: $identity" >> "$GITHUB_STEP_SUMMARY"
+          echo "Marketplace identity ID: $identity" | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Download published release packages
         if: inputs.identity_only != true
         run: |
