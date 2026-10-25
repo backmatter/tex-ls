@@ -57,8 +57,10 @@ executable in a VSIX for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64
 `texLsServerVersion` field and includes the MIT license and unicode-math notices.
 Tags that predate the extension skip this packaging step.
 
-VSIX files join the existing release assets and checksum manifest. This workflow
-does not publish to the VS Code Marketplace. The Check workflow runs unit tests
+VSIX files join the existing release assets and checksum manifest. Publishing the
+stable GitHub release triggers the Publish VS Code extension workflow, which
+downloads all six VSIX files, verifies their release checksums, and uploads them
+to the VS Code Marketplace. The Check workflow runs unit tests
 and real VS Code integration tests on Linux, macOS, and Windows. See the
 [extension development instructions](vscode.md)
 for local testing and packaging.
@@ -75,13 +77,50 @@ Install the Linux VSIX into an isolated VS Code profile and run the integration
 suite against its bundled server. Native CI checks the other operating systems;
 a successful local package check alone does not establish runtime compatibility.
 
-Upload the VSIX files one at a time using **Update** on the existing extension in the
+Publishing uses a Microsoft Entra application with GitHub workload identity
+federation and `vsce publish --azure-credential`. No personal access token, client
+secret, Azure DevOps organization, or Azure subscription role is required. The
+application must be a **Contributor** on the `backmatter` Marketplace publisher.
+See Microsoft's [publishing authentication instructions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publishing-extensions)
+and [Azure Login documentation](https://github.com/Azure/login).
+
+The GitHub `marketplace` environment holds the non-secret `AZURE_CLIENT_ID` and
+`AZURE_TENANT_ID` variables. Limit that environment to the `main` branch and `v*`
+tags. Configure the app's federated credential with issuer
+`https://token.actions.githubusercontent.com`, audience
+`api://AzureADTokenExchange`, and this repository's immutable environment subject:
+`repo:backmatter@283341552/tex-ls@1365865775:environment:marketplace`.
+Check `gh api repos/backmatter/tex-ls/actions/oidc/customization/sub` when changing
+this trust. GitHub's download token does not authenticate to the Marketplace.
+
+For initial setup, register a single-tenant Entra app without a redirect URI or
+client secret, configure the federated credential, and set the environment
+variables. Retrieve its Marketplace identity ID without uploading packages:
+
+```sh
+gh workflow run marketplace.yml -f tag=v0.1.4 -F identity_only=true
+```
+
+Add the ID shown in that run's summary to the publisher's **Members** tab as a
+Contributor. This Marketplace profile ID differs from the app registration and
+service principal object IDs.
+
+To publish an existing release or retry a partially completed upload:
+
+```sh
+gh workflow run marketplace.yml -f tag=v0.1.4
+```
+
+The workflow accepts published stable releases only and skips platform versions
+already uploaded. It publishes the existing packages without rebuilding or
+changing their versions. Wait for Marketplace verification, then confirm the
+public listing and install with `code --install-extension backmatter.tex-ls`
+in a clean profile. Manual uploads remain available through the
 [Marketplace publisher management page](https://marketplace.visualstudio.com/manage/publishers/backmatter).
-Use the same version for all platforms and wait for each verification to complete.
-Confirm the public listing and install with `code --install-extension backmatter.tex-ls`
-in a clean profile. Microsoft documents
+Microsoft documents
 [platform-specific extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platformspecific-extensions).
-Marketplace uploads are a separate step from GitHub release assets.
+Marketplace publication follows GitHub release publication; uploading assets to
+a draft release alone does not trigger it.
 
 ## Homebrew
 

@@ -1,0 +1,84 @@
+name: Publish VS Code extension
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to upload to the Marketplace
+        required: true
+        type: string
+      identity_only:
+        description: Show the app identity ID for initial Marketplace authorization without publishing
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: marketplace-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check publishing identity
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          if [[ -z "$AZURE_CLIENT_ID" || -z "$AZURE_TENANT_ID" ]]; then
+            echo '::error::Set AZURE_CLIENT_ID and AZURE_TENANT_ID in the marketplace environment variables.'
+            exit 1
+          fi
+      - name: Sign in with the federated publishing identity
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Show Marketplace identity
+        run: |
+          identity=$(az rest --method GET --url 'https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1' --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id --output tsv)
+          echo "Marketplace identity ID: $identity" >> "$GITHUB_STEP_SUMMARY"
+      - name: Download published release packages
+        if: inputs.identity_only != true
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable vVERSION tag'; exit 1; }
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq '(.isDraft == false) and (.isPrerelease == false)' | grep -qx true
+          gh release download "$RELEASE_TAG" --pattern '*.vsix' --pattern SHA256SUMS --dir dist
+      - name: Verify all six platform packages
+        if: inputs.identity_only != true
+        working-directory: dist
+        run: |
+          version="${RELEASE_TAG#v}"
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64; do
+            package="tex-ls-$version-$target.vsix"
+            test -f "$package"
+            awk -v package="$package" '$2 == package { print }' SHA256SUMS | sha256sum --check --strict -
+          done
+          test "$(find . -maxdepth 1 -name '*.vsix' | wc -l)" -eq 6
+      - uses: actions/setup-node@v7
+        if: inputs.identity_only != true
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install locked publishing tools
+        if: inputs.identity_only != true
+        working-directory: editors/vscode
+        run: npm ci
+      - name: Publish release packages to the Marketplace
+        if: inputs.identity_only != true
+        run: |
+          for package in dist/*.vsix; do
+            editors/vscode/node_modules/.bin/vsce publish --azure-credential --packagePath "$package" --skip-duplicate
+          done
