@@ -1,0 +1,62 @@
+name: Publish VS Code extension
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to upload to the Marketplace
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: marketplace-${{ inputs.tag || github.event.release.tag_name }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag || github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check publishing credentials
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo '::error::Set the VSCE_PAT repository secret to a token with Marketplace Manage permission for backmatter.'
+            exit 1
+          fi
+      - name: Download published release packages
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected a stable vVERSION tag'; exit 1; }
+          gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq '(.isDraft == false) and (.isPrerelease == false)' | grep -qx true
+          gh release download "$RELEASE_TAG" --pattern '*.vsix' --pattern SHA256SUMS --dir dist
+      - name: Verify all six platform packages
+        working-directory: dist
+        run: |
+          version="${RELEASE_TAG#v}"
+          for target in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64; do
+            package="tex-ls-$version-$target.vsix"
+            test -f "$package"
+            awk -v package="$package" '$2 == package { print }' SHA256SUMS | sha256sum --check --strict -
+          done
+          test "$(find . -maxdepth 1 -name '*.vsix' | wc -l)" -eq 6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install locked publishing tools
+        working-directory: editors/vscode
+        run: npm ci
+      - name: Publish release packages to the Marketplace
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          for package in dist/*.vsix; do
+            editors/vscode/node_modules/.bin/vsce publish --packagePath "$package" --skip-duplicate
+          done

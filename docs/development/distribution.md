@@ -57,8 +57,10 @@ executable in a VSIX for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64
 `texLsServerVersion` field and includes the MIT license and unicode-math notices.
 Tags that predate the extension skip this packaging step.
 
-VSIX files join the existing release assets and checksum manifest. This workflow
-does not publish to the VS Code Marketplace. The Check workflow runs unit tests
+VSIX files join the existing release assets and checksum manifest. Publishing the
+stable GitHub release triggers the Publish VS Code extension workflow, which
+downloads all six VSIX files, verifies their release checksums, and uploads them
+to the VS Code Marketplace. The Check workflow runs unit tests
 and real VS Code integration tests on Linux, macOS, and Windows. See the
 [extension development instructions](vscode.md)
 for local testing and packaging.
@@ -75,13 +77,30 @@ Install the Linux VSIX into an isolated VS Code profile and run the integration
 suite against its bundled server. Native CI checks the other operating systems;
 a successful local package check alone does not establish runtime compatibility.
 
-Upload the VSIX files one at a time using **Update** on the existing extension in the
+Configure the repository Actions secret `VSCE_PAT` with an Azure DevOps personal
+access token belonging to a member of the `backmatter` publisher, with the
+Marketplace **Manage** scope. Follow Microsoft's
+[publishing authentication instructions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publishing-extensions)
+when creating or rotating the token. The workflow fails explicitly if the secret
+is missing. GitHub's token only downloads release assets; it cannot authenticate
+to the Marketplace.
+
+To publish an existing release or retry a partially completed upload:
+
+```sh
+gh workflow run marketplace.yml -f tag=v0.1.4
+```
+
+The workflow accepts published stable releases only and skips platform versions
+already uploaded. It publishes the existing packages without rebuilding or
+changing their versions. Wait for Marketplace verification, then confirm the
+public listing and install with `code --install-extension backmatter.tex-ls`
+in a clean profile. Manual uploads remain available through the
 [Marketplace publisher management page](https://marketplace.visualstudio.com/manage/publishers/backmatter).
-Use the same version for all platforms and wait for each verification to complete.
-Confirm the public listing and install with `code --install-extension backmatter.tex-ls`
-in a clean profile. Microsoft documents
+Microsoft documents
 [platform-specific extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platformspecific-extensions).
-Marketplace uploads are a separate step from GitHub release assets.
+Marketplace publication follows GitHub release publication; uploading assets to
+a draft release alone does not trigger it.
 
 ## Homebrew
 
