@@ -77,13 +77,33 @@ Install the Linux VSIX into an isolated VS Code profile and run the integration
 suite against its bundled server. Native CI checks the other operating systems;
 a successful local package check alone does not establish runtime compatibility.
 
-Configure the repository Actions secret `VSCE_PAT` with an Azure DevOps personal
-access token belonging to a member of the `backmatter` publisher, with the
-Marketplace **Manage** scope. Follow Microsoft's
-[publishing authentication instructions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publishing-extensions)
-when creating or rotating the token. The workflow fails explicitly if the secret
-is missing. GitHub's token only downloads release assets; it cannot authenticate
-to the Marketplace.
+Publishing uses a Microsoft Entra application with GitHub workload identity
+federation and `vsce publish --azure-credential`. No personal access token, client
+secret, Azure DevOps organization, or Azure subscription role is required. The
+application must be a **Contributor** on the `backmatter` Marketplace publisher.
+See Microsoft's [publishing authentication instructions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#publishing-extensions)
+and [Azure Login documentation](https://github.com/Azure/login).
+
+The GitHub `marketplace` environment holds the non-secret `AZURE_CLIENT_ID` and
+`AZURE_TENANT_ID` variables. Limit that environment to the `main` branch and `v*`
+tags. Configure the app's federated credential with issuer
+`https://token.actions.githubusercontent.com`, audience
+`api://AzureADTokenExchange`, and this repository's immutable environment subject:
+`repo:backmatter@283341552/tex-ls@1365865775:environment:marketplace`.
+Check `gh api repos/backmatter/tex-ls/actions/oidc/customization/sub` when changing
+this trust. GitHub's download token does not authenticate to the Marketplace.
+
+For initial setup, register a single-tenant Entra app without a redirect URI or
+client secret, configure the federated credential, and set the environment
+variables. Retrieve its Marketplace identity ID without uploading packages:
+
+```sh
+gh workflow run marketplace.yml -f tag=v0.1.4 -F identity_only=true
+```
+
+Add the ID shown in that run's summary to the publisher's **Members** tab as a
+Contributor. This Marketplace profile ID differs from the app registration and
+service principal object IDs.
 
 To publish an existing release or retry a partially completed upload:
 
