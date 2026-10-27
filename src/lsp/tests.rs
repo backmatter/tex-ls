@@ -427,6 +427,56 @@ fn artifact_guard_index_keeps_open_source_when_workspace_is_removed() {
 }
 
 #[test]
+fn installation_events_are_ignored_but_real_deleted_sources_still_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = state_with_editor(EditorSettings::default());
+    let (connection, _client) = Connection::memory();
+    let (jobs, received) = unbounded();
+    let stamp = state.diagnostic_stamp;
+    let change = |path: &std::path::Path| lsp_types::FileEvent {
+        uri: path_to_uri(path).unwrap(),
+        kind: FileChangeType::Deleted,
+    };
+    on_watched_files_change(
+        &connection,
+        &mut state,
+        &jobs,
+        DidChangeWatchedFilesParams {
+            changes: vec![
+                change(
+                    &dir.path()
+                        .join(".texmf.pqty-install/stage/tex/latex/foo.sty"),
+                ),
+                change(
+                    &dir.path()
+                        .join(".texmf.pqty-stage-123.456.0/tex/generic/config/tex-ls.toml"),
+                ),
+            ],
+        },
+    );
+    assert_eq!(state.diagnostic_stamp, stamp);
+    assert!(state.config_messages.is_empty());
+    assert!(received.try_recv().is_err());
+    let source = dir.path().join("removed/include.tex");
+    on_watched_files_change(
+        &connection,
+        &mut state,
+        &jobs,
+        DidChangeWatchedFilesParams {
+            changes: vec![change(&source)],
+        },
+    );
+    assert!(
+        state.config_messages.is_empty(),
+        "a deleted parent is not a broken config"
+    );
+    assert!(
+        matches!(received.try_recv().unwrap(), WorkerJob::WatchedChange { path, deleted: true, .. } if path == source)
+    );
+    assert_eq!(state.diagnostic_stamp, stamp + 1);
+}
+
+#[test]
 fn watched_backing_preserves_open_edit_context_and_invalidates_closed_inputs() {
     let dir = tempfile::tempdir().unwrap();
     let uri = file_uri_in(dir.path());

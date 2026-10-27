@@ -295,12 +295,22 @@ pub(super) fn on_watched_files_change(
     job_tx: &Sender<WorkerJob>,
     params: DidChangeWatchedFilesParams,
 ) {
+    let changes: Vec<_> = params
+        .changes
+        .into_iter()
+        .filter(|event| {
+            let path = uri_to_path(&event.uri);
+            !crate::file_discovery::is_install_transaction(&path)
+                || state.documents.contains_key(&event.uri)
+                || state.artifact_watch_counts.contains_key(&path)
+        })
+        .collect();
     // Backing refreshes cannot change the effective bytes of an open overlay.
     // In particular, the fallback watcher's initial Created observation must not
     // reject an edit computed for that overlay. Other paths (including physical
     // aliases), acquired compiler artifacts and configuration changes invalidate edits immediately,
     // before the asynchronous refresh can complete.
-    if params.changes.iter().any(|event| {
+    if changes.iter().any(|event| {
         let path = uri_to_path(&event.uri);
         path.file_name().is_some_and(|name| name == "tex-ls.toml")
             || state.artifact_watch_counts.contains_key(&path)
@@ -309,7 +319,7 @@ pub(super) fn on_watched_files_change(
         state.diagnostic_stamp += 1;
     }
     let mut config_changed = false;
-    for event in params.changes {
+    for event in changes {
         let path = uri_to_path(&event.uri);
         if path.file_name().is_some_and(|name| name == "tex-ls.toml") {
             config_changed = true;

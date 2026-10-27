@@ -330,6 +330,21 @@ share one metadata observation within a polling scan.
 Explicit compiler candidates remain native-owned after client watcher acknowledgement
 because client exclusions can suppress events. Editor compiler-diagnostic policy
 filters reports without disabling compiler acquisition.
+Native discovery prunes pqty installation transaction directories. Automatic
+sibling scans also prune configured TEXMF roots and independently owned project
+roots before descending into them. Explicit package-source acquisition remains
+available for navigation, hover and open documents. Recursive discovery also
+recognizes pqty's `.pqty-materialized.json` ownership marker before descending
+into a dependency tree, including before scoped editor configuration arrives.
+Explicit CLI package files and directory arguments remain available. Installed
+file events refresh the filename index and already acquired package sources;
+they do not eagerly import unrequested packages as workspace sources. Unsolicited
+client watch events for these directories are discarded before configuration
+resolution or analysis invalidation. Explicit open documents and acquired compiler
+artifacts retain their normal handling. Configuration discovery starts at the
+nearest surviving ancestor when a watched directory has disappeared; malformed
+configuration and other IO errors remain reportable.
+
 Disk events still refresh backing bytes under open overlays for a later close.
 Ordinary open-source backing events preserve pending overlay edits. Closed paths,
 physical aliases and configuration events invalidate edits before their

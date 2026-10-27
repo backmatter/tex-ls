@@ -224,6 +224,7 @@ fn scan_cancellable(roots: &[WatchRoot], cancelled: &AtomicBool) -> Option<Files
             return None;
         }
         let mut builder = ignore::WalkBuilder::new(&root.path);
+        builder.filter_entry(|entry| !crate::file_discovery::is_install_transaction(entry.path()));
         if !root.recursive {
             builder.max_depth(Some(1));
         }
@@ -343,6 +344,22 @@ fn changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transaction_workspaces_are_pruned_but_explicit_artifacts_remain_watched() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join(".texmf.pqty-install/stage");
+        std::fs::create_dir_all(&stage).unwrap();
+        let source = stage.join("package.sty");
+        let artifact = stage.join("main.aux");
+        std::fs::write(&source, "package").unwrap();
+        std::fs::write(&artifact, "artifact").unwrap();
+        let stop = AtomicBool::new(false);
+        let roots = [WatchRoot::inferred(dir.path().to_path_buf())];
+        let files = scan_scope_cancellable(&roots, std::slice::from_ref(&artifact), &stop).unwrap();
+        assert!(!files.contains_key(&source));
+        assert!(files.contains_key(&artifact));
+    }
 
     #[test]
     fn inferred_filesystem_roots_are_shallow_on_the_native_platform() {

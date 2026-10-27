@@ -326,6 +326,17 @@ impl Worker {
                 .roots()
                 .into_iter()
                 .filter(|root| self.projects.select(root, None).ok() != Some(project))
+                .chain(
+                    installed
+                        .config()
+                        .roots
+                        .iter()
+                        .filter(|root| {
+                            installed.config().enabled
+                                && self.projects.root_for(path) != Some(root.as_path())
+                        })
+                        .cloned(),
+                )
                 .collect(),
         });
         true
@@ -474,6 +485,15 @@ impl Worker {
                 removed |= self.refresh_backing(project, path, deleted);
             }
             return removed;
+        }
+        // Installation events refresh the filename index above. They must not
+        // eagerly turn every unrequested package into a workspace source.
+        if self
+            .discovery_anchors
+            .values()
+            .any(|(_, installed)| installed.contains_source_path(path))
+        {
+            return false;
         }
         let project = self.project_for(path);
         let in_seeded_dir = path

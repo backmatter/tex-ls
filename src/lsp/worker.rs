@@ -2159,6 +2159,48 @@ mod audit_scheduler_tests {
     }
 
     #[test]
+    fn unrequested_installed_file_events_do_not_become_workspace_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.tex");
+        let texmf = dir.path().join("dependencies");
+        let package = texmf.join("unrelated.sty");
+        std::fs::create_dir(&texmf).unwrap();
+        std::fs::write(&path, "main").unwrap();
+        std::fs::write(&package, "package").unwrap();
+        let pool = task_pool::TaskPool::new("package-watch-boundary", 1);
+        let (tx, _) = unbounded();
+        let (done_tx, _) = unbounded();
+        let mut db = IncrementalDatabase::default();
+        let projects = ProjectRegistry::from_roots(&mut db, &[dir.path().to_owned()]);
+        let project = projects.select(&path, None).unwrap();
+        db.set_backing(project, &path, Some("main".into_source_text()))
+            .unwrap();
+        let mut worker = test_worker(
+            db,
+            projects,
+            tx,
+            done_tx,
+            pool.spawner(),
+            Default::default(),
+        );
+        let installed: InstalledPackages = crate::texmf::TexmfConfig {
+            roots: vec![texmf],
+            use_kpsewhich: false,
+            explicit_only: true,
+            ..Default::default()
+        }
+        .into();
+        worker
+            .discovery_anchors
+            .insert(project, (path.clone(), installed));
+        worker.apply_watched_change(&package, false);
+        let snapshot = worker.db.snapshot_for(project).unwrap();
+        assert!(snapshot.lookup_file(&package).is_none());
+        assert!(snapshot.lookup_file(&path).is_some());
+        assert!(worker.files_inflight.is_empty());
+    }
+
+    #[test]
     fn removing_workspace_root_retires_native_acquisition_ownership() {
         use tex_ls_analysis::external::ExternalInputKind;
         let dir = tempfile::tempdir().unwrap();

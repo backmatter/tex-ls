@@ -23,15 +23,49 @@ impl ConfigLoader {
     /// filesystem root. The global user config is *not* consulted here; that
     /// fallback lives in [`resolve`](Self::resolve).
     pub fn discover(start: &Path) -> Result<Option<(PathBuf, ValidatedConfig)>, ConfigError> {
-        let canonical = start.canonicalize().map_err(|source| ConfigError::Io {
-            path: start.to_path_buf(),
-            source,
-        })?;
+        // Watch events and unsaved files may name a directory that no longer
+        // exists. Resolve from its nearest surviving ancestor, while preserving
+        // real IO failures such as denied access.
+        let mut anchor = start;
+        let canonical = loop {
+            match anchor.canonicalize() {
+                Ok(path) => break path,
+                Err(source)
+                    if matches!(
+                        source.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    let Some(parent) = anchor.parent() else {
+                        return Ok(None);
+                    };
+                    let next = if parent.as_os_str().is_empty() {
+                        Path::new(".")
+                    } else {
+                        parent
+                    };
+                    if next == anchor {
+                        return Ok(None);
+                    }
+                    anchor = next;
+                }
+                Err(source) => {
+                    return Err(ConfigError::Io {
+                        path: anchor.to_path_buf(),
+                        source,
+                    });
+                }
+            }
+        };
         for dir in canonical.ancestors() {
             let candidate = dir.join(CONFIG_FILE_NAME);
             if candidate.is_file() {
-                let config = Self::load_from(&candidate)?;
-                return Ok(Some((candidate, config)));
+                match Self::load_from(&candidate) {
+                    Ok(config) => return Ok(Some((candidate, config))),
+                    Err(ConfigError::Io { source, .. })
+                        if source.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
             }
             if dir.join(".git").exists() {
                 return Ok(None);
@@ -578,6 +612,26 @@ mod tests {
             dir.path().canonicalize().unwrap().join(CONFIG_FILE_NAME)
         );
         assert_eq!(config.format.line_width, 70);
+    }
+
+    #[test]
+    fn discover_uses_surviving_ancestors_after_directory_removal() {
+        let dir = tempdir().unwrap();
+        let config = dir.path().join(CONFIG_FILE_NAME);
+        fs::write(&config, "[format]\nline-width = 71\n").unwrap();
+        let removed = dir.path().join("build/temporary/nested");
+        fs::create_dir_all(&removed).unwrap();
+        fs::remove_dir_all(dir.path().join("build")).unwrap();
+        let (found, resolved) = ConfigLoader::discover(&removed).unwrap().unwrap();
+        assert_eq!(found, config.canonicalize().unwrap());
+        assert_eq!(resolved.format.line_width, 71);
+        fs::write(dir.path().join("build"), "replaced directory").unwrap();
+        assert!(ConfigLoader::discover(&removed).unwrap().is_some());
+        fs::write(&config, "[format]\nunknown-option = true\n").unwrap();
+        assert!(
+            ConfigLoader::discover(&removed).is_err(),
+            "invalid config must still report an error"
+        );
     }
 
     #[test]

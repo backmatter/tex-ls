@@ -12,6 +12,21 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use tex_ls_analysis::source::{FileKind, lint_file_kind};
 
+/// Package installation workspaces never contain published project sources.
+/// Keep these out of recursive discovery and unsolicited watcher events. Explicit
+/// documents and compiler inputs retain their normal handling.
+pub(crate) fn is_install_transaction(path: &Path) -> bool {
+    path.components().any(|component| {
+        let Some(name) = component.as_os_str().to_str() else {
+            return false;
+        };
+        name.starts_with('.')
+            && (name.ends_with(".pqty-install")
+                || name.contains(".pqty-stage-")
+                || name.contains(".pqty-previous-"))
+    })
+}
+
 /// A compiled set of exclude patterns applied during directory discovery.
 ///
 /// Patterns use gitignore semantics and are resolved relative to a root (the
@@ -170,6 +185,16 @@ pub fn collect_lint_files(
     paths: &[PathBuf],
     exclude: &ExcludeFilter,
 ) -> Result<Vec<(PathBuf, FileKind)>, FileDiscoveryError> {
+    collect_lint_files_excluding_roots(paths, exclude, &[])
+}
+
+/// Native automatic discovery excludes independently managed package and project
+/// roots before walking them. Explicit file acquisition remains separate.
+pub(crate) fn collect_lint_files_excluding_roots(
+    paths: &[PathBuf],
+    exclude: &ExcludeFilter,
+    excluded_roots: &[PathBuf],
+) -> Result<Vec<(PathBuf, FileKind)>, FileDiscoveryError> {
     let mut files = Vec::new();
 
     for path in paths {
@@ -193,9 +218,18 @@ pub fn collect_lint_files(
             builder.standard_filters(true);
             builder.hidden(false);
             let filter = exclude.clone();
+            let excluded_roots = excluded_roots.to_vec();
             builder.filter_entry(move |entry| {
                 let is_dir = entry.file_type().is_some_and(|ft| ft.is_dir());
-                !filter.is_excluded(entry.path(), is_dir)
+                let package_tree = is_dir
+                    && entry.depth() > 0
+                    && entry.path().join(".pqty-materialized.json").is_file();
+                !package_tree
+                    && !is_install_transaction(entry.path())
+                    && !excluded_roots
+                        .iter()
+                        .any(|root| entry.path().starts_with(root))
+                    && !filter.is_excluded(entry.path(), is_dir)
             });
             for entry in builder.build() {
                 match entry {
@@ -249,6 +283,35 @@ mod tests {
         let files =
             collect_lint_files(std::slice::from_ref(&path), &ExcludeFilter::none()).unwrap();
         assert_eq!(files, vec![(path, FileKind::Tex)]);
+    }
+
+    #[test]
+    fn automatic_discovery_prunes_managed_trees_but_explicit_package_files_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.tex");
+        let managed = dir.path().join(".texe/texmf");
+        fs::create_dir_all(&managed).unwrap();
+        fs::write(&main, "source").unwrap();
+        fs::write(managed.join(".pqty-materialized.json"), "ownership record").unwrap();
+        let package = managed.join("dependency.sty");
+        fs::write(&package, "package").unwrap();
+        let filter = ExcludeFilter::none();
+        assert_eq!(
+            collect_lint_files(&[dir.path().to_owned()], &filter).unwrap(),
+            vec![(main.clone(), FileKind::Tex)]
+        );
+        assert_eq!(
+            collect_lint_files(std::slice::from_ref(&package), &filter).unwrap(),
+            vec![(package.clone(), FileKind::Sty)]
+        );
+        fs::remove_file(managed.join(".pqty-materialized.json")).unwrap();
+        let files = collect_lint_files_excluding_roots(
+            &[dir.path().to_owned()],
+            &filter,
+            std::slice::from_ref(&managed),
+        )
+        .unwrap();
+        assert_eq!(files, vec![(main, FileKind::Tex)]);
     }
 
     #[test]

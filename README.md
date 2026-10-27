@@ -80,3 +80,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for builds and checks,
 
 [MIT license](LICENSE). Based on [Badness](https://github.com/jolars/badness)
 by Johan Larsson.
+
+Package installation transaction directories and nested pqty-managed package
+trees are excluded from automatic source discovery. Configured TEXMF roots also
+stay out of automatic sibling scans. Package navigation still loads the package
+sources it needs. File deletion or replacement during a build does not produce a
+configuration error just because the former parent directory no longer exists.
+Invalid configuration files still produce errors.

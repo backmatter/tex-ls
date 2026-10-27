@@ -2,7 +2,7 @@
 #[cfg(test)]
 use crate::incremental::IncrementalDatabase;
 use crate::{
-    file_discovery::{ExcludeFilter, collect_lint_files},
+    file_discovery::{ExcludeFilter, collect_lint_files_excluding_roots},
     lsp::{compiler_acquisition, services},
 };
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -92,7 +92,11 @@ impl FileAcquisition {
                     let mut absent_sources = HashSet::new();
                     for (anchor, directory, exclude) in plan.scans {
                         if anchor.is_file()
-                            && let Ok(found) = collect_lint_files(&[directory], &exclude)
+                            && let Ok(found) = collect_lint_files_excluding_roots(
+                                &[directory],
+                                &exclude,
+                                &plan.excluded_roots,
+                            )
                         {
                             plan.sources
                                 .extend(found.into_iter().map(|(path, _)| path).filter(|path| {
