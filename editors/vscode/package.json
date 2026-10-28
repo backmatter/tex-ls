@@ -467,5 +467,9 @@
   "homepage": "https://github.com/backmatter/tex-ls",
   "bugs": {
     "url": "https://github.com/backmatter/tex-ls/issues"
+  },
+  "overrides": {
+    "@azure/identity": "4.13.0",
+    "uuid": "^11.1.1"
   }
 }
