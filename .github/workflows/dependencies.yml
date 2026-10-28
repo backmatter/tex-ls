@@ -2,9 +2,6 @@ name: Dependencies
 on:
   pull_request:
     paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml', 'editors/vscode/package.json', 'editors/vscode/package-lock.json', '.github/workflows/dependencies.yml']
-  push:
-    branches: [main]
-    paths: ['**/Cargo.toml', '**/Cargo.lock', 'deny.toml', 'editors/vscode/package.json', 'editors/vscode/package-lock.json', '.github/workflows/dependencies.yml']
   workflow_dispatch:
 permissions:
   contents: read

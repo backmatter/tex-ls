@@ -118,9 +118,10 @@ jobs:
             gh pr ready "$RELEASE_PR_NUMBER"
           fi
 
-      - name: Check synchronized release PR
+      - name: Check the synchronized release candidate once
         if: steps.release-pr.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_BRANCH: ${{ fromJSON(steps.release-pr.outputs.pr).head_branch }}
-        run: gh workflow run check.yml --ref "$RELEASE_BRANCH"
+          RELEASE_PR: ${{ fromJSON(steps.release-pr.outputs.pr).number }}
+        run: gh workflow run check.yml --ref "$RELEASE_BRANCH" -f "release_pr=$RELEASE_PR"

@@ -1,10 +1,13 @@
 name: Check
 on:
-  push:
-    branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
+    inputs:
+      release_pr:
+        description: Synchronized release PR to validate or reuse its checked source
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -14,22 +17,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pr-title:
-    if: github.event_name == 'pull_request'
+  scope:
+    name: Validation scope
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.action != 'edited')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
     steps:
-      - name: Require a Conventional Commit title for squash merging
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check validation reuse boundaries
+        run: python3 scripts/test_ci_scope.py
+      - name: Verify whether the source already passed all platform checks
+        id: scope
         env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          python3 - <<'PYTHON'
-          import os, re
-          title = os.environ["PR_TITLE"]
-          if not re.fullmatch(r"(?:feat|fix|docs|perf|revert|chore|ci|build|refactor|style|test)(?:\([^\r\n()]+\))?!?: [^\r\n]+", title):
-              raise SystemExit("Use a Conventional Commit PR title, for example: feat: support project-local builds")
-          PYTHON
+          GH_TOKEN: ${{ github.token }}
+          CI_RELEASE_PR: ${{ inputs.release_pr }}
+        run: python3 scripts/ci-scope.py check.yml
 
   check:
+    needs: scope
+    if: needs.scope.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -57,23 +71,39 @@ jobs:
       - run: python3 scripts/gen_cwl_signatures.py --selftest
       - run: python3 scripts/gen_math_symbols.py --selftest
       - run: python3 scripts/gen_package_names.py --selftest
-      - run: cargo build -p tex-ls-browser -p tex-ls-parser -p tex-ls-formatter --all-features --locked --target wasm32-unknown-unknown
+      - if: runner.os == 'Linux'
+        run: cargo build -p tex-ls-browser -p tex-ls-parser -p tex-ls-formatter --all-features --locked --target wasm32-unknown-unknown
 
   hosts:
+    needs: scope
+    if: ${{ always() && needs.scope.result != 'skipped' }}
     runs-on: ubuntu-latest
     steps:
+      - name: Require a valid validation decision
+        shell: bash
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+        run: test "$SCOPE_RESULT" = success
       - uses: actions/checkout@v7
+        if: needs.scope.outputs.full == 'true'
       - uses: actions/setup-node@v7
+        if: needs.scope.outputs.full == 'true'
         with:
           node-version: '24'
       - run: rustup toolchain install
+        if: needs.scope.outputs.full == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: needs.scope.outputs.full == 'true'
       - uses: taiki-e/install-action@v2
+        if: needs.scope.outputs.full == 'true'
         with:
           tool: wasm-bindgen-cli@0.2.128
       - run: bash scripts/check_host_parity.sh
+        if: needs.scope.outputs.full == 'true'
 
   vscode:
+    needs: scope
+    if: needs.scope.outputs.full == 'true'
     strategy:
       fail-fast: false
       matrix:
