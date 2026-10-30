@@ -168,6 +168,11 @@ pub struct FileResolution {
 
 pub mod links;
 
+/// Where Shipout and texe keep auxiliary files by default, relative to the root
+/// document. Checked before the source directory: when one of them holds a
+/// build, it is the current one, and a sibling `.aux` is likely left over.
+const COMPILER_OUTPUT_DIRECTORIES: [&str; 2] = [".shipout", ".texe/build/output"];
+
 /// Ordered compiler-artifact candidates for the selected source namespace.
 pub fn compiler_candidates(
     namespace: &[&std::path::Path],
@@ -195,6 +200,22 @@ pub fn compiler_candidates(
                     candidates.push(base.join(name).with_extension("aux"));
                 }
             } else {
+                for directory in COMPILER_OUTPUT_DIRECTORIES {
+                    let base = root.join(directory);
+                    if let Ok(relative) = member.strip_prefix(root) {
+                        candidates.push(base.join(relative).with_extension("aux"));
+                    }
+                }
+                // texe writes one flat output directory beside its manifest, which
+                // can sit above an entry in a subdirectory. Nearest project first.
+                if let Some(name) = member.file_name() {
+                    candidates.extend(root.ancestors().skip(1).map(|project| {
+                        project
+                            .join(".texe/build/output")
+                            .join(name)
+                            .with_extension("aux")
+                    }));
+                }
                 candidates.push(logical.clone());
             }
             let mut candidates: Vec<_> = candidates

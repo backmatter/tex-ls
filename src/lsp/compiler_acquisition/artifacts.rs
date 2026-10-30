@@ -687,6 +687,59 @@ mod tests {
     }
 
     #[test]
+    fn texe_output_is_found_for_an_entry_below_its_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("src/main.tex");
+        write(&main, "x\n");
+        write(
+            &dir.path().join("src/main.aux"),
+            "\\newlabel{sec:one}{{STALE}{1}}\n",
+        );
+        write(
+            &dir.path().join(".texe/build/output/main.aux"),
+            "\\newlabel{sec:one}{{2}{1}}\n",
+        );
+        assert_eq!(
+            Fixture
+                .data_for(&[&main], &dir.path().join("src"), None)
+                .unwrap()
+                .labels[&SmolStr::new("sec:one")],
+            "2"
+        );
+    }
+
+    #[test]
+    fn shipout_and_texe_output_directories_are_found_without_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.tex");
+        write(&main, "x\n");
+        write(
+            &dir.path().join("main.aux"),
+            "\\newlabel{sec:one}{{STALE}{1}}\n",
+        );
+        assert_eq!(
+            Fixture.data_for(&[&main], dir.path(), None).unwrap().labels[&SmolStr::new("sec:one")],
+            "STALE"
+        );
+        write(
+            &dir.path().join(".texe/build/output/main.aux"),
+            "\\newlabel{sec:one}{{2}{1}}\n",
+        );
+        assert_eq!(
+            Fixture.data_for(&[&main], dir.path(), None).unwrap().labels[&SmolStr::new("sec:one")],
+            "2"
+        );
+        write(
+            &dir.path().join(".shipout/main.aux"),
+            "\\newlabel{sec:one}{{3}{1}}\n",
+        );
+        assert_eq!(
+            Fixture.data_for(&[&main], dir.path(), None).unwrap().labels[&SmolStr::new("sec:one")],
+            "3"
+        );
+    }
+
+    #[test]
     fn aux_dir_candidates_flat_and_relative() {
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main.tex");
