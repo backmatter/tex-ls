@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.6](https://github.com/backmatter/tex-ls/compare/v0.1.5...v0.1.6) - 2026-10-31
+
+### Added
+- Find Shipout and texe build artifacts without configuration
+
 ## [0.1.5](https://github.com/backmatter/tex-ls/compare/v0.1.4...v0.1.5) - 2026-10-28
 
 ### Fixed
