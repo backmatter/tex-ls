@@ -51,6 +51,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      # No users yet: every release stays on 0.1.x (release-plz would move a
+      # breaking change to 0.2.0).
+      - name: Keep releases on 0.1.x
+        run: grep -Eq '^version = "0\.1\.[0-9]+"' Cargo.toml || { echo "::error::The version must stay on 0.1.x"; exit 1; }
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
