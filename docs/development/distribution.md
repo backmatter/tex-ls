@@ -48,8 +48,8 @@ changes; changes to the language engine still use the checks in CONTRIBUTING.md.
 
 ## VS Code
 
-The extension lives in `editors/vscode`. Release automation keeps `package.json`,
-its lockfile, and `texLsServerVersion` aligned with the server. Extension-only
+The extension lives in `editors/vscode`. Release automation keeps the `package.json`
+version and `texLsServerVersion` aligned with the server. Extension-only
 changes follow the same release process. After each native executable passes
 its smoke tests, the binary workflow packages that
 executable in a VSIX for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`,

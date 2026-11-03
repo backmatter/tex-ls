@@ -1,0 +1,9 @@
+# Only @vscode/vsce-sign needs its install script (it places the signing binary).
+allowBuilds:
+  "@vscode/vsce-sign": true
+
+# Security pin for vsce's Azure publishing dependency.
+overrides:
+  "@azure/identity": "4.14.1"
+  # GHSA-g3hv-75wg-m249; vscode-languageclient and vsce still request ^10.
+  "minimatch": "^11.0.4"

@@ -271,10 +271,10 @@ pub(super) fn build_alignment_grid(
             e.as_token()
                 .is_some_and(|t| is_collapsible_trivia(t.kind()))
         };
-        while cell.first().is_some_and(&is_edge_trivia) {
+        while cell.first().is_some_and(is_edge_trivia) {
             cell.remove(0);
         }
-        while cell.last().is_some_and(&is_edge_trivia) {
+        while cell.last().is_some_and(is_edge_trivia) {
             cell.pop();
         }
         // Read the `\multicolumn` span/alignment before the cell is drained below.

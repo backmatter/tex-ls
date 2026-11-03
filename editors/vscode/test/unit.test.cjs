@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { test } = require('node:test');
-const { serverCommand, serverSettings, withCurrentDocument } = require('../dist/settings');
+const { serverCommand, serverSettings, withCurrentDocument } = require('../src/settings.ts');
 const { Registry, parseRawGrammar } = require('vscode-textmate');
 const oniguruma = require('vscode-oniguruma');
 
@@ -278,7 +278,7 @@ test('semantic purposes have neutral theme fallbacks and font-only defaults', ()
 
 
 test('client advertises custom semantic purposes after the standard feature', () => {
-  const { semanticHighlighting } = require('../dist/semanticHighlighting');
+  const { semanticHighlighting } = require('../src/semanticHighlighting.ts');
   const capabilities = {
     experimental: { existingCapability: true },
     textDocument: { semanticTokens: { tokenTypes: ['macro', 'variable'], tokenModifiers: ['declaration'] } },

@@ -7,7 +7,7 @@ See the [embedding contract](../../docs/development/embedding.md).
 Install the wasm-bindgen CLI version matching `Cargo.lock`, then build:
 
 ```sh
-cargo install --locked wasm-bindgen-cli --version 0.2.128
+cargo install --locked wasm-bindgen-cli --version 0.2.130
 cargo build -p tex-ls-browser --profile browser --locked --target wasm32-unknown-unknown
 wasm-bindgen target/wasm32-unknown-unknown/browser/tex_ls_browser.wasm --target web --out-dir target/browser --out-name tex-ls
 cp crates/tex-ls-browser/js/session.mjs target/browser/session.mjs

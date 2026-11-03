@@ -39,22 +39,21 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p .",
-    "vscode:prepublish": "npm run compile",
-    "test": "npm run compile && node --test test/unit.test.cjs",
-    "test:integration": "npm run compile && node test/run.cjs"
-  },
-  "dependencies": {
-    "vscode-languageclient": "10.1.1"
+    "build": "vp pack",
+    "typecheck": "tsc --noEmit",
+    "test": "vp run typecheck && node --test test/unit.test.cjs",
+    "test:integration": "vp run build && node test/run.cjs"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "1.91.0",
     "@vscode/test-electron": "3.1.0",
-    "@vscode/vsce": "4.0.0",
-    "typescript": "^5.9.0",
+    "@vscode/vsce": "4.1.0",
+    "typescript": "^7.0.2",
+    "vite-plus": "1.4.0",
+    "vscode-languageclient": "11.0.0",
     "vscode-oniguruma": "^2.0.1",
-    "vscode-textmate": "^9.3.0"
+    "vscode-textmate": "^9.3.2"
   },
   "contributes": {
     "languages": [
@@ -468,8 +467,5 @@
   "bugs": {
     "url": "https://github.com/backmatter/tex-ls/issues"
   },
-  "overrides": {
-    "@azure/identity": "4.13.0",
-    "uuid": "^11.1.1"
-  }
+  "packageManager": "pnpm@12.16.1"
 }

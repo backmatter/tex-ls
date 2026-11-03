@@ -16,7 +16,7 @@ rowan = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 smol_str = { workspace = true }
-pulldown-cmark = { version = "0.13.4", default-features = false }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 [dev-dependencies]
 tempfile = { workspace = true }
 

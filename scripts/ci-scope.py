@@ -29,8 +29,6 @@ def normalized(path, text, name, release, local_names):
         assert data.pop("version") == release
         if path.endswith("/package.json"):
             assert data.pop("texLsServerVersion") == release
-        if path.endswith("package-lock.json"):
-            assert data["packages"][""].pop("version") == release
         return data
     data = tomllib.loads(text)
     if path == "Cargo.lock":
@@ -59,7 +57,7 @@ def metadata_only(base, head):
         return False
     allowed = {"Cargo.toml", "Cargo.lock", "CHANGELOG.md", "xtask/Cargo.toml"}
     if old["package"]["name"] == "tex-ls":
-        allowed.update({"editors/vscode/package.json", "editors/vscode/package-lock.json", "editors/vscode/CHANGELOG.md"})
+        allowed.update({"editors/vscode/package.json", "editors/vscode/CHANGELOG.md"})
     local_names = {old["package"]["name"]}
     if isinstance(old["package"]["version"], dict):
         for member in old["workspace"]["members"]:

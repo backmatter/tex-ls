@@ -8,24 +8,24 @@ members = [
 ]
 
 [workspace.dependencies]
-clap = "4.6.6"
-insta = "1.48.0"
-log = "0.4.34"
+clap = "4.6.7"
+insta = "1.49.0"
+log = "0.4.35"
 lsp-types = { package = "gen-lsp-types", version = "0.11.0" }
 rayon = "1.12.0"
 rowan = "0.17.0"
 salsa = "0.28.5"
-schemars = "1.2.2"
+schemars = "1.2.3"
 serde = "1.0.229"
-serde_json = "1.0.151"
-smol_str = "0.3.6"
+serde_json = "1.0.154"
+smol_str = "0.3.7"
 tempfile = "3.27.0"
-toml = "1.1.6"
-wasm-bindgen = "0.2.128"
+toml = "1.1.8"
+wasm-bindgen = "0.2.130"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/backmatter/tex-ls"
 authors = ["Backmatter contributors"]
@@ -74,7 +74,7 @@ tex-ls-parser = { path = "crates/tex-ls-parser", version = "0.1.0", features = [
 clap = { workspace = true, features = ["derive"] }
 crossbeam-channel = "0.5.17"
 dirs = "7.0.0"
-ignore = "0.4.33"
+ignore = "0.4.34"
 log = { workspace = true }
 lsp-server = "0.10.0"
 lsp-types = { workspace = true, features = ["fluent-uri"] }
@@ -84,7 +84,7 @@ salsa = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 schemars = { workspace = true }
-similar = { version = "3.2.0", features = ["text"] }
+similar = { version = "3.2.1", features = ["text"] }
 smol_str = { workspace = true }
 toml = { workspace = true }
 tempfile = { workspace = true }
@@ -117,7 +117,7 @@ codegen-units = 1
 [dev-dependencies]
 tex-ls-browser = { version = "0.1.0",  path = "crates/tex-ls-browser" }
 insta = { workspace = true }
-jsonschema = { version = "0.56.0", default-features = false }
+jsonschema = { version = "0.60.2", default-features = false }
 similar-asserts = "2.0.0"
 
 [[example]]

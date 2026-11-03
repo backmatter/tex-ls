@@ -22,10 +22,6 @@ const manifest = JSON.parse(readFileSync(join(extension, 'package.json'), 'utf8'
 if (manifest.version !== manifest.texLsServerVersion) {
   throw new Error('Extension and bundled server versions must match.');
 }
-const lock = JSON.parse(readFileSync(join(extension, 'package-lock.json'), 'utf8'));
-if (lock.version !== manifest.version || lock.packages[''].version !== manifest.version) {
-  throw new Error('Extension manifest and lockfile versions must match.');
-}
 const actual = execFileSync(binary, ['--version'], { encoding: 'utf8' }).trim();
 if (actual !== `tex-ls ${manifest.texLsServerVersion}`) {
   throw new Error(`Expected bundled server ${manifest.texLsServerVersion}, got ${actual}`);
@@ -38,6 +34,10 @@ chmodSync(destination, 0o755);
 for (const notice of ['unicode-math.LICENSE', 'unicode-math.NOTICE']) {
   copyFileSync(join(root, 'crates/tex-ls-parser/data', notice), join(extension, 'server', notice));
 }
+// Bundle the client, then package without node_modules: the bundle carries every runtime dependency.
+execFileSync(process.execPath, [join(extension, 'node_modules/vite-plus/bin/vp'), 'pack'],
+  { cwd: extension, stdio: 'inherit' });
 execFileSync(process.execPath, [join(extension, 'node_modules/@vscode/vsce/vsce'), 'package',
-  '--target', values.target, '--out', join(output, `tex-ls-${manifest.version}-${values.target}.vsix`)],
+  '--no-dependencies', '--target', values.target,
+  '--out', join(output, `tex-ls-${manifest.version}-${values.target}.vsix`)],
 { cwd: extension, stdio: 'inherit' });

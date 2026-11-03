@@ -23,18 +23,15 @@ class ReleaseVersions(unittest.TestCase):
         self.extension.mkdir(parents=True)
         (self.extension / "package.json").write_text(json.dumps({
             "version": "0.1.1", "texLsServerVersion": "0.1.0", "other": True}))
-        (self.extension / "package-lock.json").write_text(json.dumps({
-            "version": "0.1.1", "packages": {"": {"version": "0.1.1"},
-            "node_modules/kept": {"version": "1.2.3"}}}))
         (self.extension / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.1\n\n- Legacy extension notes.\n")
 
-    def test_mismatch_is_rejected_and_sync_preserves_history_and_dependencies(self):
+    def test_mismatch_is_rejected_and_sync_preserves_history_and_manifest(self):
         with self.assertRaisesRegex(ValueError, "versions must match"):
             synchronize(self.root)
         synchronize(self.root, write=True, changelog=True)
         self.assertEqual(synchronize(self.root, changelog=True, tag="v0.2.0"), "0.2.0")
-        lock = json.loads((self.extension / "package-lock.json").read_text())
-        self.assertEqual(lock["packages"]["node_modules/kept"]["version"], "1.2.3")
+        manifest = json.loads((self.extension / "package.json").read_text())
+        self.assertEqual((manifest["version"], manifest["other"]), ("0.2.0", True))
         notes = (self.extension / "CHANGELOG.md").read_text()
         self.assertIn("- Legacy extension notes.", notes)
         self.assertIn("- Build integration.", notes)

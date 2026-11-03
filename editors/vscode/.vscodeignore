@@ -1,11 +1,17 @@
-src/**
-test/**
-scripts/**
-tsconfig.json
-package-lock.json
-node_modules/.bin/**
-**/*.map
-**/*.ts
-.vscode-test/**
-target/**
-*.vsix
+# Ship only the bundle, manifest, contributed assets, bundled server, and docs.
+# Package with `vsce package --no-dependencies`; the bundle contains every runtime dependency.
+**
+!package.json
+!dist/extension.js
+!dist/THIRD-PARTY-NOTICES.txt
+!images/icon.png
+!syntaxes/*.tmLanguage.json
+!language-configuration.json
+!bibtex-configuration.json
+!server/tex-ls
+!server/tex-ls.exe
+!server/unicode-math.LICENSE
+!server/unicode-math.NOTICE
+!README.md
+!CHANGELOG.md
+!LICENSE

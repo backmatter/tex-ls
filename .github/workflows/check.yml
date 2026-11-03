@@ -89,7 +89,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.scope.outputs.full == 'true'
         with:
-          node-version: '24'
+          node-version: '26'
       - run: rustup toolchain install
         if: needs.scope.outputs.full == 'true'
       - uses: Swatinem/rust-cache@v2
@@ -97,7 +97,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         if: needs.scope.outputs.full == 'true'
         with:
-          tool: wasm-bindgen-cli@0.2.128
+          tool: wasm-bindgen-cli@0.2.130
       - run: bash scripts/check_host_parity.sh
         if: needs.scope.outputs.full == 'true'
 
@@ -115,16 +115,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: voidzero-dev/setup-vp@v1.21.2
         with:
-          node-version: '24'
-          cache: npm
-          cache-dependency-path: editors/vscode/package-lock.json
+          node-version: '26'
+          working-directory: editors/vscode
+          cache: true
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --bin tex-ls
-      - run: npm ci
-        working-directory: editors/vscode
-      - run: npm test
+      - run: vp run test
         working-directory: editors/vscode
       - name: Test in VS Code
         working-directory: editors/vscode
@@ -135,9 +133,9 @@ jobs:
           export TEX_LS_TEST_SERVER="$GITHUB_WORKSPACE/target/debug/tex-ls"
           if [[ "$RUNNER_OS" == Windows ]]; then TEX_LS_TEST_SERVER="$TEX_LS_TEST_SERVER.exe"; fi
           if [[ "$RUNNER_OS" == Linux ]]; then
-            xvfb-run -a npm run test:integration
+            xvfb-run -a vp run test:integration
           else
-            npm run test:integration
+            vp run test:integration
           fi
       - name: Check VSIX packaging
         if: matrix.vscode-version == 'stable'

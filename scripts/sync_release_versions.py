@@ -21,19 +21,12 @@ def synchronize(root: Path, *, write=False, changelog=False, tag=None):
 
     extension = root / "editors/vscode"
     manifest_path = extension / "package.json"
-    lock_path = extension / "package-lock.json"
     manifest = json.loads(manifest_path.read_text())
-    lock = json.loads(lock_path.read_text())
     if write:
         manifest["version"] = manifest["texLsServerVersion"] = version
-        lock["version"] = lock["packages"][""]["version"] = version
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-        lock_path.write_text(json.dumps(lock, indent=2) + "\n")
-    elif any(value != version for value in [
-        manifest["version"], manifest["texLsServerVersion"],
-        lock["version"], lock["packages"][""]["version"],
-    ]):
-        raise ValueError("Server, extension, and lockfile versions must match; run "
+    elif any(value != version for value in [manifest["version"], manifest["texLsServerVersion"]]):
+        raise ValueError("Server and extension versions must match; run "
                          "python3 scripts/sync_release_versions.py --write")
 
     if changelog:

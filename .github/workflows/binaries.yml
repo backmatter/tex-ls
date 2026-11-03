@@ -77,19 +77,20 @@ jobs:
       - name: Test and package
         shell: bash
         run: python3 scripts/package_release.py --source source --target "$BUILD_TARGET" --tag "$RELEASE_TAG"
-      - uses: actions/setup-node@v7
-        if: hashFiles('source/editors/vscode/package-lock.json') != ''
+      - uses: voidzero-dev/setup-vp@v1.21.2
+        if: hashFiles('source/editors/vscode/pnpm-lock.yaml') != ''
         with:
-          node-version: '24'
+          node-version: '26'
+          working-directory: source/editors/vscode
+          cache: true
       - name: Package VS Code extension
-        if: hashFiles('source/editors/vscode/package-lock.json') != ''
+        if: hashFiles('source/editors/vscode/pnpm-lock.yaml') != ''
         working-directory: source/editors/vscode
         shell: bash
         env:
           VSCODE_TARGET: ${{ matrix.vscode-target }}
         run: |
-          npm ci
-          npm test
+          vp run test
           binary="../../target/$BUILD_TARGET/release/tex-ls"
           if [[ "$RUNNER_OS" == Windows ]]; then binary="$binary.exe"; fi
           node scripts/package.mjs --binary "$binary" --target "$VSCODE_TARGET" --output ../../../dist

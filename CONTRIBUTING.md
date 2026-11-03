@@ -5,7 +5,7 @@ Install rustup, a native linker, Python 3.11+, and Node for host replay.
 The wasm-bindgen CLI must match `Cargo.lock`:
 
 ```sh
-cargo install --locked wasm-bindgen-cli --version 0.2.128
+cargo install --locked wasm-bindgen-cli --version 0.2.130
 cargo build --workspace --locked
 cargo run -- lsp
 ```
@@ -84,7 +84,7 @@ comparison parser. Adding one to production would subject it to the production p
 
 ## Distribution
 
-VS Code client changes live in `editors/vscode`. Run `npm ci`, `npm audit`, `npm test`, and
+VS Code client changes live in `editors/vscode`. Run `vp install`, `vp pm audit`, `vp run test`, and
 the real-editor integration tests described in the
 [extension development guide](docs/development/vscode.md).
 
