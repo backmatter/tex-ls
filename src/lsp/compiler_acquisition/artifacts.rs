@@ -699,6 +699,18 @@ mod tests {
             &dir.path().join(".texe/build/output/main.aux"),
             "\\newlabel{sec:one}{{2}{1}}\n",
         );
+        // Without a manifest the parent directory is not a texe project.
+        assert_eq!(
+            Fixture
+                .data_for(&[&main], &dir.path().join("src"), None)
+                .unwrap()
+                .labels[&SmolStr::new("sec:one")],
+            "STALE"
+        );
+        write(
+            &dir.path().join("texe.toml"),
+            "schema = \"texe.project/v1\"\n",
+        );
         assert_eq!(
             Fixture
                 .data_for(&[&main], &dir.path().join("src"), None)

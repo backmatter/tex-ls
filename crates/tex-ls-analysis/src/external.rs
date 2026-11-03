@@ -207,14 +207,21 @@ pub fn compiler_candidates(
                     }
                 }
                 // texe writes one flat output directory beside its manifest, which
-                // can sit above an entry in a subdirectory. Nearest project first.
-                if let Some(name) = member.file_name() {
-                    candidates.extend(root.ancestors().skip(1).map(|project| {
+                // can sit above an entry in a subdirectory. Only the nearest
+                // ancestor with a `texe.toml` is a project, so unrelated parent
+                // directories are neither probed nor watched.
+                if let Some(name) = member.file_name()
+                    && let Some(project) = root
+                        .ancestors()
+                        .skip(1)
+                        .find(|dir| dir.join("texe.toml").is_file())
+                {
+                    candidates.push(
                         project
                             .join(".texe/build/output")
                             .join(name)
-                            .with_extension("aux")
-                    }));
+                            .with_extension("aux"),
+                    );
                 }
                 candidates.push(logical.clone());
             }
