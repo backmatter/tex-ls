@@ -6,24 +6,13 @@ linting, and LSP initialization/shutdown checks before it is archived. Linux use
 musl; Windows links the C runtime statically. macOS builds target macOS 11 or later.
 Archives include the MIT license and the unicode-math notices.
 
-Use Conventional Commit PR titles and squash merges. Release-plz opens a release
-PR on `main`, computes the server version, and generates the changelog. The
-workflow copies that version and those release notes into the bundled VS Code
-extension. Do not increment release versions by hand. Use release-plz's default versioning
-policy.
+Use Conventional Commit PR titles and squash merges. tex-ls has no users yet,
+so versions stay at 0.1.5 and no releases are cut; there is no release
+automation. The server, VS Code extension, lockfiles, and `vVERSION` tag share
+one version, and `python3 scripts/sync_release_versions.py` checks that they
+agree.
 
-The server, VS Code extension, lockfiles, and `vVERSION` tag use one version.
-Older extension-only releases used independent versions; the first synchronized
-release is 0.1.2. Internal unpublished Rust crates
-keep their own implementation versions.
-
-Run `python3 scripts/sync_release_versions.py` to check consistency. The release
-workflow runs it with `--write --changelog` on the release PR after release-plz
-updates Cargo metadata. Review the final synchronized commit and wait for CI
-before squash-merging the release PR.
-
-Merging the release PR creates a tag and draft GitHub release. Release automation starts
-the binary workflow. Publish the draft only after all six platform builds pass
+When a release is cut, its tag starts the binary workflow. Publish the draft only after all six platform builds pass
 and their assets and checksums are attached. For an existing tag and release:
 
 ```sh
@@ -66,7 +55,7 @@ and real VS Code integration tests on Linux, macOS, and Windows. See the
 for local testing and packaging.
 
 The publisher is `backmatter` and the extension ID is `backmatter.tex-ls`.
-Package all six targets at the release-plz version. The manifest icon must
+Package all six targets at the shared release version. The manifest icon must
 be a PNG; the publisher profile logo is separate.
 
 For a tagged server release, commit the extension changes before creating the
