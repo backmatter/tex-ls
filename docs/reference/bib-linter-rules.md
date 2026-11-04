@@ -32,34 +32,6 @@ warning: duplicate-key
   |       ^^^^^^^ cite key `knuth84` is defined more than once
 ```
 
-## `deprecated-suppression-syntax`
-
-Flag the retired `@comment{tex-ls-ignore <rule>}` and `@comment{tex-ls-ignore-file [<rule>]}` suppression spellings, which remain accepted for compatibility but are no longer documented. The Safe autofix rewrites only the family and verb to `tex-ls-lint skip` or `tex-ls-lint skip-file`; the selector, reason, delimiters, and remaining entry text stay byte-for-byte unchanged. This meta diagnostic is not silenced by the retired directive it reports; use `[lint].ignore` to disable the rule deliberately.
-
-This rule is **enabled by default**.
-
-A retired suppression directive in a structured comment:
-
-```bib
-@comment{tex-ls-ignore unused-string: intentional}
-@string{x = {X}}
-```
-
-```text
-warning: deprecated-suppression-syntax
- --> references.bib:1:10
-  |
-1 | @comment{tex-ls-ignore unused-string: intentional}
-  |          ^^^^^^^^^^^^^ retired suppression syntax; use `@comment{tex-ls-lint skip …}` instead
-```
-
-After applying the fix:
-
-```bib
-@comment{tex-ls-lint skip unused-string: intentional}
-@string{x = {X}}
-```
-
 ## `inert-suppression`
 
 Report `skip` without a following entry, `on` without `off`, and format-suppression directives, which BibTeX formatting does not support. Also report an unclosed `off`, which suppresses through the end of the file. No fix is offered because the intended boundary is unknown. Suppression comments cannot hide this finding; use `[lint].ignore` to disable it.

@@ -11,7 +11,7 @@ use crate::parser::reader_facts::next_pending;
 use crate::parser::reader_facts::primitive_replacement_reader;
 use crate::parser::reader_facts::short_verb_observer;
 use crate::parser::reader_facts::token_list_reader;
-pub use context::{ParseCtx, VerbCtx};
+pub use context::ParseCtx;
 pub(crate) use operands::PrimitiveOperandScan;
 
 use std::collections::HashSet;

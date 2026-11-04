@@ -22,20 +22,6 @@
 //! formatting enabled. Without a rule, `tex-ls` covers both axes. The `: <reason>` tail is optional
 //! everywhere and is never interpreted.
 //!
-//! ## The retired `% tex-ls-ignore` family
-//!
-//! ```text
-//! % tex-ls-ignore <rule>: <reason>        → % tex-ls-lint skip <rule>: <reason>
-//! % tex-ls-ignore-file <rule>: <reason>   → % tex-ls-lint skip-file <rule>: <reason>
-//! % tex-ls-ignore-file: <reason>          → % tex-ls-lint skip-file: <reason>
-//! ```
-//!
-//! Still recognized, and resolved through exactly the same path as their
-//! replacements — the deprecation is in the documentation, never in the
-//! behavior. A directive spelling is user-facing API; breaking one silently
-//! would be worse than carrying it. [`Directive::deprecated`] marks them, so a
-//! lint rule reporting the retired spelling can reuse the parsed fact.
-//!
 //! ## Why this lives in the parser crate
 //!
 //! Both consumers need it and neither can reach the other: the formatter is
@@ -104,10 +90,6 @@ pub struct Directive {
     /// The rule the directive selects; `None` means every rule. Only ever `Some`
     /// on [`Axis::Lint`] — the other two axes have nothing to select.
     pub rule: Option<String>,
-    /// Written in the retired `% tex-ls-ignore` spelling. Behaves identically —
-    /// this exists so a lint rule can report the retired spelling and offer the
-    /// rewrite, without having to re-parse the comment.
-    pub deprecated: bool,
 }
 
 /// What a recognized directive accomplished after placement and region matching.
@@ -148,28 +130,6 @@ pub struct LocatedDirective {
 /// must be the first word after the family name, separated by whitespace.
 pub fn parse_directive(comment: &str) -> Option<Directive> {
     let body = comment.trim_start_matches('%').trim_start();
-    // Longest family name first, or a shorter one swallows a longer one's prefix
-    // and the word-boundary check below rejects it for the wrong reason.
-    if let Some(rest) = body.strip_prefix("tex-ls-ignore-file") {
-        // `…-file:` or a bare `…-file` is every rule; `…-file <rule>` is one.
-        return Some(Directive {
-            axis: Axis::Lint,
-            verb: Verb::SkipFile,
-            rule: parse_rule(rest),
-            deprecated: true,
-        });
-    }
-    if let Some(rest) = body.strip_prefix("tex-ls-ignore") {
-        // The retired node form always required a rule; a bare `% tex-ls-ignore`
-        // was inert and stays inert, rather than silently widening to every rule
-        // on the way through the new grammar.
-        return Some(Directive {
-            axis: Axis::Lint,
-            verb: Verb::Skip,
-            rule: Some(parse_rule(rest)?),
-            deprecated: true,
-        });
-    }
     let (axis, rest) = if let Some(rest) = body.strip_prefix("tex-ls-format") {
         (Axis::Format, rest)
     } else if let Some(rest) = body.strip_prefix("tex-ls-lint") {
@@ -197,12 +157,7 @@ pub fn parse_directive(comment: &str) -> Option<Directive> {
     } else {
         None
     };
-    Some(Directive {
-        axis,
-        verb,
-        rule,
-        deprecated: false,
-    })
+    Some(Directive { axis, verb, rule })
 }
 
 /// The leading `<rule>` word of a `<rule>: <reason>` tail, or `None` when the
@@ -465,13 +420,6 @@ fn directive_carrier(token: &SyntaxToken) -> Option<(String, TextRange, bool)> {
 }
 
 fn directive_family(directive: &Directive) -> &'static str {
-    if directive.deprecated {
-        return match directive.verb {
-            Verb::SkipFile => "tex-ls-ignore-file",
-            Verb::Skip => "tex-ls-ignore",
-            Verb::Off | Verb::On => unreachable!("retired directives have no region verbs"),
-        };
-    }
     match directive.axis {
         Axis::Format => "tex-ls-format",
         Axis::Lint => "tex-ls-lint",
@@ -668,15 +616,14 @@ mod tests {
 
     #[test]
     fn retains_directives_with_their_carrier_ranges() {
-        let src = "% a note\n% tex-ls-ignore deprecated-command: legacy\n\\bf\n";
+        let src = "% a note\n% tex-ls-lint skip deprecated-command: legacy\n\\bf\n";
         let suppressions = suppressions_of(src);
         let retained = suppressions.directives();
 
         assert_eq!(retained.len(), 1);
-        assert!(retained[0].directive.deprecated);
         assert_eq!(
             &src[usize::from(retained[0].range.start())..usize::from(retained[0].range.end())],
-            "% tex-ls-ignore deprecated-command: legacy"
+            "% tex-ls-lint skip deprecated-command: legacy"
         );
     }
 
@@ -692,7 +639,6 @@ mod tests {
             axis,
             verb,
             rule: None,
-            deprecated: false,
         }
     }
 
@@ -727,7 +673,6 @@ mod tests {
                 axis: Axis::Lint,
                 verb: Verb::Skip,
                 rule: Some("deprecated-command".into()),
-                deprecated: false,
             })
         );
         assert_eq!(
@@ -740,7 +685,6 @@ mod tests {
                 axis: Axis::Both,
                 verb: Verb::Skip,
                 rule: Some("deprecated-command".into()),
-                deprecated: false,
             })
         );
     }
@@ -771,43 +715,6 @@ mod tests {
             parse_directive("%%% tex-ls-format off"),
             Some(directive(Axis::Format, Verb::Off))
         );
-    }
-
-    #[test]
-    fn retired_ignore_family_still_parses() {
-        assert_eq!(
-            parse_directive("% tex-ls-ignore deprecated-command: legacy"),
-            Some(Directive {
-                axis: Axis::Lint,
-                verb: Verb::Skip,
-                rule: Some("deprecated-command".into()),
-                deprecated: true,
-            })
-        );
-        assert_eq!(
-            parse_directive("% tex-ls-ignore-file deprecated-command: legacy"),
-            Some(Directive {
-                axis: Axis::Lint,
-                verb: Verb::SkipFile,
-                rule: Some("deprecated-command".into()),
-                deprecated: true,
-            })
-        );
-        assert_eq!(
-            parse_directive("% tex-ls-ignore-file: noisy"),
-            Some(Directive {
-                axis: Axis::Lint,
-                verb: Verb::SkipFile,
-                rule: None,
-                deprecated: true,
-            })
-        );
-    }
-
-    #[test]
-    fn bare_retired_node_directive_stays_inert() {
-        assert_eq!(parse_directive("% tex-ls-ignore"), None);
-        assert_eq!(parse_directive("% tex-ls-ignore: no rule named"), None);
     }
 
     #[test]
@@ -961,45 +868,6 @@ mod tests {
             slices(src, s.format_ranges()),
             vec!["% tex-ls-format off\n\\a\n", "\n% tex-ls-format off\n\\b\n"]
         );
-    }
-
-    #[test]
-    fn retired_and_current_spellings_resolve_identically() {
-        fn covers_target(src: &str, ranges: &[TextRange]) -> bool {
-            let at = TextSize::new(src.find("\\bf").expect("has a target") as u32);
-            ranges.iter().any(|r| r.contains(at))
-        }
-        for (old, new) in [
-            (
-                "% tex-ls-ignore deprecated-command: legacy\n\\bf x\n",
-                "% tex-ls-lint skip deprecated-command: legacy\n\\bf x\n",
-            ),
-            (
-                "% tex-ls-ignore-file deprecated-command: legacy\n\\bf x\n",
-                "% tex-ls-lint skip-file deprecated-command: legacy\n\\bf x\n",
-            ),
-        ] {
-            for (src, label) in [(old, "retired"), (new, "current")] {
-                let s = suppressions_of(src);
-                let ranges = s
-                    .lint_rule_ranges()
-                    .get("deprecated-command")
-                    .unwrap_or_else(|| panic!("{label} spelling records the rule: {src:?}"));
-                assert!(
-                    covers_target(src, ranges),
-                    "{label} spelling must cover its target: {src:?}"
-                );
-                assert!(
-                    s.lint_all_ranges().is_empty() && s.format_ranges().is_empty(),
-                    "{label} spelling is lint-only and rule-selective: {src:?}"
-                );
-            }
-        }
-        let old = suppressions_of("% tex-ls-ignore-file: noisy\n\\bf x\n");
-        let new = suppressions_of("% tex-ls-lint skip-file: noisy\n\\bf x\n");
-        assert_eq!(old.lint_all_ranges().len(), 1);
-        assert_eq!(new.lint_all_ranges().len(), 1);
-        assert!(old.lint_rule_ranges().is_empty() && new.lint_rule_ranges().is_empty());
     }
 
     #[test]

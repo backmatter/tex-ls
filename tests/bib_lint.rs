@@ -157,27 +157,6 @@ fn file_directive_suppresses_all() {
 }
 
 #[test]
-fn retired_suppression_reports_and_fixes_end_to_end() {
-    let src = "@comment{tex-ls-ignore unused-string: intentional}\n@string{x = {X}}\n";
-    let diagnostics = check_document(Path::new("refs.bib"), src);
-    assert_eq!(
-        diagnostics.iter().map(|d| d.rule).collect::<Vec<_>>(),
-        vec!["deprecated-suppression-syntax"]
-    );
-    let fixes: Vec<_> = diagnostics.into_iter().filter_map(|d| d.fix).collect();
-    assert_eq!(
-        apply_fixes(src, &fixes, false).output,
-        "@comment{tex-ls-lint skip unused-string: intentional}\n@string{x = {X}}\n"
-    );
-}
-
-#[test]
-fn retired_file_suppression_cannot_hide_its_own_deprecation() {
-    let src = "@comment{tex-ls-ignore-file: vendored}\n@string{x = {X}}\n";
-    assert_eq!(rules(src), vec!["deprecated-suppression-syntax"]);
-}
-
-#[test]
 fn inert_suppression_reports_unsupported_format_directives() {
     let src = "@comment{tex-ls-format skip-file: hand formatted}\n\
                @article{k, author={A}, title={T}, journaltitle={J}, year=2020}\n";

@@ -1,49 +1,11 @@
 //! Findings derived from already resolved suppression directives.
-use super::diagnostic::{Diagnostic, Fix, Severity};
-use crate::directives::{DirectiveOutcome, LocatedDirective, Verb};
+use super::diagnostic::{Diagnostic, Severity};
+use crate::directives::{DirectiveOutcome, LocatedDirective};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Carrier {
     Latex,
     Bibtex,
-}
-
-pub(crate) fn deprecated(located: &LocatedDirective, carrier: Carrier) -> Option<Diagnostic> {
-    // LaTeX documentation margins do not carry active comments. BibTeX keeps
-    // reporting retired spellings even if their directive's role is unsupported.
-    if !located.directive.deprecated
-        || matches!(carrier, Carrier::Latex) && located.outcome == DirectiveOutcome::Unsupported
-    {
-        return None;
-    }
-    let replacement = match located.directive.verb {
-        Verb::Skip => "tex-ls-lint skip",
-        Verb::SkipFile => "tex-ls-lint skip-file",
-        Verb::Off | Verb::On => return None,
-    };
-    let start = usize::from(located.family_range.start());
-    let end = usize::from(located.family_range.end());
-    let message = match carrier {
-        Carrier::Latex => format!("retired suppression syntax; use `% {replacement}` instead"),
-        Carrier::Bibtex => {
-            format!("retired suppression syntax; use `@comment{{{replacement} …}}` instead")
-        }
-    };
-    Some(Diagnostic {
-        rule: "deprecated-suppression-syntax",
-        severity: Severity::Warning,
-        path: Default::default(),
-        start,
-        end,
-        message,
-        fix: Some(Fix::safe(
-            start,
-            end,
-            replacement,
-            "Rewrite the retired suppression directive",
-        )),
-        related: Vec::new(),
-    })
 }
 
 pub(crate) fn inert(

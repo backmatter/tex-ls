@@ -14,9 +14,7 @@
 //!
 //! The **grammar** is [`crate::directives::parse_directive`], shared with the
 //! LaTeX side and the formatter, so the two carriers cannot drift; only the
-//! carrier and the next-sibling attachment differ. The retired
-//! `@comment{tex-ls-ignore …}` and `@comment{tex-ls-ignore-file …}` spellings
-//! still resolve through the same path and are no longer documented.
+//! carrier and the next-sibling attachment differ.
 //!
 //! **Only the lint axis acts here.** `tex-ls-format` is accepted by the shared
 //! grammar but does nothing in a `.bib`: the bib formatter is a canonical
@@ -76,18 +74,10 @@ impl BibSuppressionMap {
                 continue;
             };
             let text = node.to_string();
-            let family = if directive.deprecated {
-                match directive.verb {
-                    Verb::Skip => "tex-ls-ignore",
-                    Verb::SkipFile => "tex-ls-ignore-file",
-                    Verb::Off | Verb::On => unreachable!("retired directives have no regions"),
-                }
-            } else {
-                match directive.axis {
-                    crate::directives::Axis::Format => "tex-ls-format",
-                    crate::directives::Axis::Lint => "tex-ls-lint",
-                    crate::directives::Axis::Both => "tex-ls",
-                }
+            let family = match directive.axis {
+                crate::directives::Axis::Format => "tex-ls-format",
+                crate::directives::Axis::Lint => "tex-ls-lint",
+                crate::directives::Axis::Both => "tex-ls",
             };
             let relative = text
                 .find(family)
@@ -376,7 +366,7 @@ mod tests {
         assert!(!m.is_suppressed("missing-required-field", later, later + 5));
     }
 
-    /// Region scope, which the retired family never had on either side.
+    /// Region scope.
     #[test]
     fn region_covers_the_entries_between_its_markers() {
         let src = "@comment{tex-ls-lint off missing-required-field}\n\
@@ -388,19 +378,6 @@ mod tests {
         assert!(m.is_suppressed("missing-required-field", inside, inside + 5));
         let outside = src.find("@book{b").expect("has b");
         assert!(!m.is_suppressed("missing-required-field", outside, outside + 5));
-    }
-
-    /// The retired spellings keep working — deprecated in the docs, not in
-    /// behavior.
-    #[test]
-    fn retired_ignore_family_still_suppresses() {
-        let src = "@comment{tex-ls-ignore missing-required-field: gone}\n@book{a, title={T}}\n";
-        let m = map_of(src);
-        let at = src.find("@book").expect("has the entry");
-        assert!(m.is_suppressed("missing-required-field", at, at + 5));
-
-        let file = map_of("@comment{tex-ls-ignore-file: noisy}\n@book{a, title={T}}\n");
-        assert!(file.is_suppressed("anything", 0, 1));
     }
 
     /// `tex-ls-format` parses but has no bib semantics; it must not silence a

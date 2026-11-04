@@ -3761,16 +3761,13 @@ fn combined_family_suppresses_layout() {
 }
 
 /// An unrecognized directive must format as the ordinary comment it is, never
-/// silently suppress — and the lint axis, including its retired spellings, must
-/// stay inert here in particular. Those two families still resolve; they simply
-/// resolve on the other axis, and nothing about that may reach layout.
+/// silently suppress — and the lint axis must stay inert here in particular: it
+/// resolves on the other axis, and nothing about that may reach layout.
 #[test]
 fn unrecognized_and_lint_directives_do_not_suppress_layout() {
     for lead in [
         "% tex-ls-lint skip deprecated-command: legacy",
         "% tex-ls-lint off",
-        "% tex-ls-ignore deprecated-command: legacy",
-        "% tex-ls-ignore-file: noisy",
         "% tex-ls-format nonsense",
         "% tex-ls",
         "% an ordinary comment",

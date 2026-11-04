@@ -23,7 +23,6 @@ use crate::linter::diagnostic::{Diagnostic, Severity};
 // bib rules reuse the LaTeX linter's `Example` rather than duplicating it.
 pub use crate::linter::rules::Example;
 
-pub mod deprecated_suppression_syntax;
 pub mod duplicate_field;
 pub mod duplicate_key;
 pub mod edits;
@@ -38,7 +37,6 @@ pub mod unknown_field;
 pub mod unused_entry;
 pub mod unused_string;
 
-pub use deprecated_suppression_syntax::DeprecatedSuppressionSyntax;
 pub use duplicate_field::DuplicateField;
 pub use duplicate_key::DuplicateKey;
 pub use empty_field::EmptyField;
@@ -142,7 +140,6 @@ pub trait BibRule: Send + Sync {
 pub fn all_rules() -> Vec<Box<dyn BibRule>> {
     vec![
         Box::new(DuplicateKey),
-        Box::new(DeprecatedSuppressionSyntax),
         Box::new(InertSuppression),
         Box::new(MissingRequiredField),
         Box::new(UnknownField),
@@ -160,7 +157,6 @@ pub fn all_rules() -> Vec<Box<dyn BibRule>> {
 /// The ids of every built-in bib rule. Kept in lockstep with [`all_rules`].
 pub const ALL_BIB_RULE_IDS: &[&str] = &[
     "duplicate-key",
-    "deprecated-suppression-syntax",
     "inert-suppression",
     "missing-required-field",
     "unknown-field",

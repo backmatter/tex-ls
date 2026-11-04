@@ -120,34 +120,6 @@ warning: deprecated-command
   |  ^^^ `\bf` is deprecated; use `\bfseries`
 ```
 
-## `deprecated-suppression-syntax`
-
-Flag the retired `% tex-ls-ignore <rule>` and `% tex-ls-ignore-file [<rule>]` suppression spellings, which remain accepted for compatibility but are no longer documented. The Safe autofix rewrites only the family and verb to `% tex-ls-lint skip <rule>` or `% tex-ls-lint skip-file [<rule>]`; the selector and reason remain byte-for-byte unchanged, and the edit stays entirely inside a comment. This meta diagnostic is not silenced by the retired directive it reports; use `[lint].ignore` to disable the rule deliberately.
-
-This rule is **enabled by default**.
-
-A retired suppression directive:
-
-```tex
-% tex-ls-ignore deprecated-command: legacy source
-{\bf text}
-```
-
-```text
-warning: deprecated-suppression-syntax
- --> example.tex:1:3
-  |
-1 | % tex-ls-ignore deprecated-command: legacy source
-  |   ^^^^^^^^^^^^^ retired suppression syntax; use `% tex-ls-lint skip` instead
-```
-
-After applying the fix:
-
-```tex
-% tex-ls-lint skip deprecated-command: legacy source
-{\bf text}
-```
-
 ## `missing-nonbreaking-space`
 
 Report a space or single newline before a bare-number reference or bracketed citation, such as `Figure \ref{x}` or `see \cite{a}`. A tie keeps the reference with its preceding word. Self-describing references such as `\autoref` and textual citations such as `\textcite` are excluded. A same-line space has an unsafe fix to `~` because line breaking changes. A newline receives no fix; blank lines are not reported.

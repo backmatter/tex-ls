@@ -351,29 +351,6 @@ fn file_ignore_all_silences_everything() {
 }
 
 #[test]
-fn retired_suppression_reports_and_fixes_end_to_end() {
-    let src = "% tex-ls-ignore deprecated-command: legacy\n{\\bf one}\n";
-    assert_eq!(
-        lint(src),
-        vec![("deprecated-suppression-syntax", Severity::Warning)]
-    );
-    assert_eq!(
-        fix_to_fixpoint(src),
-        "% tex-ls-lint skip deprecated-command: legacy\n{\\bf one}\n"
-    );
-    assert_fix_is_correct(src);
-}
-
-#[test]
-fn retired_file_suppression_cannot_hide_its_own_deprecation() {
-    let src = "% tex-ls-ignore-file: vendored\n{\\bf one}\n";
-    assert_eq!(
-        lint(src),
-        vec![("deprecated-suppression-syntax", Severity::Warning)]
-    );
-}
-
-#[test]
 fn inert_suppression_cannot_be_hidden_by_a_blanket_directive() {
     let src = "% tex-ls-lint skip-file: vendored\n% tex-ls-lint on deprecated-command\n";
     assert_eq!(lint(src), vec![("inert-suppression", Severity::Warning)]);

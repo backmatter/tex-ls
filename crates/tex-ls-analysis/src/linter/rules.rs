@@ -24,7 +24,6 @@ pub mod abbreviation_spacing;
 pub mod blank_line_in_keyval;
 pub mod dash_length;
 pub mod deprecated_command;
-pub mod deprecated_suppression_syntax;
 pub mod dollar_display_math;
 pub mod duplicate_label;
 pub mod duplicate_package;
@@ -60,7 +59,6 @@ pub use abbreviation_spacing::AbbreviationSpacing;
 pub use blank_line_in_keyval::BlankLineInKeyval;
 pub use dash_length::DashLength;
 pub use deprecated_command::DeprecatedCommand;
-pub use deprecated_suppression_syntax::DeprecatedSuppressionSyntax;
 pub use dollar_display_math::DollarDisplayMath;
 pub use duplicate_label::DuplicateLabel;
 pub use duplicate_package::DuplicatePackage;
@@ -860,7 +858,6 @@ pub fn all_rules() -> Vec<Box<dyn Rule>> {
         Box::new(BlankLineInKeyval),
         Box::new(DuplicateLabel),
         Box::new(DeprecatedCommand),
-        Box::new(DeprecatedSuppressionSyntax),
         Box::new(MissingNonbreakingSpace),
         Box::new(ObsoleteEnvironment),
         Box::new(PrimitiveCommand),
@@ -953,7 +950,6 @@ pub const ALL_RULE_IDS: &[&str] = &[
     "blank-line-in-keyval",
     "duplicate-label",
     "deprecated-command",
-    "deprecated-suppression-syntax",
     "missing-nonbreaking-space",
     "obsolete-environment",
     "primitive-command",
@@ -986,13 +982,6 @@ pub const ALL_RULE_IDS: &[&str] = &[
     "label-before-caption",
 ];
 
-/// Retired LaTeX rule ids that remain recognized in configuration.
-///
-/// Retaining these no-op ids avoids turning an otherwise valid `select` or
-/// `ignore` entry into an unknown-rule warning when a rule is withdrawn because
-/// it cannot distinguish errors from valid input.
-pub const RETIRED_RULE_IDS: &[&str] = &["mismatched-delimiter"];
-
 /// Every current rule id across **both** linters (LaTeX ∪ BibTeX).
 ///
 /// The CLI lints `.tex` and `.bib` files in one pass and folds their findings into
@@ -1001,7 +990,7 @@ pub const RETIRED_RULE_IDS: &[&str] = &["mismatched-delimiter"];
 /// registries. Without the bib half, every bib finding's id reads as "not active"
 /// and the CLI silently drops it (the LSP, which doesn't post-filter, still shows
 /// them — the source of the CLI/LSP divergence).
-fn all_current_rule_ids() -> impl Iterator<Item = &'static str> {
+pub fn all_known_rule_ids() -> impl Iterator<Item = &'static str> {
     ALL_RULE_IDS.iter().copied().chain(
         crate::bib::linter::ALL_BIB_RULE_IDS
             .iter()
@@ -1025,22 +1014,12 @@ fn all_default_rule_ids() -> impl Iterator<Item = &'static str> {
         )
 }
 
-/// Every current or retired rule id recognized by configuration and `--explain`.
-pub fn all_known_rule_ids() -> impl Iterator<Item = &'static str> {
-    all_current_rule_ids().chain(
-        RETIRED_RULE_IDS
-            .iter()
-            .copied()
-            .filter(|id| !ALL_RULE_IDS.contains(id)),
-    )
-}
-
 /// Suppression-meta diagnostics that inline directives may not hide. Each
 /// reports a directive's own syntax or placement, so letting that same mechanism
 /// suppress it would make the failure silent by construction. Configuration
 /// `ignore` remains the deliberate opt-out.
 pub(crate) fn is_unsuppressible_suppression_meta_rule(id: &str) -> bool {
-    matches!(id, "deprecated-suppression-syntax" | "inert-suppression")
+    id == "inert-suppression"
 }
 
 /// The pseudo-rule id parse diagnostics carry. It is never a lint rule, so
@@ -1076,7 +1055,7 @@ impl RuleSelection {
             }
         }
         let base: Vec<&'static str> = match select {
-            Some(picks) => all_current_rule_ids()
+            Some(picks) => all_known_rule_ids()
                 .filter(|id| picks.iter().any(|p| p == id))
                 .collect(),
             None => all_default_rule_ids().collect(),
@@ -1098,7 +1077,7 @@ impl RuleSelection {
     /// Use [`Self::resolve`] with no `select` for the ordinary default set.
     pub fn all() -> Self {
         Self {
-            active: all_current_rule_ids().collect(),
+            active: all_known_rule_ids().collect(),
             external: Default::default(),
         }
     }
@@ -1133,20 +1112,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    #[test]
-    fn retired_rule_ids_remain_known_but_unregistered() {
-        let registered: Vec<&str> = all_rules().iter().map(|rule| rule.id()).collect();
-        for id in RETIRED_RULE_IDS {
-            assert!(
-                !registered.contains(id),
-                "retired rule `{id}` is registered"
-            );
-            let (selection, unknown) = RuleSelection::resolve(Some(&[id.to_string()]), &[]);
-            assert!(unknown.is_empty(), "retired rule `{id}` is unknown");
-            assert!(!selection.is_active(id), "retired rule `{id}` is active");
         }
     }
 

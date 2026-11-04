@@ -11,9 +11,7 @@
 //! % tex-ls skip / off / on / skip-file      the same, plus the formatter
 //! ```
 //!
-//! Omitting `<rule>` means every rule. The retired `% tex-ls-ignore` and
-//! `% tex-ls-ignore-file` spellings still resolve, through the same path, and
-//! are no longer documented.
+//! Omitting `<rule>` means every rule.
 //!
 //! This module is only the *lookup*: it flattens the resolved ranges into the
 //! plain `usize` offsets [`Diagnostic`](super::Diagnostic) stores (a rowan
@@ -139,7 +137,7 @@ mod tests {
         assert!(!m.is_suppressed("deprecated-command", second, second + 3));
     }
 
-    /// Region scope, which the retired family never had.
+    /// Region scope.
     #[test]
     fn lint_region_suppresses_one_rule_between_its_markers() {
         let src = "\\bf a\n% tex-ls-lint off deprecated-command\n\\bf b\n\
@@ -173,23 +171,6 @@ mod tests {
         let m = map_of(src);
         let at = src.find("\\bf").expect("has \\bf");
         assert!(!m.is_suppressed("deprecated-command", at, at + 3));
-    }
-
-    /// The retired spellings keep working — deprecated in the docs, not in
-    /// behavior. Deleting these tests is how the promise quietly breaks.
-    #[test]
-    fn retired_ignore_family_still_suppresses() {
-        let node = map_of("% tex-ls-ignore deprecated-command: legacy\n\\bf\n");
-        let at = "% tex-ls-ignore deprecated-command: legacy\n".len();
-        assert!(node.is_suppressed("deprecated-command", at, at + 3));
-        assert!(!node.is_suppressed("duplicate-label", at, at + 3));
-
-        let file_rule = map_of("% tex-ls-ignore-file deprecated-command: legacy\n\\bf\n");
-        assert!(file_rule.is_suppressed("deprecated-command", 0, 1));
-        assert!(!file_rule.is_suppressed("duplicate-label", 0, 1));
-
-        let file_all = map_of("% tex-ls-ignore-file: noisy\n\\bf\n");
-        assert!(file_all.is_suppressed("anything", 0, 1));
     }
 
     #[test]

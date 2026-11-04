@@ -59,9 +59,6 @@ impl PartialEq for ParseCtx {
 
 impl Eq for ParseCtx {}
 
-/// Backward-compatible alias for [`ParseCtx`].
-pub type VerbCtx = ParseCtx;
-
 impl ParseCtx {
     pub(super) fn has_environment_name_length(&self, length: usize) -> bool {
         self.environment_name_lengths.contains(&length)
