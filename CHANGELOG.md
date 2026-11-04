@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## [0.1.6](https://github.com/backmatter/tex-ls/compare/v0.1.5...v0.1.6) - 2026-11-04
+
+### Added
+- Find Shipout and texe build artifacts without configuration
+
+### Changed
+- Keep automatic releases in tex-ls
+
+### Fixed
+- Look for texe output only in the nearest texe project
+
 ## [0.1.5](https://github.com/backmatter/tex-ls/compare/v0.1.4...v0.1.5) - 2026-10-28
 
 ### Fixed
