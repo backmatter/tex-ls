@@ -23,8 +23,8 @@ updates Cargo metadata. Review the final synchronized commit and wait for CI
 before squash-merging the release PR.
 
 Merging the release PR creates a tag and draft GitHub release. Release automation starts
-the binary workflow. Publish the draft only after all six platform builds pass
-and their assets and checksums are attached. For an existing tag and release:
+the binary workflow, which publishes the draft automatically after all six platform
+builds pass and their assets and checksums are attached. For an existing tag and release:
 
 ```sh
 gh workflow run binaries.yml -f tag=v0.1.0
@@ -58,7 +58,7 @@ executable in a VSIX for `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64
 Tags that predate the extension skip this packaging step.
 
 VSIX files join the existing release assets and checksum manifest. Publishing the
-stable GitHub release triggers the Publish VS Code extension workflow, which
+stable GitHub release automatically dispatches the Publish VS Code extension workflow, which
 downloads all six VSIX files, verifies their release checksums, and uploads them
 to the VS Code Marketplace. The Check workflow runs unit tests
 and real VS Code integration tests on Linux, macOS, and Windows. See the
@@ -119,28 +119,25 @@ in a clean profile. Manual uploads remain available through the
 [Marketplace publisher management page](https://marketplace.visualstudio.com/manage/publishers/backmatter).
 Microsoft documents
 [platform-specific extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platformspecific-extensions).
-Marketplace publication follows GitHub release publication; uploading assets to
-a draft release alone does not trigger it.
+The binary workflow explicitly dispatches Marketplace publication after publishing
+the GitHub release because releases published with `GITHUB_TOKEN` do not trigger
+`release: published` workflows. Manually published releases also trigger it.
 
 ## Homebrew
 
 The formula lives in [backmatter/homebrew-tap](https://github.com/backmatter/homebrew-tap).
-After the archives are published, download their checksum file and generate the
-formula in a local checkout of that repository:
-
-```sh
-gh release download v0.1.0 --pattern SHA256SUMS --dir /tmp/tex-ls-release
-python3 scripts/render_homebrew_formula.py v0.1.0 /tmp/tex-ls-release/SHA256SUMS > /path/to/homebrew-tap/Formula/tex-ls.rb
-```
-
-Review and commit the formula. The tap tests installation and `brew test` on
-Linux and macOS, on x86-64 and ARM64. Users install with
-`brew install backmatter/tap/tex-ls`.
+Its daily Update tex-ls workflow (also available through `workflow_dispatch`) reads
+the latest published stable release, checks out tex-ls at that tag, and renders the
+formula using the release's `SHA256SUMS`. It commits newer versions to `main` and
+explicitly starts Test formula with the repository's `GITHUB_TOKEN`. The tap tests
+installation and `brew test` on Linux and macOS, on x86-64 and ARM64. Users install
+with `brew install backmatter/tap/tex-ls`.
 
 ## Mason
 
 The package lives in [backmatter/mason-registry](https://github.com/backmatter/mason-registry).
-Update the version in `packages/tex-ls/package.yaml` after publishing binaries.
-Changes on `main` publish a registry archive through Mason's registry-release
-action. Test a registry update with an isolated Neovim/Mason installation before
-publishing it. The editor guide documents the registry setup and LSP command.
+Its daily Update tex-ls workflow (also available through `workflow_dispatch`) bumps
+`packages/tex-ls/package.yaml` only when a newer published stable release exists,
+commits to `main`, and explicitly starts Publish registry. Both repositories use
+only their own `GITHUB_TOKEN`; explicit dispatches ensure downstream workflows run
+after bot commits. The editor guide documents the registry setup and LSP command.

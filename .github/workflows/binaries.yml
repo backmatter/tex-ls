@@ -104,6 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: write
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -119,3 +120,8 @@ jobs:
         run: |
           gh release view "$RELEASE_TAG"
           gh release upload "$RELEASE_TAG" dist/*
+      - name: Publish release
+        run: gh release edit "$RELEASE_TAG" --draft=false --latest
+      # Publishing with GITHUB_TOKEN does not trigger release: published workflows.
+      - name: Publish VS Code extension
+        run: gh workflow run marketplace.yml --ref main -f "tag=$RELEASE_TAG"
